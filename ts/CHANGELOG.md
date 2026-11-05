@@ -7,6 +7,10 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- Voice bot example: `talkToBot` follows the bot's newest generation (#442). The Python bot now publishes through a
+  supervised publisher, one generation below `botNamespace`, so it survives a lost connection. The page finds the
+  newest generation with namespace discovery and moves to each new one, calling `onListening` again. A page copied
+  from an earlier version listens at `botNamespace` itself and does not hear this bot.
 - `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
   rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
   so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only

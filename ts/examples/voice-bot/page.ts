@@ -77,6 +77,8 @@ talk.addEventListener('click', async () => {
       context,
       stream,
       onListening(listener: AudioListener) {
+        // Called again when the bot reconnects: the new listener replaces the old one's stats.
+        clearInterval(stats);
         playing = listener;
         say('the bot is on: say something, pause, and it answers; talk over it and it stops');
         stats = setInterval(() => {

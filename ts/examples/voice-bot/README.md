@@ -39,8 +39,13 @@ await talkToBot(publisher, subscriber, {
 - Because the catalog lists the transcript track, the listener keeps the bot's
   [transcript](../../../spec/media-layer.md#transcript-track): `listener.transcript.linesAt(listener.clock.position())`
   is what the bot has said so far, each line marked `cut` where it was talked over.
-- The bot can start before or after the page: until its catalog arrives, `talkToBot` retries every
-  second and reports each failed attempt to `onError`.
+- `botNamespace` is the bot's root. The bot publishes through a supervised publisher, which serves
+  each connection as a new generation one field below the root. `talkToBot` finds the newest one with
+  namespace discovery (`subscriber.namespaceEvents`) and plays it. When the bot reconnects, the page
+  stops the old listener, plays the new generation, and calls `onListening` again with the new
+  listener.
+- The bot can start before or after the page. Until a generation's catalog arrives, `talkToBot`
+  retries every second and reports each failed attempt to `onError`.
 
 ## Run it
 

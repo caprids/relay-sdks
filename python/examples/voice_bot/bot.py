@@ -3,8 +3,10 @@ back. When the user talks over it, it stops and sends an interrupt, so the user'
 
     RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace mattypoo/voice-bot
 
-The user's page publishes its microphone at ``<namespace>/user`` and the bot answers at ``<namespace>/bot``, with an
-Opus ``audio`` track and the ``interrupt`` and ``transcript`` tracks listed in its catalog. Speech-to-text, a language
+The user's page publishes its microphone at ``<namespace>/user`` and the bot answers one generation below
+``<namespace>/bot``, with an Opus ``audio`` track and the ``interrupt`` and ``transcript`` tracks listed in its catalog.
+The bot's publisher is supervised: when its connection is lost, it reconnects as a new generation, and the page moves to
+it. Speech-to-text, a language
 model and text-to-speech plug in through one async function, :data:`Respond`: it gets what the user said as PCM and
 yields the reply as PCM, with the text of each part before it. The default, :func:`parrot`, says the user's words
 back. Voice activity detection is an energy gate in this example, not SDK code.
@@ -29,15 +31,17 @@ import numpy as np
 
 from caprid_relay import (
     DEFAULT_ENDPOINT,
-    RelayPublisher,
+    PublisherGeneration,
     RelayTrackWriter,
     RestartReason,
+    SupervisedPublisher,
+    SupervisedStatus,
     SupervisedSubscriber,
-    connect_relay_publisher,
+    connect_supervised_publisher,
     connect_supervised_subscriber,
     room_endpoint,
 )
-from caprid_relay.media import CatalogService, FrameReader, FrameWriter, media_track_properties
+from caprid_relay.media import DocumentService, FrameReader, FrameWriter, media_track_properties
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
@@ -402,20 +406,43 @@ def bot_catalog(namespace: Sequence[str]) -> bytes:
     )
 
 
+async def serve_catalog(track: RelayTrackWriter, publisher: SupervisedPublisher) -> None:
+    """Serve each generation of the bot its own catalog, until cancelled or the track ends.
+
+    Each generation is a new broadcast at its own namespace, which the catalog names. The track's demand reports
+    ``True`` again when a new generation's viewers subscribe, and by then ``publisher.generation`` names it.
+    """
+    service = DocumentService(track)
+    serving = asyncio.ensure_future(service.serve())
+    try:
+        async for demanded in track.demand_changes():
+            generation = publisher.generation
+            if demanded and generation is not None:
+                document = bot_catalog(generation.namespace)
+                if document != service.document:
+                    service.update(document)
+            if serving.done():
+                break
+        await serving  # Raises the error that ended the catalog track, if a write saw one.
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
 async def run_bot(
-    publisher: RelayPublisher,
+    publisher: SupervisedPublisher,
     subscriber: SupervisedSubscriber,
     *,
     user_namespace: Sequence[str],
-    bot_namespace: Sequence[str],
     respond: Respond = parrot,
     gate: EnergyGate | None = None,
     log: Log,
 ) -> None:
-    """Answer the user at ``user_namespace`` from ``publisher``, whose namespace is ``bot_namespace``, until cancelled.
+    """Answer the user at ``user_namespace`` from ``publisher`` until cancelled.
 
     The subscriber keeps the user's audio track wanted across page reloads, so the bot can start first. The publisher
-    is not supervised: when its connection closes or a track ends, this raises.
+    is supervised, so the bot outlives a lost connection: its writers move to the next generation, and the user's page
+    follows. This raises only when the supervisor stops, or a track ends.
     """
     gate = gate or EnergyGate(rate=16_000)
     catalog_track = publisher.register_track(CATALOG_TRACK, track_properties=loc_track_properties())
@@ -424,7 +451,6 @@ async def run_bot(
     )
     interrupt_track = publisher.register_track(INTERRUPT_TRACK, track_properties=loc_track_properties())
     transcript_track = publisher.register_track(TRANSCRIPT_TRACK, track_properties=loc_track_properties())
-    catalog = CatalogService(catalog_track, bot_catalog(bot_namespace))
     clock = BroadcastClock()
     writer = reply_writer(audio_track, clock)
     speaker = Speaker(writer, interrupt_track, transcript_track, clock, rate=gate.rate, log=log)
@@ -447,15 +473,15 @@ async def run_bot(
             on_restarted=restarted,
         ),
     )
-    serving = asyncio.ensure_future(catalog.serve())
+    serving = asyncio.ensure_future(serve_catalog(catalog_track, publisher))
     listening = asyncio.ensure_future(bot.listen(reader))
     closed = asyncio.ensure_future(publisher.closed)
     try:
         await asyncio.wait([serving, listening, closed], return_when=asyncio.FIRST_COMPLETED)
         if closed.done():
-            raise closed.result().error or RuntimeError("The bot's publisher connection closed")
+            raise closed.result().error or RuntimeError("The bot's publisher closed")
         if serving.done():
-            serving.result()  # Raises the error that ended the catalog track, if a write saw one.
+            serving.result()
             raise RuntimeError("The bot's catalog track ended")
         listening.result()
     finally:
@@ -533,16 +559,31 @@ def parse_args(argv: list[str]) -> Config:
 async def run(config: Config, log: Log) -> None:
     user_namespace = [*config.namespace, "user"]
     bot_namespace = [*config.namespace, "bot"]
-    publisher = await connect_relay_publisher(config.url, namespace=bot_namespace, get_token=lambda: config.token)
+
+    def generation_up(generation: PublisherGeneration) -> None:
+        log("publishing", {"bot": "/".join(generation.namespace)})
+
+    def status_changed(status: SupervisedStatus, error: BaseException | None) -> None:
+        if status == "reconnecting":
+            log("reconnecting", {"error": error and f"{type(error).__name__}: {error}"})
+
+    # The supervisor reconnects a lost connection as the next generation rather than ending the bot. That includes an
+    # event loop held up past the relay's 10 s idle timeout, as by a blocking call in `respond`.
+    publisher = await connect_supervised_publisher(
+        config.url,
+        namespace=bot_namespace,
+        get_token=lambda: config.token,
+        on_generation=generation_up,
+        on_status=status_changed,
+    )
     try:
         subscriber = await connect_supervised_subscriber(config.url, get_token=lambda: config.token)
         try:
-            log("listening", {"user": "/".join(user_namespace), "bot": "/".join(bot_namespace)})
+            log("listening", {"user": "/".join(user_namespace)})
             await run_bot(
                 publisher,
                 subscriber,
                 user_namespace=user_namespace,
-                bot_namespace=bot_namespace,
                 gate=EnergyGate(rate=16_000, threshold_dbfs=config.threshold_dbfs),
                 log=log,
             )

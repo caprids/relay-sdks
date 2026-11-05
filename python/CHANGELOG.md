@@ -6,6 +6,10 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- Voice bot example: the bot publishes through `connect_supervised_publisher` (#442), so a lost connection no longer
+  ends it. It reconnects as a new generation under `<namespace>/bot` and answers the next utterance; the voice bot
+  page follows it. `run_bot` takes the `SupervisedPublisher` and no longer takes `bot_namespace`. Each generation gets a
+  catalog naming its own namespace. The README adds an install without mise and a note for scripted talkers.
 - `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
   rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
   encoder's next scheduled keyframe. The open group still finishes on the old generation.

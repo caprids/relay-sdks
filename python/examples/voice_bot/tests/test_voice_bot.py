@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import json
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, cast
@@ -14,16 +15,19 @@ from relay_helpers.relay_hub import create_relay_hub
 from voice_bot.bot import EnergyGate, Speaker, Utterance, parrot, reply_writer, run_bot
 
 from caprid_relay import (
+    ConnectingTransport,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
     connect_relay_publisher,
     connect_relay_subscriber,
+    connect_supervised_publisher,
     connect_supervised_subscriber,
 )
 from caprid_relay.media import FrameWriter
 from moq_core import KeyValuePair, MoqtObject
 from moq_media import (
     AUDIO_TRACK,
+    CATALOG_TRACK,
     INTERRUPT_TRACK,
     OPUS_FRAME_US,
     TRANSCRIPT_TRACK,
@@ -326,12 +330,10 @@ async def test_the_reply_writer_drops_a_packet_a_stalled_write_held_back() -> No
 async def test_the_bot_stops_when_its_publisher_closes(cleanup: Cleanup) -> None:
     hub = create_relay_hub()
     cleanup.append(hub.destroy)
-    publisher = await connect_relay_publisher(URL, namespace=BOT, create_transport=hub.connect_publisher)
+    publisher = await connect_supervised_publisher(URL, namespace=BOT, create_transport=hub.connect_publisher)
     subscriber = await connect_supervised_subscriber(URL, create_transport=hub.connect_subscriber)
     cleanup.extend([subscriber.close, publisher.close])
-    bot = asyncio.create_task(
-        run_bot(publisher, subscriber, user_namespace=USER, bot_namespace=BOT, log=lambda *_: None)
-    )
+    bot = asyncio.create_task(run_bot(publisher, subscriber, user_namespace=USER, log=lambda *_: None))
     await asyncio.sleep(0.05)
     assert not bot.done()
     await publisher.close()
@@ -339,56 +341,89 @@ async def test_the_bot_stops_when_its_publisher_closes(cleanup: Cleanup) -> None
     assert bot.exception() is not None
 
 
-async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_over(cleanup: Cleanup) -> None:
-    # The hub serves one broadcast, so each side's broadcast gets its own; a relay would serve both.
-    user_hub, bot_hub = create_relay_hub(), create_relay_hub()
-    cleanup.extend([user_hub.destroy, bot_hub.destroy])
-    user = await connect_relay_publisher(URL, namespace=USER, create_transport=user_hub.connect_publisher)
-    bot_publisher = await connect_relay_publisher(URL, namespace=BOT, create_transport=bot_hub.connect_publisher)
-    bot_subscriber = await connect_supervised_subscriber(URL, create_transport=user_hub.connect_subscriber)
-    listener = await connect_relay_subscriber(URL, create_transport=bot_hub.connect_subscriber)
-    cleanup.extend([listener.close, bot_subscriber.close, bot_publisher.close, user.close])
+class Conversation:
+    """The bot over the in-memory hubs, with a talker for the user's microphone and a listener on the bot's tracks."""
 
-    # The user's side: a microphone, and a listener on the bot's audio and interrupt tracks.
-    microphone = user.register_track(AUDIO_TRACK, track_properties=loc_track_properties())
-    heard: list[MoqtObject] = []
-    interrupts: list[Interrupt] = []
-    segments: list[TranscriptSegment] = []
-    listener.subscribe(BOT, AUDIO_TRACK, RelaySubscriptionHandlers(on_object=heard.append))
-    listener.subscribe(
-        BOT,
-        TRANSCRIPT_TRACK,
-        RelaySubscriptionHandlers(on_object=lambda obj: segments.append(parse_transcript_segment(obj.payload))),
-    )
-    listener.subscribe(
-        BOT,
-        INTERRUPT_TRACK,
-        RelaySubscriptionHandlers(on_object=lambda obj: interrupts.append(parse_interrupt(obj.payload))),
-    )
+    def __init__(self) -> None:
+        self.heard: list[MoqtObject] = []
+        self.interrupts: list[Interrupt] = []
+        self.segments: list[TranscriptSegment] = []
+        self.catalogs: list[dict[str, Any]] = []
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.bot_transports: list[ConnectingTransport] = []
+        """Each connection the bot's publisher opened, so a test can drop one."""
 
-    events: list[tuple[str, dict[str, Any]]] = []
-    bot = asyncio.create_task(
-        run_bot(
-            bot_publisher,
-            bot_subscriber,
-            user_namespace=USER,
-            bot_namespace=BOT,
-            gate=EnergyGate(rate=16_000, hangover_ms=300),
-            log=lambda event, fields: events.append((event, fields)),
+    async def start(self, cleanup: Cleanup) -> None:
+        # The hub serves one broadcast, so each side's broadcast gets its own; a relay would serve both. It matches
+        # tracks by name, so the listener on BOT hears every generation the bot's supervised publisher serves under it.
+        user_hub, bot_hub = create_relay_hub(), create_relay_hub()
+        cleanup.extend([user_hub.destroy, bot_hub.destroy])
+
+        def connect_bot(url: str, protocols: Sequence[str]) -> ConnectingTransport:
+            connecting = bot_hub.connect_publisher(url, protocols)
+            self.bot_transports.append(connecting)
+            return connecting
+
+        user = await connect_relay_publisher(URL, namespace=USER, create_transport=user_hub.connect_publisher)
+        self.bot_publisher = await connect_supervised_publisher(URL, namespace=BOT, create_transport=connect_bot)
+        bot_subscriber = await connect_supervised_subscriber(URL, create_transport=user_hub.connect_subscriber)
+        listener = await connect_relay_subscriber(URL, create_transport=bot_hub.connect_subscriber)
+        cleanup.extend([listener.close, bot_subscriber.close, self.bot_publisher.close, user.close])
+
+        # The user's side: a microphone, and a listener on the bot's tracks.
+        microphone = user.register_track(AUDIO_TRACK, track_properties=loc_track_properties())
+        listener.subscribe(BOT, AUDIO_TRACK, RelaySubscriptionHandlers(on_object=self.heard.append))
+        listener.subscribe(
+            BOT,
+            TRANSCRIPT_TRACK,
+            RelaySubscriptionHandlers(
+                on_object=lambda obj: self.segments.append(parse_transcript_segment(obj.payload))
+            ),
         )
+        listener.subscribe(
+            BOT,
+            INTERRUPT_TRACK,
+            RelaySubscriptionHandlers(on_object=lambda obj: self.interrupts.append(parse_interrupt(obj.payload))),
+        )
+        listener.subscribe(
+            BOT,
+            CATALOG_TRACK,
+            RelaySubscriptionHandlers(on_object=lambda obj: self.catalogs.append(json.loads(obj.payload))),
+        )
+
+        self.bot = asyncio.create_task(
+            run_bot(
+                self.bot_publisher,
+                bot_subscriber,
+                user_namespace=USER,
+                gate=EnergyGate(rate=16_000, hangover_ms=300),
+                log=lambda event, fields: self.events.append((event, fields)),
+            )
+        )
+
+        async def stop_bot() -> None:
+            self.bot.cancel()
+            await asyncio.gather(self.bot, return_exceptions=True)
+
+        cleanup.append(stop_bot)
+        await wait_for(lambda: microphone.has_demand)
+        self.talker = Talker(microphone)
+        cleanup.append(self.talker.close)
+
+    def said(self, event: str) -> int:
+        return sum(1 for name, _ in self.events if name == event)
+
+
+async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_over(cleanup: Cleanup) -> None:
+    conversation = Conversation()
+    await conversation.start(cleanup)
+    talker, heard, interrupts, segments = (
+        conversation.talker,
+        conversation.heard,
+        conversation.interrupts,
+        conversation.segments,
     )
-
-    async def stop_bot() -> None:
-        bot.cancel()
-        await asyncio.gather(bot, return_exceptions=True)
-
-    cleanup.append(stop_bot)
-    await wait_for(lambda: microphone.has_demand)
-    talker = Talker(microphone)
-    cleanup.append(talker.close)
-
-    def said(event: str) -> int:
-        return sum(1 for name, _ in events if name == event)
+    said = conversation.said
 
     # One second of speech, then a pause: the bot says it back.
     talker.loud = True
@@ -431,3 +466,36 @@ async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_o
     assert (second_text.seq, second_text.from_us) == (first_text.seq + 1, loc_timestamp_us(second[0].properties))
     assert (second_final.seq, second_final.final) == (second_text.seq, True)
     assert second_final.until_us == (loc_timestamp_us(second[-1].properties) or 0) + OPUS_FRAME_US
+
+
+async def test_the_bot_answers_the_next_utterance_after_its_publisher_loses_its_connection(cleanup: Cleanup) -> None:
+    conversation = Conversation()
+    await conversation.start(cleanup)
+    talker, heard, said = conversation.talker, conversation.heard, conversation.said
+    publisher = conversation.bot_publisher
+    first = publisher.generation
+    assert first is not None
+
+    talker.loud = True
+    await asyncio.sleep(0.6)
+    talker.loud = False
+    await wait_for(lambda: said("replied") == 1, timeout=4)
+
+    # The connection under the bot's publisher goes, as a lost path or an idle timeout takes it.
+    conversation.bot_transports[-1].transport.close(0, "test: connection lost")
+    await wait_for(lambda: publisher.generation is not None and publisher.generation != first, timeout=5)
+    assert not conversation.bot.done()
+    second = publisher.generation
+    assert second is not None
+    assert second.namespace == (*BOT, second.generation)
+
+    # The next utterance is answered on the new generation, whose catalog names its own namespace.
+    before = len(heard)
+    talker.loud = True
+    await asyncio.sleep(0.6)
+    talker.loud = False
+    await wait_for(lambda: said("utterance") == 2 and said("replied") == 2, timeout=5)
+    await wait_for(lambda: len(heard) >= before + 10, timeout=3)
+    namespaces = {track["namespace"] for catalog in conversation.catalogs for track in catalog["tracks"]}
+    assert "/".join(second.namespace) in namespaces
+    assert not conversation.bot.done()
