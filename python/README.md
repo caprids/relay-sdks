@@ -920,15 +920,15 @@ subscribing under the other's.
 ```python
 import asyncio
 import json
+import time
 
 from caprid_relay import (
     MessageParameters,
-    WantHandlers,
     connect_relay_publisher,
     connect_supervised_subscriber,
     read_json,
 )
-from caprid_relay.media import DocumentService
+from caprid_relay.media import DocumentService, LatestValueReader
 
 # On the robot.
 publisher = await connect_relay_publisher(url, namespace=["room", "robot"], get_token=get_token)
@@ -945,30 +945,22 @@ async def report() -> None:
 reporting = asyncio.create_task(report())
 
 subscriber = await connect_supervised_subscriber(url, get_token=get_token)
-newest = -1  # the newest control group applied
-
-
-def on_control(obj) -> None:
-    global newest
-    if obj.group_id <= newest:
-        return  # superseded: a newer value already arrived
-    newest = obj.group_id
-    apply_control(read_json(obj))
-
-
-def on_new_numbering(*_args) -> None:
-    global newest
-    newest = -1  # the new subscription numbers its groups afresh
-
-
+control = LatestValueReader(
+    lambda obj: apply_control(read_json(obj)),
+    late=lambda obj: time.time() - read_json(obj)["sent_at"] > 0.5,
+    on_catch_up=lambda: subscriber.catch_up("control"),
+)
 subscriber.want(
     "control",
     ["room", "cockpit"],
     "control",
-    WantHandlers(on_object=on_control, on_restarted=on_new_numbering, on_switched=on_new_numbering, on_error=on_error),
+    control.want_handlers(on_error=on_error),
     parameters=MessageParameters(subscriber_priority=0),
 )
 ```
+
+The reader delivers a value only when it is newer than every value before it. The `late` and
+`on_catch_up` arguments are optional. The next section explains them.
 
 ### Latest-wins values
 
@@ -999,14 +991,18 @@ Delivery timeouts do not change this. The relay ignores the subscriber's, and th
 bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
 So the viewer does the dropping:
 
-- Ignore any group older than the newest one applied, as in the example above. Group IDs rise within
-  one subscription. They start over when a want restarts or moves to a new generation, so reset the
-  marker in `on_restarted` and `on_switched`.
-- To know when a value is too old to act on, put the time it was taken in the payload. Comparing
-  that time with the viewer's clock assumes the two machines' clocks agree. When every value arrives
-  too late, call `unwant(key)` and `want(...)` again. The new subscription starts at the relay's
-  latest group, so the relay's backlog is skipped. `stale_after` does not help here, because a
-  backlog is not silence.
+- `caprid_relay.media.LatestValueReader` drops any value older than the newest one it has seen, as
+  in the example above. Group IDs rise within one subscription and start over when a want restarts
+  or moves to a new generation, so the reader starts over there too. Pass its `want_handlers(...)`,
+  with your own callbacks as keyword arguments, and keep the want's `drain` at 0.
+- To know when a value is too old to act on, put the time it was taken in the payload and pass a
+  `late` predicate. Comparing that time with the viewer's clock assumes the two machines' clocks
+  agree. The reader drops a late value. On the first late value after a value it delivered, it calls
+  `on_catch_up`. Set the limit above the lateness the viewer's link can reach. Below it, the values after a
+  catch-up are late too, and the reader delivers nothing until the link speeds up. There, call the supervised subscriber's `catch_up(key)`. It replaces the
+  subscription at the live edge, which drops the relay's backlog, and runs `on_restarted` with reason
+  `"catch-up"`. `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
+  `stale_after` does not help here, because a backlog is not silence.
 - Give control and telemetry a subscriber priority ahead of the video on the same connection. The
   relay orders what it sends you by your subscriber priority alone, where a lower number is more
   urgent ([measured](../spec/relay-interop.md#subscription-parameters)).
@@ -1028,12 +1024,14 @@ The publisher and the viewer set different things, under similar names:
 | --- | --- | --- |
 | `PlayoutClock(target_latency_us=...)` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `late_drop_us` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
 | Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the `FrameSequencer` re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
+| `late` with `on_catch_up` on `LatestValueReader` | viewer | Drops values your predicate calls late, and on the first one calls `on_catch_up`, where `catch_up(key)` replaces the subscription at the live edge. The want restarts with reason `"catch-up"` ([latest-wins values](#latest-wins-values)). |
 | `stale_after` on `want` | viewer | Resubscribes a track that has been silent that many seconds. The want restarts with reason `"stale"`. Use it only for tracks that are never silent while live. |
 | `media_track_properties(kind, target_latency_us=...)` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
 | Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
 
 The TypeScript sequencer can also ask to catch up when frames keep arriving late
-(`catchUpAfterUs` with `catchUp(key)`). Python has neither yet.
+(`catchUpAfterUs` with `catchUp(key)`). The Python sequencer cannot yet, but `catch_up(key)` on a
+supervised subscriber is there to call.
 
 ## Errors and recovery
 
