@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import math
 import os
 import sys
@@ -42,7 +43,7 @@ from caprid_relay import (
     connect_supervised_subscriber,
     room_endpoint,
 )
-from caprid_relay.media import DocumentService, FrameReader, FrameWriter, media_track_properties
+from caprid_relay.media import CatalogService, FrameReader, FrameWriter, media_track_properties
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
@@ -404,36 +405,23 @@ def reply_writer(track: RelayTrackWriter, clock: BroadcastClock) -> FrameWriter[
     return FrameWriter(track, grouping="frame", stale=lambda packet: clock.now_us() - packet.timestamp_us > _STALE_US)
 
 
-def bot_catalog(namespace: Sequence[str]) -> bytes:
-    """The bot's catalog: mono Opus, the interrupt track a listener cuts on, and the transcript of the bot's audio."""
-    return build_msf_catalog(
-        namespace,
-        audio=AudioTrackInfo(channel_config="1", bitrate=32_000),
-        data=[DataTrackInfo(name=INTERRUPT_TRACK), DataTrackInfo(name=TRANSCRIPT_TRACK)],
-    )
+def bot_catalog() -> bytes:
+    """The bot's catalog: mono Opus, the interrupt track a listener cuts on, and the transcript of the bot's audio.
 
-
-async def serve_catalog(track: RelayTrackWriter, publisher: SupervisedPublisher) -> None:
-    """Serve each generation of the bot its own catalog, until cancelled or the track ends.
-
-    Each generation is a new broadcast at its own namespace, which the catalog names. The track's demand reports
-    ``True`` again when a new generation's viewers subscribe, and by then ``publisher.generation`` names it.
+    Its tracks name no namespace, so each is in the catalog track's own (msf-01). Every generation of the supervised
+    publisher has its own namespace, and this one document is right on all of them, including on the old generation
+    while a rotation moves the tracks.
     """
-    service = DocumentService(track)
-    serving = asyncio.ensure_future(service.serve())
-    try:
-        async for demanded in track.demand_changes():
-            generation = publisher.generation
-            if demanded and generation is not None:
-                document = bot_catalog(generation.namespace)
-                if document != service.document:
-                    service.update(document)
-            if serving.done():
-                break
-        await serving  # Raises the error that ended the catalog track, if a write saw one.
-    finally:
-        serving.cancel()
-        await asyncio.gather(serving, return_exceptions=True)
+    catalog = json.loads(
+        build_msf_catalog(
+            ["bot"],  # Removed below: the builder always names one.
+            audio=AudioTrackInfo(channel_config="1", bitrate=32_000),
+            data=[DataTrackInfo(name=INTERRUPT_TRACK), DataTrackInfo(name=TRANSCRIPT_TRACK)],
+        )
+    )
+    for track in catalog["tracks"]:
+        del track["namespace"]
+    return json.dumps(catalog, separators=(",", ":")).encode()
 
 
 async def run_bot(
@@ -458,6 +446,7 @@ async def run_bot(
     )
     interrupt_track = publisher.register_track(INTERRUPT_TRACK, track_properties=loc_track_properties())
     transcript_track = publisher.register_track(TRANSCRIPT_TRACK, track_properties=loc_track_properties())
+    catalog = CatalogService(catalog_track, bot_catalog())
     clock = BroadcastClock()
     writer = reply_writer(audio_track, clock)
     speaker = Speaker(writer, interrupt_track, transcript_track, clock, rate=gate.rate, log=log)
@@ -480,7 +469,7 @@ async def run_bot(
             on_restarted=restarted,
         ),
     )
-    serving = asyncio.ensure_future(serve_catalog(catalog_track, publisher))
+    serving = asyncio.ensure_future(catalog.serve())
     listening = asyncio.ensure_future(bot.listen(reader))
     closed = asyncio.ensure_future(publisher.closed)
     try:
@@ -488,7 +477,7 @@ async def run_bot(
         if closed.done():
             raise closed.result().error or RuntimeError("The bot's publisher closed")
         if serving.done():
-            serving.result()
+            serving.result()  # Raises the error that ended the catalog track, if a write saw one.
             raise RuntimeError("The bot's catalog track ended")
         listening.result()
     finally:

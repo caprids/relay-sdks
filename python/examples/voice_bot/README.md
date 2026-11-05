@@ -120,7 +120,8 @@ pause detection sees each one end. `Talker` in [the tests](tests/test_voice_bot.
 - **Staying up.** The bot publishes through `connect_supervised_publisher`. When the connection is
   lost, the bot's writers raise `RECONNECTING` until the next generation is up, and then move to it.
   The frame writer counts those packets as interrupted and carries on. Each generation is a new
-  broadcast, so the bot sends each one a catalog with its own namespace. The page finds the newest
+  broadcast at its own namespace. The bot's catalog names no namespace, so each listener reads its
+  tracks as being in the namespace it fetched the catalog from. The page finds the newest
   generation through namespace discovery and moves to it.
 - **Listening.** A supervised subscriber wants the user's `audio` track, so a page that reloads or
   starts late is picked up again. A frame reader with an idle playout clock orders the frames and
@@ -160,7 +161,7 @@ it answers after a pause, interrupts itself when talked over, and every packet o
 lies before the interrupt's `until_us` and every packet of the next at or after it. Each reply's
 transcript segment starts at its first packet, and only the uninterrupted one gets a final version.
 When the connection under the bot's publisher closes, the bot answers the next utterance on the new
-generation, whose catalog names that generation's namespace.
+generation, which serves the same catalog.
 
 Measured on 2026-11-05 against `ord.relay.mux.global`, with the page in headless Chromium on a
 scripted microphone: dropping every packet the bot's publisher received ended its connection with

@@ -12,7 +12,7 @@ import pytest
 from core_helpers.waiting import wait_for
 from relay_helpers.fake_track_writer import FakeGroupWriter, FakeTrackWriter
 from relay_helpers.relay_hub import create_relay_hub
-from voice_bot.bot import EnergyGate, Speaker, Utterance, parrot, reply_writer, run_bot
+from voice_bot.bot import EnergyGate, Speaker, Utterance, bot_catalog, parrot, reply_writer, run_bot
 
 from caprid_relay import (
     ConnectingTransport,
@@ -38,6 +38,7 @@ from moq_media import (
     loc_timestamp_us,
     loc_track_properties,
     parse_interrupt,
+    parse_msf_catalog,
     parse_transcript_segment,
 )
 from moq_media.opus import OpusDecoder, OpusEncoder, OpusPacket
@@ -503,13 +504,21 @@ async def test_the_bot_answers_the_next_utterance_after_its_publisher_loses_its_
     assert second is not None
     assert second.namespace == (*BOT, second.generation)
 
-    # The next utterance is answered on the new generation, whose catalog names its own namespace.
+    # The next utterance is answered on the new generation.
     before = len(heard)
     talker.loud = True
     await asyncio.sleep(0.6)
     talker.loud = False
     await wait_for(lambda: said("utterance") == 2 and said("replied") == 2, timeout=5)
     await wait_for(lambda: len(heard) >= before + 10, timeout=3)
-    namespaces = {track["namespace"] for catalog in conversation.catalogs for track in catalog["tracks"]}
-    assert "/".join(second.namespace) in namespaces
+    # The new generation served the catalog too, the same document, which names no namespace.
+    assert len(conversation.catalogs) >= 2
+    assert all("namespace" not in track for catalog in conversation.catalogs for track in catalog["tracks"])
     assert not conversation.bot.done()
+
+
+def test_the_catalog_lists_the_bots_tracks_in_whichever_namespace_serves_it() -> None:
+    generation = (*BOT, "0mw40kq2jrg7q")
+    tracks = parse_msf_catalog(bot_catalog(), catalog_namespace=generation).tracks
+    assert [track.name for track in tracks] == [AUDIO_TRACK, INTERRUPT_TRACK, TRANSCRIPT_TRACK]
+    assert {tuple(track.namespace) for track in tracks} == {generation}
