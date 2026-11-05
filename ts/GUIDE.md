@@ -27,8 +27,11 @@ subscribe** under its root, the namespace prefix the token grants. Ask your appl
 owner for it. For another Relay deployment, also ask its operator for an HTTPS WebTransport
 endpoint.
 
-The SDK consumes tokens. It does not issue them, and there is no public token signup flow. Do not
-use a Mux API access token in place of a Relay JWT.
+The SDK consumes tokens. It does not issue them. Switchboard does, and calls them Client tokens.
+Sign up at `app.caprid.com`, then mint a Client token through Switchboard's API, or sign one in your
+backend with a signing key. [Credentials](https://www.caprid.com/docs/guides/credentials/) says
+which credential goes where. Only the Client token belongs in a client, and a relay never accepts an
+API key.
 
 A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
 root as the path. A token rooted at `acme/rooms/42` connects to
@@ -81,6 +84,35 @@ short-lived tokens scoped to the namespaces and operations the application needs
 CLI tools redact the supplied token from their own output, but that does not clean the browser's
 console or third-party collectors. Moving authentication off the URL needs a relay protocol change,
 and this SDK does not support it.
+
+### Content Security Policy
+
+A page with a Content Security Policy must allow what the SDK loads and dials. Otherwise the browser
+blocks it, and some of those blocks fail silently:
+
+- **`connect-src`: each relay's `https:` origin, and its `wss:` origin too.** WebTransport dials the
+  `https:` endpoint. [`@caprid/relay-websocket`](#networks-without-udp-qmux-over-websocket) dials
+  `wss://` on the same host and port, so a policy without the `wss:` origin leaves the fallback
+  blocked.
+- **`script-src`: `blob:`.** `@caprid/moq-media`'s audio player loads its `AudioWorklet` module from a
+  `blob:` URL, and the browser checks a worklet's module against `script-src`. Without it,
+  `createAudioPlayer` and `warmAudioPlayer` reject.
+- **`script-src`: `'wasm-unsafe-eval'`.** The audio player compiles libopus from WebAssembly for its
+  loss concealment ([playing audio](#playing-audio)). Without it, the load fails with no error and
+  the player decodes with WebCodecs instead, so lost frames are no longer filled. Only
+  `player.joinPhases.opusLoadedUs === null` shows it.
+- **`worker-src`: `blob:`.** The Huddle demo's policy, which plays audio through the player, lists
+  it beside `script-src`.
+
+A policy for a page that connects to `https://relay.mux.global` and plays audio:
+
+```text
+connect-src 'self' https://relay.mux.global wss://relay.mux.global;
+script-src 'self' blob: 'wasm-unsafe-eval';
+worker-src 'self' blob:
+```
+
+List every regional endpoint the page dials, such as `https://ord.relay.mux.global`, the same way.
 
 ### Install and run
 
@@ -852,17 +884,22 @@ one stream instead of waiting for a FIN on every frame. Pass the first object to
 wait for the stream, which a bare `openGroup()` has no object to charge.
 
 ```ts
+import { RelayError, type RelayGroupWriter } from '@caprid/relay';
+
 const video = publisher.registerTrack({ track: 'video', writeTimeoutMs: 10_000 });
 const lifetime = new AbortController();
-const group = await video.openGroup({ signal: lifetime.signal });
+let group: RelayGroupWriter | undefined;
 try {
+  group = await video.openGroup({ signal: lifetime.signal });
   for (const frame of encodedGop) {
     await group.write(frame.bytes, { properties: frame.properties });
   }
   await group.close();
 } catch (error) {
-  group.abort(error);
-  throw error;
+  group?.abort(error);
+  // The relay replaced or ended its subscription while the group opened or was written, as when the first viewer is
+  // on another relay (below): the group is gone, and the track carries on. Start the next group at the next keyframe.
+  if (!(error instanceof RelayError && error.code === 'SUBSCRIPTION_CHANGED')) throw error;
 }
 ```
 
@@ -1478,9 +1515,10 @@ try {
   on its own. It uses standard streams, has no runtime dependencies, and imports no player, UI, or
   media engine.
 - `@caprid/relay-quic` and `@caprid/relay-websocket` are transport adapters that the application
-  passes as `createTransport`. `@caprid/relay` depends on neither. The WebSocket adapter is the one
-  package with a third-party runtime dependency, `@moq/qmux` at an exact version
-  ([ADR 0005](../docs/adr/0005-websocket-adapter-wraps-moq-qmux.md)).
+  passes as `createTransport`. `@caprid/relay` has neither as a dependency. `@caprid/relay-quic` is
+  an optional peer, which `@caprid/relay/node` loads when no `createTransport` is given. The
+  WebSocket adapter is the one package with a third-party runtime dependency, `@moq/qmux` at an
+  exact version ([ADR 0005](../docs/adr/0005-websocket-adapter-wraps-moq-qmux.md)).
 - `subscriber.trackSource` exposes the generic `MoqTrackSource` contract for player integrations.
   It covers track requests in protocol terms, with the core's `onOk` and `onDone` handler names, and
   closure observation. It has no track listing, and no operation to close the shared connection.

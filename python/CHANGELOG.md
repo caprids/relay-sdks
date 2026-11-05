@@ -6,6 +6,9 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-moq-core`: a FETCH is removed from its session once its data stream has ended (`on_end`) or reset (`on_reset`)
+  and its response has arrived (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it,
+  so its handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
 - Voice bot example: the bot publishes through `connect_supervised_publisher` (#442), so a lost connection no longer
   ends it. It reconnects as a new generation under `<namespace>/bot` and answers the next utterance; the voice bot
   page follows it. `run_bot` takes the `SupervisedPublisher` and no longer takes `bot_namespace`, and `bot_catalog()`
@@ -32,6 +35,14 @@ is in [docs/releasing.md](../docs/releasing.md).
     counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
     re-subscribed about three times a second, receiving the track's last object again each time.
   - A plain subscription is unchanged: it reports the done (`on_publisher_done`) and never subscribes again.
+- Docs only, no code change:
+  - The README points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for
+    Client tokens.
+  - `SequencedFrame.key` is described as set on a group's first frame; under frame grouping that is every frame only
+    when each group holds one.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
 
 ## 0.3.0
 

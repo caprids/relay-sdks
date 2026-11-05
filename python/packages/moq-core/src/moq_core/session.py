@@ -420,6 +420,8 @@ class _SubscriptionRecord(_RequestRecord):
 class _FetchRecord(_RequestRecord):
     handlers: FetchHandlers
     group_order: GroupOrder = "ascending"
+    # The data stream ended or reset. The session forgets the fetch once its request is answered too (#419).
+    data_ended: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1055,7 +1057,7 @@ class MoqtSession:
     def _handle_fetch_message(self, record: _FetchRecord, message: ControlMessage) -> None:
         match message:
             case FetchOk():
-                self._settle_request(record)
+                self._settle_fetch(record)
                 _call(record.handlers.on_ok, message)
             case RequestOk():
                 # Some deployed relays accept a FETCH with the generic REQUEST_OK instead of the
@@ -1064,7 +1066,7 @@ class MoqtSession:
                 # stream. It is still the response, so it has to settle the request: leaving the timer
                 # armed would fail an answered fetch (and drop its data stream) once the deadline
                 # passed.
-                self._settle_request(record)
+                self._settle_fetch(record)
             case RequestError():
                 self._settle_request(record)
                 self._fetches.pop(record.request_id, None)
@@ -1164,6 +1166,12 @@ class MoqtSession:
 
         if record.track_alias is not None and self._alias_routes.get(record.track_alias) is record:
             del self._alias_routes[record.track_alias]
+
+    def _settle_fetch(self, record: _FetchRecord) -> None:
+        """A fetch's response arrived: settle it, and forget it if its data stream has already ended (#419)."""
+        self._settle_request(record)
+        if record.data_ended:
+            self._fetches.pop(record.request_id, None)
 
     def _cancel_fetch(self, record: _FetchRecord, reason: object = None) -> None:
         if record.cancelled:
@@ -1337,6 +1345,14 @@ class MoqtSession:
         except Exception as error:  # a reset mid-replay means entries may be missing
             # Never report it as the clean FIN `on_end` promises.
             _call(record.handlers.on_reset, FetchReset(error=error))
+        finally:
+            # Nothing more arrives for the fetch once its data stream and its response have, so the
+            # session forgets it then (#419): kept, the record's handlers held everything they had
+            # collected for the session's life. Data can beat the response; until the response, or the
+            # request timeout, the record stays for teardown to fail.
+            record.data_ended = True
+            if record.settled:
+                self._fetches.pop(request_id, None)
 
     # --------------------------------------------------------------------------
     # Incoming bidirectional streams (server-initiated requests)
