@@ -229,7 +229,7 @@ it('draws each decoded frame when the clock says it is due, and drops frames aud
   await watcher.stop();
 });
 
-it('keeps at most four decoded frames waiting and drops the oldest past that', async () => {
+it('keeps at most sixteen decoded frames waiting and drops the oldest past that', async () => {
   const fake = fakeSubscriber();
   const clock = clockAtNow();
   const { canvas, drawn } = fakeCanvas();
@@ -238,18 +238,18 @@ it('keeps at most four decoded frames waiting and drops the oldest past that', a
   const watcher = await watching;
   // Audio is half a second behind every frame, and no timer runs, as in a hidden tab.
   clock.reportAudio(timestampOf(0, 0) - 500_000);
-  for (let objectId = 0; objectId < 10; objectId++) decoder().emit(timestampOf(0, objectId));
+  for (let objectId = 0; objectId < 20; objectId++) decoder().emit(timestampOf(0, objectId));
   expect(drawn).toEqual([]);
-  expect(watcher.stats.overflowed).toBe(6);
-  expect(FakeFrame.closed).toBe(6);
-  // The four newest are what is left to draw.
+  expect(watcher.stats.overflowed).toBe(4);
+  expect(FakeFrame.closed).toBe(4);
+  // The sixteen newest are what is left to draw.
   nowUs += 500_000;
-  clock.reportAudio(timestampOf(0, 6));
-  for (let step = 0; step < 4; step++) {
+  clock.reportAudio(timestampOf(0, 4));
+  for (let step = 0; step < 16; step++) {
     await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
     nowUs += FRAME_US;
   }
-  expect(drawn).toEqual([6, 7, 8, 9].map((objectId) => timestampOf(0, objectId)));
+  expect(drawn).toEqual(Array.from({ length: 16 }, (_, index) => timestampOf(0, index + 4)));
   await watcher.stop();
 });
 

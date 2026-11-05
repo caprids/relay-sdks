@@ -12,10 +12,11 @@ import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@
 import { readCatalog } from './read-catalog.js';
 
 /**
- * Decoded frames waiting for their time, at most. A hidden tab throttles timers, so the pump can fall behind the
- * decoder; and a decoder whose output frames the app keeps open can stall once its frame pool is used up.
+ * Decoded frames waiting for their time, at most: a hidden tab throttles timers, so the pump falls behind the decoder,
+ * and a decoder whose frames the app keeps open can stall. Video waits for audio by the audio player's jitter buffer and
+ * output delay, up to about 450 ms, which is 14 frames at 30 fps (4 measured with a 50 ms buffer on a clean network).
  */
-const MAX_DECODED_FRAMES = 4;
+const MAX_DECODED_FRAMES = 16;
 /** Ask the clock again at least this often while a frame waits: an audio report can move its position meanwhile. */
 const CLOCK_RECHECK_MS = 50;
 
