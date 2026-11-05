@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
-from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, until
+from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, FakeSubscription, until
 
 from caprid_relay import (
     CancellationToken,
@@ -33,7 +33,7 @@ from caprid_relay import (
 from caprid_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
 from caprid_relay.supervised_publisher import _supervise_relay_publisher
 from caprid_relay.supervised_subscriber import _supervise_relay_subscriber
-from moq_core import KeyValuePair, MessageParameters, MoqtObject, SubgroupEnd
+from moq_core import KeyValuePair, MessageParameters, MoqtObject, PublishDone, SubgroupEnd
 from moq_core.errors import MoqtProtocolError
 
 FAST = SupervisionBackoff(initial_delay=0, max_delay=0)
@@ -907,6 +907,208 @@ async def test_cached_groups_replayed_newest_first_are_not_progress(cleanup: lis
         s.first.latest.done()
     # The delays keep doubling (0.02-0.04, 0.04-0.08, 0.08-0.16 s): nothing reset the backoff.
     assert started[3] - started[2] >= 0.08
+
+
+async def test_counts_no_status_object_as_progress(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.04, max_delay=1))
+    loop = asyncio.get_running_loop()
+    started: list[float] = []
+    for count in range(1, 5):
+        await until(lambda count=count: len(s.first.subscriptions) == count, f"subscription {count}")
+        started.append(loop.time())
+        # A finished track while its publisher stays connected: the cached last group, the end-of-track status
+        # object one group later, then TRACK_ENDED.
+        subscription = s.first.latest
+        subscription.accept()
+        subscription.send_object(10)
+        assert subscription.handlers.on_object is not None
+        subscription.handlers.on_object(
+            MoqtObject(group_id=11, subgroup_id=0, object_id=0, status="end-of-track", payload=b"")
+        )
+        subscription.done()
+    assert started[3] - started[2] >= 0.08
+
+
+# Waking on the namespace announced again
+
+WAKE_SLOW = SupervisionBackoff(initial_delay=10, max_delay=10)
+
+
+def done_with(subscription: FakeSubscription, status_code: int) -> None:
+    assert subscription.handlers.on_publisher_done is not None
+    subscription.handlers.on_publisher_done(PublishDone(status_code=status_code, stream_count=0, reason="done"))
+
+
+async def test_resubscribes_at_once_when_the_namespace_is_announced_after_a_done(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room", "alice"], "v", r.handlers, retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    assert s.first.discoveries[0].prefix == ("room", "alice")
+    assert len(s.first.subscriptions) == 1
+    # Already announced as the watch starts, after INTERNAL_ERROR: the new publisher.
+    s.first.discoveries[0].push("announced", ["room", "alice"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed on the announcement")
+    assert r.seen.count("restarted publisher-done") == 1
+
+
+async def test_ignores_a_deeper_namespace_under_the_watched_one(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].push("announced", ["room", "bob"])
+    await asyncio.sleep(0.05)
+    assert len(s.first.subscriptions) == 1
+
+
+async def test_after_track_ended_waits_for_the_namespace_to_be_withdrawn_and_announced_again(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].done()  # TRACK_ENDED
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    discovery = s.first.discoveries[0]
+    # Still announced for the publisher that ended the track.
+    discovery.push("announced", ["room"])
+    await asyncio.sleep(0.05)
+    assert len(s.first.subscriptions) == 1
+    discovery.push("unannounced", ["room"])
+    await asyncio.sleep(0.02)
+    assert len(s.first.subscriptions) == 1
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed on the return")
+
+
+async def test_after_track_ended_still_resubscribes_after_the_backoff(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.06, max_delay=0.06))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].done()
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed after the backoff")
+
+
+async def test_holds_one_watch_across_refused_attempts_and_wakes_only_on_a_later_announcement(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    discovery = s.first.discoveries[0]
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "woken")
+    # The announce race: refused, while the namespace stays announced.
+    s.first.subscriptions[1].reject(0x10, "unroutable")
+    await asyncio.sleep(0.05)
+    # The same announcement does not wake the next wait, and no second request was opened.
+    assert len(s.first.subscriptions) == 2
+    assert len(s.first.discoveries) == 1
+    assert not discovery.closed
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 3, "woken again")
+    s.first.subscriptions[2].accept()
+    s.first.subscriptions[2].send_object(1)
+
+
+async def test_does_not_wake_on_what_another_wants_shared_watch_saw_before_its_latest_attempt(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def of(track: str) -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == track]
+
+    subscriber.want("a", ["room"], "a", retry=WAKE_SLOW)
+    await until(lambda: len(of("a")) == 1, "a subscribed")
+    of("a")[0].accept()
+    done_with(of("a")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "a watches the namespace")
+    discovery = s.first.discoveries[0]
+    # Withdrawn and announced again while want a waits: a return the watch saw.
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(of("a")) == 2, "a woken")
+    # Left unanswered, so want a keeps holding the watch.
+    # Want b's first attempt starts after that return; its TRACK_ENDED must wait for a later one.
+    subscriber.want("b", ["room"], "b", retry=WAKE_SLOW)
+    await until(lambda: len(of("b")) == 1, "b subscribed")
+    of("b")[0].accept()
+    of("b")[0].done()
+    await asyncio.sleep(0.05)
+    assert len(of("b")) == 1
+    assert len(s.first.discoveries) == 1
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(of("b")) == 2, "b woken by a later return")
+
+
+async def test_closes_an_unused_overlapping_watch_kept_for_reuse(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def of(track: str) -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == track]
+
+    subscriber.want("x", ["room"], "x", retry=WAKE_SLOW)
+    await until(lambda: len(of("x")) == 1, "x subscribed")
+    of("x")[0].accept()
+    done_with(of("x")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "x watches its namespace")
+    s.first.discoveries[0].push("announced", ["room"])
+    await until(lambda: len(of("x")) == 2, "x woken")
+    # Accepted: want x lets go of the watch, which is kept a moment for reuse.
+    of("x")[1].accept()
+    assert not s.first.discoveries[0].closed
+    subscriber.want("y", ["room", "alice"], "y", retry=WAKE_SLOW)
+    await until(lambda: len(of("y")) == 1, "y subscribed")
+    of("y")[0].accept()
+    done_with(of("y")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 2, "y watches its namespace")
+    assert s.first.discoveries[0].closed
+    assert s.first.discoveries[1].prefix == ("room", "alice")
+
+
+async def test_falls_back_to_the_backoff_when_the_watch_fails(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.06, max_delay=0.06))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].fail(RelayError("overlap", code="PREFIX_OVERLAP"))
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed after the backoff")
+
+
+async def test_the_watch_gives_way_to_a_followed_roots_discovery(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room", "alice"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    subscriber.want("g", ["room"], "g", r.handlers, generations=True, retry=FAST)
+    await until(lambda: len(s.first.discoveries) == 2, "the root discovered")
+    assert s.first.discoveries[0].closed
+    assert s.first.discoveries[1].prefix == ("room",)
+    assert r.errors == []
 
 
 # Make-before-break moves (#282)

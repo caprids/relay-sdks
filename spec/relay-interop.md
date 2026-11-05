@@ -170,6 +170,32 @@ and `internal error` (0) occur, and a crash ends with 0; neither identifies a ne
 generation. Preserve actual errors rather than interpreting all status-0 responses as harmless
 shutdowns.
 
+### On 0.17.9 behind relay.mux.global
+
+Measured on 2026-10-30 through `relay.mux.global` (moq-relay 0.17.9) with Switchboard tokens, Node
+over native QUIC, three runs per case (relay-sdks #402, comment "Validation: following a restart"):
+
+- **Only two done codes were sent.** A clean close of the track or of the session gave done(2)
+  `track ended` 47-134 ms later. A lost publisher connection gave done(0) `internal error`: after a
+  crash (SIGKILL) only at the relay's QUIC idle timeout, 10.8-13.1 s later; after an expired token
+  141-222 ms before the publisher saw its own close. A freeze shorter than the idle timeout sent
+  nothing, and every subscriber resumed when the publisher did.
+- **Nothing reaches a subscriber sooner after a crash.** An always-open SUBSCRIBE_NAMESPACE on the
+  namespace saw neither a withdrawal nor the replacement's announcement before that done.
+- **A track that ends while its publisher stays connected** is replayed on every re-subscribe, as on
+  0.17.0: the cached last group, an end-of-track status object one group later, and done(2). The
+  supervised subscriber up to 0.3.0 counted that status object as progress, so it re-subscribed
+  about three times a second for as long as the publisher stayed (57-60 dones and about 56
+  repeated objects in 20 s). It now waits for the namespace to be announced again
+  ([behavior.md](behavior.md#supervised-subscriber)).
+- **Waking on the announcement.** Once the supervised subscriber's backoff had grown during a long
+  outage, a replacement was picked up 1.6-7.2 s after it announced. Watching the namespace picks it
+  up 60-145 ms after its announcement.
+- **Group IDs.** A replacement publisher that numbers from Group 0 again lost no group to its
+  numbering in 42 runs, at the relay, across the mesh, or in a subscriber (comment "Validation:
+  Group IDs"): each publisher connection is a route of its own, and the next subscription starts on
+  a fresh cache.
+
 ## Duplicate announce
 
 When two publishers announce the same namespace, moq-relay 0.17.0 routes new subscribes to one of
