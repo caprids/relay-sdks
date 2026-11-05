@@ -1839,6 +1839,7 @@ is a subscription's or a want's handlers that deliver only values newer than the
 - An object is judged when its location (group ID, then object ID) comes after every location
   judged since the reader started or last restarted. Any other object is superseded, and the reader
   drops it with no callback.
+  A status object (an end of group or track) carries no value, and the reader ignores it.
 - A judged object goes to the optional `late` predicate. When the predicate returns true, the
   object is dropped as late. Otherwise `onValue` / `on_value` receives it. A late object still
   counts as judged, so an older one that arrives after it is superseded. The predicate is the

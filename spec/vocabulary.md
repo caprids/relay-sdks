@@ -904,10 +904,10 @@ above); `update()` on `CatalogService` (its document is fixed, and the media tim
 changes, gets `DocumentService` instead of a mode). The `register_media` handle in
 [media-layer.md](media-layer.md) remains a proposal.
 
-"Latest-value reader" pairs with the frame reader and with the document service it reads: the
-publisher sends the latest value, and the reader delivers it. "Superseded", not "stale" or "old":
-a newer value was already judged, whatever its age. The predicate is `late`, as the sequencer's
-late drop is: the value arrived too late to act on. Not adopted from
+"Latest-value reader" pairs with the frame reader and with the document service it reads. The
+publisher sends the latest value, and the reader delivers it. "Superseded", not "stale" or "old",
+because a newer value was already judged, whatever its age. The predicate is `late`, as in the
+sequencer's late drop, because the value arrived too late to act on. Not adopted from
 [issue #447](https://github.com/muxinc/relay-sdks/issues/447): `maxAge` (the MoQ Timestamp
 extension's subscription parameter, which a relay acts on); `stale` (a want's `staleAfterMs` is
 silence, not lateness); the reader calling `catchUp` itself (it would need the subscriber and the

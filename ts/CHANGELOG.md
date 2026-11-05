@@ -7,6 +7,12 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay/media`: `createLatestValueReader({ onValue, late, onCatchUp })` reads a latest-wins track, such as
+  telemetry or a control, as its newest values (#447). Spread it into `subscribe` or `want` handlers. It drops an
+  object that arrives after a newer one, drops a value the `late` predicate rejects, and calls `onCatchUp` once when
+  values start arriving late, typically to call a supervised subscriber's `catchUp(key)`. A want's restart or move
+  starts it over. `reader.stats` counts what it delivered and dropped. Before, a viewer kept its own "newest group
+  applied" marker and had no trigger to skip past a relay backlog.
 - `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
   rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
   so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only
