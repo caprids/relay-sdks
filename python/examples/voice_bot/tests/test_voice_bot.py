@@ -16,6 +16,7 @@ from voice_bot.bot import EnergyGate, Speaker, Utterance, parrot, reply_writer, 
 
 from caprid_relay import (
     ConnectingTransport,
+    RelayError,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
     connect_relay_publisher,
@@ -290,6 +291,19 @@ class TestSpeaker:
         await speaker.interrupt()
         (payload,) = interrupts.writes
         assert parse_interrupt(payload).until_us == self.stamps(audio)[-1] + OPUS_FRAME_US
+        assert not speaker.speaking
+
+    async def test_an_interrupt_the_connection_loss_fails_does_not_stop_the_bot(self) -> None:
+        speaker, _, interrupts, events = self.speaker()
+
+        async def reconnecting(_: bytes) -> None:
+            raise RelayError("between connections", code="RECONNECTING", phase="connection")
+
+        interrupts.write = reconnecting  # ty: ignore[invalid-assignment]
+        speaker.say(parrot(Utterance(tone(1600, 16_000), 16_000, 0, 100_000)))
+        await wait_for(lambda: "replied" in events, timeout=3)
+        await speaker.interrupt()
+        assert "interrupt failed" in events
         assert not speaker.speaking
 
     async def test_a_reply_finished_long_ago_is_not_interrupted(self) -> None:

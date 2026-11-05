@@ -32,6 +32,7 @@ import numpy as np
 from caprid_relay import (
     DEFAULT_ENDPOINT,
     PublisherGeneration,
+    RelayError,
     RelayTrackWriter,
     RestartReason,
     SupervisedPublisher,
@@ -229,7 +230,13 @@ class Speaker:
         # Everything sent so far goes; the next reply starts at or after its end, as the interrupt track requires.
         self._cut_until_us = self._sent_until_us
         if self._interrupts.has_demand:
-            await self._interrupts.write(build_interrupt(until_us=self._cut_until_us))
+            try:
+                await self._interrupts.write(build_interrupt(until_us=self._cut_until_us))
+            except RelayError as error:
+                # As when the connection drops under the write (RECONNECTING): the listener that held the audio is on
+                # the old generation, and the bot carries on listening.
+                self._log("interrupt failed", {"error": f"{type(error).__name__}: {error}"})
+                return
         self._log("interrupted", {"untilUs": self._cut_until_us})
 
     async def close(self) -> None:
