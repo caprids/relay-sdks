@@ -249,8 +249,10 @@ example's time-based staleness policy:
 - Calls on one writer are serialized in arrival order, so a callback-driven encoder can call it
   without tracking a pending write. Backpressure is bounded in frames, not groups: Video.js's three
   queued groups are seconds of video, too much for live. When the backlog is full, keyframe grouping
-  drops it with the open group and resumes at the next keyframe, and frame grouping drops the oldest
-  frame. The writer says when it needs a keyframe so the encoder can force one
+  drops it with the open group and resumes at the next keyframe. Frame grouping has no default
+  bound, so it drops no frame for the backlog, and drops the oldest only under a bound the
+  application sets ([behavior.md](behavior.md#media-publishing)). The writer says when it needs a
+  keyframe so the encoder can force one
   ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)). Whether to discard a frame
   because it is late against a clock stays with the application.
 - Each `write` reports what became of its frame: `sent`, `skipped`, `stale`, `dropped`,

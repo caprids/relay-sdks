@@ -35,6 +35,21 @@ each section says what changed and what to do about it. How to cut a release is 
     counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
     re-subscribed about three times a second, receiving the track's last object again each time.
   - A plain subscription is unchanged: it reports the done (`onPublisherDone`) and never subscribes again.
+- Docs only, no code change:
+  - [GUIDE.md](GUIDE.md#content-security-policy) lists the Content Security Policy a page needs (#385): `connect-src`
+    for each relay's `https:` and `wss:` origins, and `blob:` and `'wasm-unsafe-eval'` in `script-src`. Without
+    `'wasm-unsafe-eval'` the audio player loses Opus loss concealment with no error; only
+    `player.joinPhases.opusLoadedUs === null` shows it.
+  - The GUIDE's `openGroup()` example carries on after `SUBSCRIPTION_CHANGED`, which a first viewer on another relay
+    causes, instead of rethrowing it.
+  - The GUIDE points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for Client
+    tokens.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
+  - Corrected: frame grouping no longer drops the oldest frame by default (`spec/media-layer.md`, the WebCodecs
+    example); `SequencedFrame.key` is set on a group's first frame; `@caprid/relay/node` loads `@caprid/relay-quic`
+    when no `createTransport` is given.
 
 ## 0.3.0
 

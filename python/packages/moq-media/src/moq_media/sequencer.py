@@ -37,7 +37,11 @@ class SequencedFrame:
     timestamp_us: int
     """The LOC timestamp in microseconds on the broadcast timeline."""
     key: bool
-    """Whether the frame starts its group: a keyframe under keyframe grouping, every frame under frame grouping."""
+    """Whether the frame starts its group (object 0): a keyframe under keyframe grouping.
+
+    Under frame grouping every frame decodes on its own, and this is ``True`` for every frame only when each group
+    holds one, as a frame writer sends them.
+    """
     payload: bytes
     properties: list[KeyValuePair]
     discontinuity: FrameDiscontinuity | None = None
