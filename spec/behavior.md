@@ -1503,16 +1503,18 @@ Implemented in both SDKs.
 - Writes on one writer are served one at a time, in the order they were called, so an encoder whose
   output callback cannot await may call `write` without waiting for the previous one. Frames waiting
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
-  positive integer, default 8 under keyframe grouping and 25 under frame grouping). A caller that awaits
-  every write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
+  positive integer, default 8 under keyframe grouping). Under frame grouping there is no bound unless
+  one is given, so no frame is dropped for the backlog, and memory is then unbounded while delivery is
+  blocked ([#412](https://github.com/muxinc/relay-sdks/issues/412), open). A caller that awaits every
+  write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
   promise cannot be cancelled) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
   treated as following a discontinuity, and a keyframe is needed.
 - A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
   rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
   reset at once. The frame being written into it, if any, is dropped too. The arriving frame then
   opens the next group if it is a keyframe, and is dropped otherwise, as is every delta after it
-  until the next keyframe. Under frame grouping the oldest waiting frame is dropped and the arriving
-  frame takes its place at the back.
+  until the next keyframe. Under frame grouping, when a bound is set, the oldest waiting frame is
+  dropped and the arriving frame takes its place at the back.
 - A frame the relay has no subscription for when its turn comes is skipped at once. The writer never
   waits on the write deadline, because an encoder loop cannot block. A relay demand change (a new or
   replacement subscription, or its end) ends the open group in the write slot at once. The writer

@@ -13,6 +13,10 @@ each section says what changed and what to do about it. How to cut a release is 
   later target, `behind` a longer `reorderWindowUs`. In a two-browser call with frame-grouped audio and no reorder
   window, nearly all of the 1.9% counted as late was frames swapped with the next one within 5 ms. A reader that
   reported `late` as one number adds `behind` to keep the old total.
+- `@caprid/relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8. The memory bound is tracked in
+  [#412](https://github.com/muxinc/relay-sdks/issues/412).
 
 ## 0.3.0
 

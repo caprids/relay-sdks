@@ -873,8 +873,10 @@ caller error, such as a malformed or oversized frame or an exception from your `
 and with `CLOSED` after your own `close()`. You may call it from a
 WebCodecs output callback without awaiting it. The writer serves frames in call order. When more
 than `maxBacklog` frames wait behind the one being written, it drops frames rather than queueing
-them. `writer.keyframeNeeded` and `onKeyframeNeeded` say when the next frame must be a keyframe, so
-an encoder can force one. That happens after a demand change, a failure, a stale frame, or a drop.
+them. `maxBacklog` defaults to 8 under keyframe grouping; under frame grouping there is no default
+bound, so no frame is dropped for the backlog, and memory is unbounded while delivery is blocked
+([#412](https://github.com/muxinc/relay-sdks/issues/412)). `writer.keyframeNeeded` and
+`onKeyframeNeeded` say when the next frame must be a keyframe, so an encoder can force one. That happens after a demand change, a failure, a stale frame, or a drop.
 `@caprid/moq-media`'s `LocFrame` is a frame in the shape the writer takes.
 
 ```ts

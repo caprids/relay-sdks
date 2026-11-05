@@ -10,6 +10,10 @@ is in [docs/releasing.md](../docs/releasing.md).
   passed over in the new `stats.behind`, no longer in `stats.late` (#431), as in the TypeScript SDK. `late` keeps the
   frames too late against the clock's position and those dropped past the held bound. A reader that reported `late`
   as one number adds `behind` to keep the old total.
+- `caprid-relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `max_backlog=25` for the old behavior. Keyframe grouping keeps its default of 8. The memory bound is tracked in
+  [#412](https://github.com/muxinc/relay-sdks/issues/412).
 
 ## 0.3.0
 
