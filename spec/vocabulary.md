@@ -67,7 +67,7 @@ without a row here is a bug.
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
-| Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | not yet (TypeScript only) |
+| Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | `subscriber.catch_up(key)`; `on_restarted` reason `"catch-up"` |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
@@ -855,6 +855,8 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8; none under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
+| A subscription's or a want's handlers that deliver only the newest value of a latest-wins track | `createLatestValueReader({ onValue, late?, onCatchUp? })` → `LatestValueReader` (`LatestValueReaderOptions`); spread into `subscribe` or `want` handlers | `LatestValueReader(on_value, *, late=None, on_catch_up=None)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)` |
+| What a latest-value reader dropped and delivered | `reader.stats`: `LatestValueStats { delivered, superseded, late, catchUps }` | `reader.stats`: `LatestValueStats(delivered, superseded, late, catch_ups)` |
 | A media track's default delivery timeout and publisher priority, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs, publisherPriority })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None, publisher_priority=None)` (`MediaKind`) |
 | The writer ended, and how | `writer.closed`, `writer.ended` | `writer.closed`, `writer.ended` |
 | Groups opened and objects accepted | `writer.groups`, `writer.objects` | `writer.groups`, `writer.objects` |
@@ -901,3 +903,13 @@ answer what the example's `finished` line asks); exceptions for interrupted and 
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
 changes, gets `DocumentService` instead of a mode). The `register_media` handle in
 [media-layer.md](media-layer.md) remains a proposal.
+
+"Latest-value reader" pairs with the frame reader and with the document service it reads: the
+publisher sends the latest value, and the reader delivers it. "Superseded", not "stale" or "old":
+a newer value was already judged, whatever its age. The predicate is `late`, as the sequencer's
+late drop is: the value arrived too late to act on. Not adopted from
+[issue #447](https://github.com/muxinc/relay-sdks/issues/447): `maxAge` (the MoQ Timestamp
+extension's subscription parameter, which a relay acts on); `stale` (a want's `staleAfterMs` is
+silence, not lateness); the reader calling `catchUp` itself (it would need the subscriber and the
+key, and a plain subscription has no catch-up, so `onCatchUp` stays the application's, as on a frame
+reader).

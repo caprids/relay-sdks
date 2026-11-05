@@ -896,7 +896,7 @@ taken over.
     cancels the pending one. A move before the current subscription is accepted replaces it at
     once, since there is nothing to overlap. The connection's end takes both subscriptions, and
     the want restarts with `connection`.
-- **Catch-up** (TypeScript only). `catchUp(key)` replaces the want's accepted subscription at once,
+- **Catch-up**. `catchUp(key)` / `catch_up(key)` replaces the want's accepted subscription at once,
   break-before-make: it cancels it, which makes the relay drop what it still holds queued for it,
   and subscribes again with the want's options, so a want with no location filter starts at the
   newest group. `onRestarted` reports `catch-up`. The replacement opens without delay when the
@@ -910,7 +910,8 @@ taken over.
   is meant to work with a relay that honours that timeout too
   ([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)): such a relay drops the late
   groups itself, and a catch-up then clears only what still arrives late.
-  A frame reader's `onCatchUp` is its usual caller ([media subscribing](#media-subscribing)).
+  A TypeScript frame reader's `onCatchUp` and a latest-value reader's `onCatchUp` / `on_catch_up` are its
+  usual callers ([media subscribing](#media-subscribing), [latest-value reading](#latest-value-reading)).
   Measured on 2026-10-17 against a local moq-relay 0.17.5, with a 3 s outage on a 600 kbit/s link
   carrying a 400 kbit/s audio track (`ts/scripts/probe-catch-up.mjs`, two runs each): without
   catch-up, the listener got 401 and 407 of 1,200 frames: once delivery resumed (about 5 s after
@@ -922,7 +923,7 @@ taken over.
   `PUBLISH_DONE`. `onSubscribed` receives the namespace the subscription was made on: the
   generation's, when following one. `onRestarted({ reason, namespace })` runs when an accepted
   subscription ends and will be replaced, before any object of the replacement. Its reason is
-  `publisher-done`, `stale`, `generation`, `connection` or `terminated`, or in TypeScript `catch-up`. `generation` remains for
+  `publisher-done`, `stale`, `generation`, `connection`, `terminated` or `catch-up`. `generation` remains for
   a withdrawal with none newer announced. Decoders drop state that assumed continuity there, and at
   `onSwitched`. Rejections before acceptance, the announce race included, never reach
   a handler unless they are surfaced.
@@ -1823,6 +1824,46 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
   namespace and name), and otherwise the first track listed with that track's namespace, role and
   render group, or nothing when there is none (a removal, not a replacement).
+
+### Latest-value reading
+
+A latest-wins track, such as telemetry or a control, sends each value as a one-object group, and a
+newer value makes every older one useless. The relay does not drop the older ones for a slow viewer
+(moq-relay 0.17, [measured on 2026-11-04](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)),
+and group streams can arrive out of order, so the viewer drops them. A latest-value reader
+(`createLatestValueReader` / `LatestValueReader`, in `@caprid/relay/media` and `caprid_relay.media`)
+is a subscription's or a want's handlers that deliver only values newer than the last one judged
+([issue #447](https://github.com/muxinc/relay-sdks/issues/447)). It is the viewer's counterpart of the
+[document service](#media-publishing) and knows no format.
+
+- An object is judged when its location (group ID, then object ID) comes after every location
+  judged since the reader started or last restarted. Any other object is superseded, and the reader
+  drops it with no callback.
+- A judged object goes to the optional `late` predicate. When the predicate returns true, the
+  object is dropped as late. Otherwise `onValue` / `on_value` receives it. A late object still
+  counts as judged, so an older one that arrives after it is superseded. The predicate is the
+  application's own test, such as a capture time in the payload against the viewer's clock.
+- The first late object since the start, or since a delivered value, calls `onCatchUp` /
+  `on_catch_up`. It is not called again until a value is delivered. A restart does not re-arm it,
+  as with the sequencer's `catchUpAfterUs`: a replacement that is late from its first value is
+  still behind the old subscription's bytes on the viewer's link, and catching up again only
+  repeats the gap. Its usual body is the supervised subscriber's
+  [catch-up](#supervised-subscriber), whose restart restarts the reader.
+  - Set `late` above the lateness the viewer's link can reach. Below it, every value after the
+    catch-up is late, and the reader delivers nothing until the link is faster than the track.
+  - Measured on 2026-11-05 against ord with the viewer's downlink shaped to 300 kbit/s (1 s FIFO)
+    and a 400 kbit/s track of 1,000-byte one-object groups every 20 ms, over 20 s. The age of the
+    value the viewer held, sampled every 50 ms, had a p50 of 2.7 s, a p90 of 6.9 s and a max of
+    14.0 s when every arrival was applied, with 146 applied after a newer one. The reader alone
+    gave 2.3 s, 4.2 s and 4.7 s. With `late` at 1 s and a catch-up, it gave 0.7 s, 1.1 s and
+    1.7 s, over six catch-ups. With `late` at 500 ms, the replacement's first values were already
+    later than that, so one catch-up was followed by nothing delivered. Before this rule, the
+    same run caught up every 0.6 s and delivered nothing either.
+- A want's Restart or Move restarts the reader, because the new subscription numbers its groups
+  afresh. A want read through a reader keeps `drainMs` / `drain` at 0, as with a frame reader.
+- An exception from `onValue`, `late` or `onCatchUp` is logged, and the reader carries on. A `late`
+  predicate that raises counts as false, so the value is delivered.
+- Counters: delivered, superseded, late, catch-ups.
 
 ## Package boundaries
 
