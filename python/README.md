@@ -575,7 +575,9 @@ track treats `RECONNECTING` as an interruption and resumes at the next keyframe.
 
 `want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
 retries the announce race, and resubscribes after `PUBLISH_DONE` or after a rejection that waiting may
-fix, with backoff from 0.25 s up to 8 s. It also moves to the replacement connection. With
+fix, with backoff from 0.25 s up to 8 s, or as soon as its namespace is announced again (after
+`TRACK_ENDED`, announced again after a withdrawal), so a restarted publisher is picked up within about
+a round trip of its announcement. It also moves to the replacement connection. With
 `stale_after` in seconds, it resubscribes a track that went silent. Set that only for tracks that are
 never silent while live. With `generations=True`, it discovers the publisher's root and stays on the
 newest generation, moving as soon as a newer one is announced, with no application channel. A
@@ -625,6 +627,43 @@ switches at its next natural keyframe, up to one keyframe interval later. The mo
 `True` from `demand_changes()` while demand carries over. Force a keyframe on it, but don't restart
 the encoder. A live connection can't take a new token on moq-relay today, so every rotation is a new
 connection and generation ([#261](https://github.com/muxinc/relay-sdks/issues/261)).
+
+### Test recovery by dropping the transport
+
+To check how your application handles a lost connection, close the transport under it on purpose.
+`caprid_relay.quic.connect_quic` is the factory the connect functions use when `create_transport`
+is left out. Wrap it, keep each transport it opens, and close them when you want a drop:
+
+```python
+from caprid_relay import connect_supervised_publisher, connect_supervised_subscriber
+from caprid_relay.quic import connect_quic
+
+opened = []
+
+
+def create_transport(url, protocols):
+    connecting = connect_quic(url, protocols)
+    opened.append(connecting.transport)
+    return connecting
+
+
+def drop_connections():
+    """Drop every open connection, as a network loss would."""
+    for transport in opened:
+        transport.close(0, "chaos: dropped")
+    opened.clear()
+
+
+publisher = await connect_supervised_publisher(
+    url, namespace=namespace, get_token=get_token, create_transport=create_transport
+)
+subscriber = await connect_supervised_subscriber(url, get_token=get_token, create_transport=create_transport)
+```
+
+After `drop_connections()`, each supervisor reports `reconnecting` and then `live` through
+`on_status`. The publisher comes back as a new generation, and each want resubscribes on the new
+connection. Against `ord.relay.mux.global`, a want following generations was receiving again about
+1 s after the drop.
 
 ## Publishing lifecycle
 

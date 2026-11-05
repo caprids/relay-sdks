@@ -140,6 +140,7 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
   'readJSON',
   'readText',
   'roomEndpoint',
+  'webTransport',
 ]);
 // The Node entry point exports what the root does, with its own connect functions (#196).
 const nodeExports = await import('../dist/node.js');

@@ -11,6 +11,10 @@ each section says what changed and what to do about it. How to cut a release is 
   rotation moves the track to the new generation (#444). Before, it waited for the encoder's next natural keyframe,
   so viewers switched up to one keyframe interval late, and with keyframes made only on request only when the 10 s
   overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
+- `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
+  left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
+  ([Test recovery by dropping the transport](GUIDE.md#test-recovery-by-dropping-the-transport)), instead of
+  re-implementing it. The wrapper keeps the default's `TRANSPORT_UNAVAILABLE` checks and needs no casts.
 - `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
   passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
   clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a
@@ -21,6 +25,16 @@ each section says what changed and what to do about it. How to cut a release is 
   no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
   Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8. The memory bound is tracked in
   [#412](https://github.com/muxinc/relay-sdks/issues/412).
+- `@caprid/relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connectSupervisedSubscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`onPublisherDone`) and never subscribes again.
 
 ## 0.3.0
 

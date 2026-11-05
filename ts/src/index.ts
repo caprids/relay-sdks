@@ -21,7 +21,7 @@ export type {
   RelayTrackOptions,
   RelayTransportFactory,
 } from './connect.js';
-export { connectRelaySubscriber } from './connect.js';
+export { connectRelaySubscriber, webTransport } from './connect.js';
 export { RelayError, type RelayErrorCode, type RelayErrorPhase } from './errors.js';
 export type { NamespaceEvent, NamespaceEventOptions, NamespaceEvents } from './namespace-events.js';
 export { readJSON, readText } from './payload.js';

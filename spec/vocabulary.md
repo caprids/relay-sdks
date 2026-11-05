@@ -51,6 +51,7 @@ without a row here is a bug.
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
+| The default transport factory, to wrap: the runtime's WebTransport, `framing: 'webtransport'`, `TRANSPORT_UNAVAILABLE` where there is none or it cannot negotiate protocols | `webTransport()` returns `RelayTransportFactory` | `caprid_relay.quic.connect_quic` is the default and is already public; the Python SDK dials no WebTransport |
 | A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
 | How many unidirectional streams the relay may keep open to a native QUIC connection at once (the MAX_STREAMS credit granted) | `nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams })` from `@caprid/relay-quic`: 1000 by default, an integer from 1 to 65535 | not applicable: aioquic raises the limit itself as streams are used (128, doubled whenever more than half is used) |
 | Write a qlog trace per native QUIC connection | `nativeQuicTransport({ qlogDir })` from `@caprid/relay-quic`, or `RELAY_QUIC_QLOG_DIR` | not yet (TypeScript only) |
@@ -468,6 +469,18 @@ replaced `WebTransportError` and its `StreamStopped` subclass without aliases, u
 above: the package no longer dials WebTransport (#232), so the old name was a misnomer, and the
 subclass made a stop a type rather than a place. Not adopted: `TransportError`, which reads as the
 `TRANSPORT_ERROR` code it is wrapped in, and a `StreamStopped` subclass kept beside the shape.
+
+## The default transport factory: `webTransport()`
+
+`webTransport()` returns the factory the TypeScript connect functions use when `createTransport` is
+left out, so a caller can wrap it (#445). It is named after what it dials and returns a factory,
+as `nativeQuicTransport()` and `createWebSocketTransport()` do, which leaves room for options. Its
+return type is `RelayTransportFactory`, not the DOM `WebTransport`, so the package's declarations
+still compile for a Node project without the DOM lib. Not adopted: `createBrowserTransport`, the
+internal name it had (it dials whatever `WebTransport` the runtime has, not only a browser's);
+`createWebTransportTransport` (stutters); a `browserTransport` constant (unlike the other
+factories, it could not take options later). Python needs no counterpart:
+`caprid_relay.quic.connect_quic` is the default `create_transport` and is already public.
 
 ## Names considered and left alone
 

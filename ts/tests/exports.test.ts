@@ -30,6 +30,7 @@ describe('public vocabulary', () => {
       'readJSON',
       'readText',
       'roomEndpoint',
+      'webTransport',
     ]);
     expect(relay).not.toHaveProperty('connectRelay');
   });

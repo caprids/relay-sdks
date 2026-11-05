@@ -331,7 +331,12 @@ Messages are not a compatibility contract. The class and the point of rejection 
   moq-relay 0.17.0 a publisher's clean close, or its connection closing, reaches existing
   subscriptions within 0.1 s, as status 2 after `close()` and as 0 when the connection drops without
   MoQ cleanup. A crashed publisher's arrives as status 0 only after the relay's QUIC idle timeout,
-  about 11 s (it was about 30-35 s on 0.15.8, whose idle timeout was 30 s).
+  about 11 s (it was about 30-35 s on 0.15.8, whose idle timeout was 30 s). Through relay.mux.global
+  (0.17.9) only those two codes were seen: 2 within about 0.1 s of a clean close, and 0 for a lost
+  publisher connection, 10.8-13.1 s after a crash
+  ([relay-interop.md](relay-interop.md#on-0179-behind-relaymuxglobal)). To follow a publisher that
+  restarts, use the [supervised subscriber](#supervised-subscriber): a plain subscription reports
+  the done and never subscribes again.
 - Replacing a publisher on the same namespace does not hand off existing subscriptions: moq-relay
   0.15.8 and 0.17.0 never move them to the replacement. After a clean end, new subscriptions fail
   with request error 16 `unroutable` until the replacement announces, and are served by it at once
@@ -821,10 +826,26 @@ taken over.
     subscription was accepted.
   - **Retried after backoff** (from 250 ms, doubling up to 8 s, with jitter): the announce race
     (16 `unroutable`, or the older 404), every other rejection not listed below, `PUBLISH_DONE`,
-    a REQUEST_ERROR after acceptance, and a subscription that went stale. Only an object from a
-    later group than the subscription's first resets the backoff. Cached objects followed by a
-    done are not progress, so a finished track still announced is replayed no faster than the
-    backoff allows ([issue #21](https://github.com/muxinc/relay-sdks/issues/21)).
+    a REQUEST_ERROR after acceptance, and a subscription that went stale. Only an object with a
+    payload from a later group than the subscription's first resets the backoff. Cached objects
+    followed by a done are not progress, and neither is a status object such as the end-of-track
+    marker a relay sends one group after the cached last group, so a finished track still
+    announced is replayed no faster than the backoff allows
+    ([issue #21](https://github.com/muxinc/relay-sdks/issues/21)).
+  - **Woken by the namespace being announced again.** A want on a fixed namespace (not following
+    generations) that waits out a backoff watches its namespace with SUBSCRIBE_NAMESPACE on the
+    namespace itself, and subscribes at once when the namespace is announced after its latest
+    attempt started, in the request's first answer or later. The backoff then starts again from
+    its shortest delay, for the new publisher's announce race. The want holds one such watch from
+    its first wait until a subscription is accepted, so an announcement between two attempts is
+    not missed; one watch per namespace per connection is shared by every want on it. After
+    `PUBLISH_DONE` 0x2 `TRACK_ENDED` the namespace may still be announced for the publisher that
+    ended the track, so only an announcement the watch saw follow a withdrawal wakes the wait. In
+    every case the backoff still runs as the fallback. A watch that cannot open (another followed
+    root overlaps it) or that ends leaves the backoff alone, and a followed root's discovery
+    closes an overlapping watch rather than be refused `PREFIX_OVERLAP`. Measured through
+    relay.mux.global, this picks up a replacement 60-145 ms after it announces, against 1.6-7.2 s
+    once the backoff has grown ([relay-interop.md](relay-interop.md#on-0179-behind-relaymuxglobal)).
   - **Surfaced, after which the want stops and is forgotten:** a rejection that no wait fixes.
     These are REQUEST_ERROR 0x1 `UNAUTHORIZED`, 0x3 `NOT_SUPPORTED`, 0x4 `MALFORMED_AUTH_TOKEN`,
     0x5 `EXPIRED_AUTH_TOKEN`, 0x11 `INVALID_RANGE` and 0x12 `MALFORMED_TRACK`, reported as

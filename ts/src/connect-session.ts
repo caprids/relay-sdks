@@ -86,9 +86,9 @@ export interface ConnectRelayOptions {
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
   /**
-   * Create the transport. Defaults to the browser's WebTransport; a runtime without it, or whose
-   * WebTransport cannot negotiate protocols, fails with `TRANSPORT_UNAVAILABLE` unless this is
-   * supplied.
+   * Create the transport. Defaults to {@link webTransport}, the runtime's WebTransport; a runtime without it, or whose
+   * WebTransport cannot negotiate protocols, fails with `TRANSPORT_UNAVAILABLE` unless this is supplied. Wrap
+   * `webTransport()` to observe or close the transports a connection opens.
    */
   createTransport?: RelayTransportFactory;
 }
@@ -125,7 +125,7 @@ interface RelaySessionLifetime<T extends Session> {
   close(): void;
 }
 
-const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
+const dialWebTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
@@ -143,11 +143,31 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
     );
   }
 
-  // TypeScript's DOM lib does not declare `protocol` yet; the prototype check above found it.
-  const transport = new WebTransport(url, { protocols }) as WebTransport & { readonly protocol: string };
-
+  const transport = new WebTransport(url, { protocols });
   return { transport, ready: transport.ready, framing: 'webtransport' };
 };
+
+/**
+ * The transport factory the connect functions use when `createTransport` is left out: the runtime's `WebTransport`,
+ * offering the MOQT protocols as WebTransport protocols, with `framing: 'webtransport'`. A runtime without
+ * `WebTransport`, or whose `WebTransport` cannot negotiate protocols (Deno 2.x, Firefox before 155), fails the
+ * connection with `TRANSPORT_UNAVAILABLE`.
+ *
+ * Wrap it to watch or interrupt the transports a connection opens, such as closing them to test recovery:
+ *
+ * ```ts
+ * const dial = webTransport();
+ * const open = new Set<MoqtTransport>();
+ * const createTransport: RelayTransportFactory = (url, protocols) => {
+ *   const connection = dial(url, protocols);
+ *   open.add(connection.transport);
+ *   return connection;
+ * };
+ * ```
+ */
+export function webTransport(): RelayTransportFactory {
+  return dialWebTransport;
+}
 
 const utf8 = new TextEncoder();
 
@@ -310,7 +330,7 @@ export async function openRelaySession<T extends Session>(
     const { url, endpoint, expiresAt: expiry } = dialTarget(given, issued);
     expiresAt = expiry;
 
-    let createTransport = options.createTransport ?? createBrowserTransport;
+    let createTransport = options.createTransport ?? dialWebTransport;
     const resolve = options[resolveTransport];
     if (resolve) {
       assertOpen();
