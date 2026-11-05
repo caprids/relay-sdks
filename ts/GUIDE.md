@@ -10,6 +10,8 @@ package (see the [README's Node section](README.md#node)). Other runtimes must s
 This is the TypeScript SDK in the Relay SDKs repository. The shared protocol pins, behavior
 contract, and test vectors live in [spec](../spec/README.md), and the [root README](../README.md)
 describes the suite. The packages are on npm as `@caprid/*` ([install](README.md#install)).
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 
@@ -873,8 +875,10 @@ caller error, such as a malformed or oversized frame or an exception from your `
 and with `CLOSED` after your own `close()`. You may call it from a
 WebCodecs output callback without awaiting it. The writer serves frames in call order. When more
 than `maxBacklog` frames wait behind the one being written, it drops frames rather than queueing
-them. `writer.keyframeNeeded` and `onKeyframeNeeded` say when the next frame must be a keyframe, so
-an encoder can force one. That happens after a demand change, a failure, a stale frame, or a drop.
+them. `maxBacklog` defaults to 8 under keyframe grouping; under frame grouping there is no default
+bound, so no frame is dropped for the backlog, and memory is unbounded while delivery is blocked
+([#412](https://github.com/muxinc/relay-sdks/issues/412)). `writer.keyframeNeeded` and
+`onKeyframeNeeded` say when the next frame must be a keyframe, so an encoder can force one. That happens after a demand change, a failure, a stale frame, or a drop.
 `@caprid/moq-media`'s `LocFrame` is a frame in the shape the writer takes.
 
 ```ts
@@ -901,6 +905,17 @@ For live browser video, start with the [direct WebCodecs example](examples/webco
 which turns encoded chunks into LOC payloads without a muxer or media engine. For existing media
 files, the optional [Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets. See
 the [file publishing example](examples/mediabunny/README.md).
+
+Serve the catalog before you gate encoding on demand. Viewers read the catalog first, and only then
+subscribe to the video track, which is what gives it demand. If the catalog waits for the encoder's
+first output, and the encoder waits for `track.hasDemand`, neither ever starts, and no viewer gets
+video. Either build the catalog from the encoder configuration you already know, or encode
+regardless of demand until the first decoder configuration arrives, as the WebCodecs example does:
+
+```ts
+// Encode until the catalog exists (`video` holds its decoder config), then only while the track has demand.
+if (!video || track.hasDemand) encoder.encode(frame, { keyFrame });
+```
 
 ## Subscribing to media
 
@@ -1004,6 +1019,20 @@ milliseconds can underrun at that floor. Such a page can pass `minJitterTargetUs
 in earlier releases. The buffer stays under 400 ms, and under the clock's target latency less the
 output delay and 40 ms. `input.stats` holds the underruns, the buffer depth and target, the frames
 dropped as late, and the audio that was trimmed, concealed with silence, or cut.
+
+A floor below the path's delay spread makes the buffer saw: it gives back down to the floor between
+delay spikes, underruns on the next one, grows, and later trims what it no longer needs. In a
+two-browser call through one relay (measured, one machine), arrival delay spread from 80 to 200 ms.
+At the 20 ms floor the buffer underran 6.5 times a minute and trimmed 3 s in 15 minutes; with
+`minJitterTargetUs: 80_000` it underran 0.5 times a minute and trimmed 0.5 s, holding about 40 ms
+more. Side by side on two other paths, a 60 ms floor underran about 15% more often than 80 ms and
+held 15 to 20 ms less. A call whose `stats.underruns` keeps climbing while `stats.jitterTargetUs`
+keeps coming back to the floor wants a higher one, if it can spend the delay. On a voice benchmark's
+emulated paths (measured, Chrome, moq-relay 0.17.9, four rounds a setting), an 80 ms floor
+(`minJitterTargetUs: 80_000`, no reorder window) cut underruns from 12.5 to 5 a round on busy Wi-Fi
+and from 8.5 to 0.8 at 2% random loss, and audible drops from 4.1 to 2.9 a minute and from 5.7 to
+5.1, for about 50 ms more mouth-to-ear delay (166 against 115 ms, 177 against 127 ms): 60 to 90%
+fewer underruns for about 50 ms.
 
 The player fills a lost Opus frame rather than playing silence. It decodes Opus with libopus
 compiled to WebAssembly, which rebuilds the frame from the next frame's in-band FEC when the
@@ -1122,7 +1151,7 @@ below the clock's target latency, or a resync re-anchors on the late audio first
 own delivery timeout goes on the SUBSCRIBE as well, for a relay that honours it. moq-relay 0.17.5 and
 0.17.7 ignore it, and so does moq-dev main, which honours `maxAge` instead (the MoQ Timestamp
 extension's subscriber max age, in milliseconds). The SDK sends `maxAge` only to a relay whose SETUP
-declared it (`subscriber.maxAgeSupported`), so it is safe to set against any relay. It bounds what the
+declared it (`maxAgeSupported` on a `connectRelaySubscriber` connection), so it is safe to set against any relay. It bounds what the
 relay still holds for this subscriber (a group it has not sent or not yet had acknowledged once a newer
 group is that old), not a queue further down the path: see spec/relay-interop.md, "Subscriber max age".
 
@@ -1138,6 +1167,35 @@ subscriber.want(
   { ...voice, onError },
 );
 ```
+
+Leave a listener's reorder window at its default, none. Under frame grouping each audio frame is a
+group of its own, and the relay sends each group on a stream of its own, so two neighbouring frames
+can arrive swapped. With no window the sequencer drops the second to arrive as behind
+(`stats.behind`), and the player conceals it. A window would wait for it, but it holds every later
+frame while an earlier one is missing, and on a path with real loss most missing frames are lost, or
+resent too late to use: each costs the whole window, the player underruns, and its buffer grows and
+keeps the delay. Set a window only when `stats.behind` makes up most of the sequencer's discards
+(against `stats.late`) on a path with little loss, and size it just over the gap between a swapped
+frame and the one that overtook it, not to a resend. Audio that arrives in order is never held; a
+frame after a real loss waits up to the window, then plays with `gap`.
+
+On a path with little loss a window pays. In a 20-minute call between two browsers through one
+relay, on one machine (measured), the sequencer dropped 1.9% of audio frames as behind, nearly all
+within 5 ms of the frame that overtook them, and the player synthesized 22 s of audio in their
+place. With `reorderWindowUs: 60_000` it dropped 0.01% and synthesized under 1 s.
+
+On a path with real loss it costs more than it recovers. A voice benchmark (measured: emulated
+network paths, Chrome, moq-relay 0.17.9, four rounds a setting) compared windows with none, the
+default, with late drop at its default 40 ms. At 2% random loss, a 60 ms window with
+`lateDropUs: 60_000` had 8.4 audible drops a minute at 195 ms mouth-to-ear, against 5.5 at 129 ms
+with the defaults: it underran 21 times a round against 8, ended with a 108 ms buffer target against
+38 ms, and recovered only 25 of 272 discarded frames, because most resends arrived after 60 ms. On a
+busy Wi-Fi path the same window did recover swaps (12 frames discarded against 91), for 4.1 drops a
+minute against 4.9, but at 157 ms against 119 ms. On a clean, distant path it went from 0.1 to 1.0
+drops a minute. Shorter windows did no better: in a separate
+run, 15 and 20 ms windows (late drop at the default 40 ms) discarded more frames and underran more
+often than none, with 4.4 and 6.4 drops a minute at 141 and 146 ms on busy Wi-Fi against 4.1 at
+115 ms, and 7.1 and 7.6 at 154 and 157 ms at 2% loss against 5.7 at 127 ms.
 
 **To an agent** (a person's voice to speech-to-text), the goal is every word, soon after the person
 stops. Completeness comes from the person's publisher and the reorder window, not from FETCH. Give
@@ -1174,6 +1232,111 @@ const reply = createFrameReader(
 
 A live talker's frames are never early, so they play as without it. Delay that underruns add while a
 queue builds is given back once frames come early again, as without it.
+
+## Control and telemetry
+
+Apps that send media often send small data beside it. A robot reports telemetry, and a remote
+cockpit sends it controls. Most of this data is **latest-wins**: a newer value makes the older one
+useless. Some of it is not, such as an emergency stop that must arrive even when a newer message
+follows. Choose the pattern per track.
+
+### Each side publishes its own track
+
+A publisher connection serves one namespace. So each side of a two-way app has its own publisher,
+and subscribes to the other side's namespace with a subscriber. The robot publishes `video` and
+`telemetry` under `['room', 'robot']`, and subscribes to `control` under `['room', 'cockpit']`. The
+cockpit does the reverse. Each side's token must grant publishing under its own namespace and
+subscribing under the other's.
+
+```ts
+import { connectRelayPublisher, connectSupervisedSubscriber, readJSON } from '@caprid/relay';
+import { createDocumentService } from '@caprid/relay/media';
+
+// On the robot.
+const publisher = await connectRelayPublisher({ url, getToken, namespace: ['room', 'robot'] });
+const telemetry = createDocumentService(publisher.registerTrack({ track: 'telemetry' }));
+telemetry.serve({ signal }).catch(onError);
+setInterval(() => telemetry.update(new TextEncoder().encode(JSON.stringify(readSensors()))), 50);
+
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
+let newest = -1; // the newest control group applied
+subscriber.want(
+  'control',
+  { namespace: ['room', 'cockpit'], track: 'control', parameters: { subscriberPriority: 0 } },
+  {
+    onObject(object) {
+      if (object.groupId <= newest) return; // superseded: a newer value already arrived
+      newest = object.groupId;
+      applyControl(readJSON(object));
+    },
+    onRestarted: () => (newest = -1), // the new subscription numbers its groups afresh
+    onSwitched: () => (newest = -1),
+    onError,
+  },
+);
+```
+
+### Latest-wins values
+
+Send each value as a group of its own, holding one object. `track.write()` does this, and so does a
+document service. `createDocumentService(track)` from `@caprid/relay/media` is the simplest
+latest-wins publisher. `update(value)` replaces the value it holds. While a write is in progress,
+later updates replace one another, so only the newest is sent next. The service also sends the
+current value again on every relay subscription. That matters because an update made while the relay
+has no subscription is only held, not sent. After a failed write, it waits `retryDelayMs` (1 s by default)
+before it sends again, so pass a smaller value for a value that changes quickly.
+
+Make each value complete, not a change to the previous one. A viewer that joins late starts at the
+relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
+and the viewer drops values that arrive superseded.
+
+**Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`maxAgeSupported` on a `connectRelaySubscriber` connection)
+skips groups that a newer one has superseded for longer than the `maxAge` you subscribe with. The SDK
+sends `maxAge` only to such a relay, so it is safe to set ([voice](#voice-delivery-per-direction)). In
+a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
+one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
+600 of them arrived before an older group, because each group travels on a stream of its own. The
+same happened with 100 ms subscriber delivery timeouts and with group order descending
+([measurements](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+Delivery timeouts do not change this. The relay ignores the subscriber's, and the publisher's only
+bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+So the viewer does the dropping:
+
+- Ignore any group older than the newest one applied, as in the example above. Group IDs rise within
+  one subscription. They start over when a want restarts or moves to a new generation, so reset the
+  marker in `onRestarted` and `onSwitched`.
+- To know when a value is too old to act on, put the time it was taken in the payload. Comparing
+  that time with the viewer's clock assumes the two machines' clocks agree. When every value arrives
+  too late, call the supervised subscriber's `catchUp(key)`. It replaces the subscription at the live
+  edge, which drops the relay's backlog, and runs `onRestarted` with reason `'catch-up'`.
+  `staleAfterMs` does not help here, because a backlog is not silence.
+- Give control and telemetry a subscriber priority ahead of the video on the same connection. The
+  relay orders what it sends you by your subscriber priority alone, where a lower number is more
+  urgent ([measured](../spec/relay-interop.md#subscription-parameters)). The media defaults are 16
+  for audio and 96 for video ([subscribing to media](#subscribing-to-media)).
+
+A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
+`writeJSON()` for each one. A concurrent write rejects, so queue commands in your own code. A write
+waits for relay demand and sends once the relay subscribes. The write deadline (10 s by default)
+covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the command was
+never delivered. Check its `phase`: only `'waiting-for-demand'` means no bytes went out. Commands can also arrive out of order, so number them in
+the payload if order matters. Nothing confirms that a viewer acted on a command. If you need that,
+have the viewer reply on its own track.
+
+### Latency and staleness: where each is set
+
+The publisher and the viewer set different things, under similar names:
+
+| Setting | Side | What it does |
+| --- | --- | --- |
+| `createPlayoutClock({ targetLatencyUs })` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `lateDropUs` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([subscribing to media](#subscribing-to-media)). |
+| Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the sequencer re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
+| `catchUpAfterUs` with `catchUp(key)` | viewer | Replaces the subscription at the live edge once frames keep arriving late. The want restarts with reason `'catch-up'` ([voice](#voice-delivery-per-direction)). |
+| `staleAfterMs` on `want` | viewer | Resubscribes a track that has been silent that long. The want restarts with reason `'stale'`. Use it only for tracks that are never silent while live. |
+| `mediaTrackProperties(kind, { targetLatencyUs })` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
+| Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
 
 ## Errors and recovery
 

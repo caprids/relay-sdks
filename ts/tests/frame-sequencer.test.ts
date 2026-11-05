@@ -208,7 +208,7 @@ describe('createFrameSequencer', () => {
     sequencer.object(object(10, 0, [{ type: LOC_TIMESTAMP, value: 10_000_000 }]));
     sequencer.poll();
     sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
-    expect(sequencer.stats.late).toBe(1);
+    expect(sequencer.stats).toMatchObject({ late: 0, behind: 1 });
     expect(clock.targetLatencyUs).toBe(2_000_000);
   });
 
@@ -332,7 +332,7 @@ describe('createFrameSequencer: reorderWindowUs', () => {
     expect(waitUs).toBeUndefined();
     put(1, 1_050_000);
     expect(sequencer.poll().frames).toEqual([]);
-    expect(sequencer.stats.late).toBe(1);
+    expect(sequencer.stats).toMatchObject({ late: 0, behind: 1 });
     expect(sequencer.stats.delivered).toBe(2);
   });
 
@@ -395,7 +395,7 @@ describe('createFrameSequencer: reorderWindowUs', () => {
     put(1, 1_400_000);
     put(4, 1_400_000);
     expect(sequencer.poll().frames).toEqual([]);
-    expect(sequencer.stats.late).toBe(2);
+    expect(sequencer.stats).toMatchObject({ late: 0, behind: 2 });
   });
 
   it('does not hold the frame that follows the last delivered group', () => {

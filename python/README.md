@@ -16,6 +16,8 @@ The shared protocol pins, behavior contract, and test vectors live in [spec](../
 [root README](../README.md) describes the whole repository. Before 1.0, a minor version can break the
 API, and [CHANGELOG.md](CHANGELOG.md) says what changed. This guide follows the `main` branch, which
 can be ahead of the latest release.
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 
@@ -764,6 +766,13 @@ if video.has_demand:  # the relay currently has an upstream subscription for the
 A group that fails part-way, because the relay's subscription changed or ended, is reset instead of
 completed, and the track stays open. Start the next group at the next keyframe.
 
+Serve the catalog before you gate encoding on demand. Viewers read the catalog first, and only then
+subscribe to the video track, which is what gives it demand. If the catalog waits for the encoder's
+first output, and the encoder waits for `has_demand`, neither ever starts, and no viewer gets video.
+Either build the catalog from the encoder configuration you already know, or encode regardless of
+demand until the first decoder configuration arrives, then encode only while `video.has_demand` is
+true.
+
 `demand_changes()` iterates relay demand. It yields the current state first. After that it yields
 `True` when the relay subscribes or replaces its subscription, so `True` can repeat, and `False` when
 the subscription ends. A catalog track uses it to re-send its document on each relay subscription:
@@ -807,7 +816,10 @@ Each `await writer.write(frame)` returns what became of the frame (`sent`, `skip
 `dropped`, `interrupted`, or `ended`) instead of raising. The writer serves writes from several tasks
 in call order. When more than `max_backlog` frames wait behind the one being written, the writer
 drops frames instead of queueing them. Under keyframe grouping it drops the waiting frames and the
-group in progress. Under `grouping="frame"` it drops the oldest waiting frame.
+group in progress. Under `grouping="frame"` it drops the oldest waiting frame. `max_backlog` defaults
+to 8 under keyframe grouping; under frame grouping there is no default bound, so no frame is dropped
+for the backlog, and memory is unbounded while delivery is blocked
+([#412](https://github.com/muxinc/relay-sdks/issues/412)).
 `writer.keyframe_needed` and `on_keyframe_needed=` say when the next frame must be a keyframe: after a
 demand change, a failure, a stale frame, or a drop. An encoder can then force one. A frame is any
 object with `payload`, `key`, `properties`, and `discontinuity` attributes, so your own encoded-sample
@@ -843,6 +855,139 @@ JSON writing uses compact `json.dumps` with `ensure_ascii=False` and `allow_nan=
 values, cycles, non-finite numbers, and unpaired surrogates fail locally. Reading also rejects `NaN`
 and `Infinity`. Other conversions follow Python's standard JSON behavior. Text writing uses strict
 UTF-8 encoding. Raw byte `write()` and plain subscriptions remain available.
+
+## Control and telemetry
+
+Apps that send media often send small data beside it. A robot reports telemetry, and a remote
+cockpit sends it controls. Most of this data is **latest-wins**: a newer value makes the older one
+useless. Some of it is not, such as an emergency stop that must arrive even when a newer message
+follows. Choose the pattern per track.
+
+### Each side publishes its own track
+
+A publisher connection serves one namespace. So each side of a two-way app has its own publisher,
+and subscribes to the other side's namespace with a subscriber. The robot publishes `video` and
+`telemetry` under `["room", "robot"]`, and subscribes to `control` under `["room", "cockpit"]`. The
+cockpit does the reverse. Each side's token must grant publishing under its own namespace and
+subscribing under the other's.
+
+```python
+import asyncio
+import json
+
+from caprid_relay import (
+    MessageParameters,
+    WantHandlers,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    read_json,
+)
+from caprid_relay.media import DocumentService
+
+# On the robot.
+publisher = await connect_relay_publisher(url, namespace=["room", "robot"], get_token=get_token)
+telemetry = DocumentService(publisher.register_track("telemetry"))
+serving = asyncio.create_task(telemetry.serve())
+
+
+async def report() -> None:
+    while True:
+        telemetry.update(json.dumps(read_sensors()).encode())
+        await asyncio.sleep(0.05)
+
+
+reporting = asyncio.create_task(report())
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+newest = -1  # the newest control group applied
+
+
+def on_control(obj) -> None:
+    global newest
+    if obj.group_id <= newest:
+        return  # superseded: a newer value already arrived
+    newest = obj.group_id
+    apply_control(read_json(obj))
+
+
+def on_new_numbering(*_args) -> None:
+    global newest
+    newest = -1  # the new subscription numbers its groups afresh
+
+
+subscriber.want(
+    "control",
+    ["room", "cockpit"],
+    "control",
+    WantHandlers(on_object=on_control, on_restarted=on_new_numbering, on_switched=on_new_numbering, on_error=on_error),
+    parameters=MessageParameters(subscriber_priority=0),
+)
+```
+
+### Latest-wins values
+
+Send each value as a group of its own, holding one object. `track.write()` does this, and so does a
+document service. `caprid_relay.media.DocumentService(track)` is the simplest latest-wins publisher.
+`update(value)` replaces the value it holds. While a write is in progress, later updates replace one
+another, so only the newest is sent next. The service also sends the current value again on every
+relay subscription. That matters because an update made while the relay has no subscription is only
+held, not sent. After a failed write, it waits `retry_delay` seconds (1 by default) before it sends again, so
+pass a smaller value for a value that changes quickly.
+
+Make each value complete, not a change to the previous one. A viewer that joins late starts at the
+relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
+and the viewer drops values that arrive superseded.
+
+**Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`RelaySubscriber.max_age_supported`)
+skips groups that a newer one has superseded for longer than the
+`MessageParameters(max_age=...)` (milliseconds) you subscribe with. The SDK sends it only to such a
+relay, so it is safe to set ([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)). In
+a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
+one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
+600 of them arrived before an older group, because each group travels on a stream of its own. The
+same happened with 100 ms subscriber delivery timeouts and with group order descending
+([measurements](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+Delivery timeouts do not change this. The relay ignores the subscriber's, and the publisher's only
+bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+So the viewer does the dropping:
+
+- Ignore any group older than the newest one applied, as in the example above. Group IDs rise within
+  one subscription. They start over when a want restarts or moves to a new generation, so reset the
+  marker in `on_restarted` and `on_switched`.
+- To know when a value is too old to act on, put the time it was taken in the payload. Comparing
+  that time with the viewer's clock assumes the two machines' clocks agree. When every value arrives
+  too late, call `unwant(key)` and `want(...)` again. The new subscription starts at the relay's
+  latest group, so the relay's backlog is skipped. `stale_after` does not help here, because a
+  backlog is not silence.
+- Give control and telemetry a subscriber priority ahead of the video on the same connection. The
+  relay orders what it sends you by your subscriber priority alone, where a lower number is more
+  urgent ([measured](../spec/relay-interop.md#subscription-parameters)).
+  `caprid_relay.media.media_subscribe_parameters` gives audio 16 and video 96.
+
+A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
+`write_json()` for each one. A concurrent write raises `WRITE_PENDING`, so queue commands in your own
+code. A write waits for relay demand and sends once the relay subscribes. `write_timeout` (10 s by
+default) covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the
+command was never delivered. Check its `phase`: only `"waiting-for-demand"` means no bytes went out. Commands can also arrive out of order, so number
+them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
+that, have the viewer reply on its own track.
+
+### Latency and staleness: where each is set
+
+The publisher and the viewer set different things, under similar names:
+
+| Setting | Side | What it does |
+| --- | --- | --- |
+| `PlayoutClock(target_latency_us=...)` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `late_drop_us` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
+| Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the `FrameSequencer` re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
+| `stale_after` on `want` | viewer | Resubscribes a track that has been silent that many seconds. The want restarts with reason `"stale"`. Use it only for tracks that are never silent while live. |
+| `media_track_properties(kind, target_latency_us=...)` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
+| Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
+
+The TypeScript sequencer can also ask to catch up when frames keep arriving late
+(`catchUpAfterUs` with `catchUp(key)`). Python has neither yet.
 
 ## Errors and recovery
 

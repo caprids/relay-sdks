@@ -638,7 +638,7 @@ sequencer as an argument.
 | Hold early frames and release each at its timestamp, off unless used | `timestampPlayout: true` or `TimestampPlayoutOptions { horizonUs?, leadUs? }` on `FrameSequencerOptions` (frame grouping; `leadUs` a number or a function read at every poll) | — |
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
-| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, behind, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, behind, skipped_groups, resyncs, untimed)` |
 | A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
@@ -839,7 +839,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
 | What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |
 | One encoded frame as the writer sees it | `Frame { payload, key, properties?, discontinuity? }`; `@caprid/moq-media`'s `LocFrame` qualifies | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
-| Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
+| Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8; none under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
 | A media track's default delivery timeout and publisher priority, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs, publisherPriority })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None, publisher_priority=None)` (`MediaKind`) |

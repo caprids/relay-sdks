@@ -1524,16 +1524,18 @@ Implemented in both SDKs.
 - Writes on one writer are served one at a time, in the order they were called, so an encoder whose
   output callback cannot await may call `write` without waiting for the previous one. Frames waiting
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
-  positive integer, default 8 under keyframe grouping and 25 under frame grouping). A caller that awaits
-  every write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
+  positive integer, default 8 under keyframe grouping). Under frame grouping there is no bound unless
+  one is given, so no frame is dropped for the backlog, and memory is then unbounded while delivery is
+  blocked ([#412](https://github.com/muxinc/relay-sdks/issues/412), open). A caller that awaits every
+  write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
   promise cannot be cancelled) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
   treated as following a discontinuity, and a keyframe is needed.
 - A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
   rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
   reset at once. The frame being written into it, if any, is dropped too. The arriving frame then
   opens the next group if it is a keyframe, and is dropped otherwise, as is every delta after it
-  until the next keyframe. Under frame grouping the oldest waiting frame is dropped and the arriving
-  frame takes its place at the back.
+  until the next keyframe. Under frame grouping, when a bound is set, the oldest waiting frame is
+  dropped and the arriving frame takes its place at the back.
 - A frame the relay has no subscription for when its turn comes is skipped at once. The writer never
   waits on the write deadline, because an encoder loop cannot block. A relay demand change (a new or
   replacement subscription, or its end) ends the open group in the write slot at once. The writer
@@ -1714,7 +1716,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
 - When the next group ID has not been seen, the lowest group holding its keyframe waits while that
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
-  what was delivered or passed over, or below the group being delivered, are dropped as late.
+  what was delivered or passed over, or below the group being delivered, are dropped as behind.
 - Frame grouping (audio): every frame stands alone and goes out at once in group and object order. A
   group may hold several frames, one per object, as a group opened with `openGroup()` /
   `open_group()` writes them. The position is then a group and an object, so a group's later objects
@@ -1722,7 +1724,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   object ID skips within the last delivered group, or that opens a newer group past its object 0,
   carries `gap`. A frame more than the clock's `lateDropUs` behind the position is dropped, so a
   burst after a stall cannot build a lasting backlog in the player. One behind what was delivered
-  (an earlier group, or an earlier object of the same group) is dropped too. Nothing waits
+  (an earlier group, or an earlier object of the same group) is dropped as behind. Nothing waits
   unless a reorder window is set (below).
 - Per-track delivery policy is TypeScript only. Python keeps the defaults. Three sequencer options
   tune one track without touching the clock its other tracks share. Each default leaves the
@@ -1809,8 +1811,9 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
-  Move, indistinguishable from the new subscription's. Counters: delivered, late,
-  skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
+  Move, indistinguishable from the new subscription's. Counters: delivered, late (too late against
+  the clock's position, or dropped past the held bound), behind (arrived behind what was delivered or
+  passed over), skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
   `vectors/frame-sequencer.json`.
 - A listener follows a track replacement by the catalog: `findReplacementTrack` /
   `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its

@@ -688,6 +688,19 @@ MAX_AGE onto it instead, per subscriber, and still ignores the timeouts
 subscriber's timeout goes on the SUBSCRIBE either way, and the late drop, reorder window and
 catch-up act on whatever the relay sends.
 
+**On production, superseded groups are delivered too.** Re-measured against ord.relay.mux.global on
+2026-11-04 ([#446](https://github.com/muxinc/relay-sdks/issues/446)). The relay does not report its
+version, and the fleet's deployment config named moq-relay 0.17.9 that day. The probe below ran with
+`VOICE_PAYLOAD=1000` (about 400 kbit/s of one-object groups) and the subscriber's downlink only went
+through a userspace UDP shaper at 300 kbit/s with a 1 s FIFO. The publisher's path was not shaped.
+There were three runs: one with 100 ms subscriber delivery timeouts, one with GROUP_ORDER Descending
+and no timeouts, and one with neither. Every run delivered 700 of 700 groups with no subgroup reset.
+Lateness was p50 2.7-2.8 s, p99 11.2-11.9 s, and max 13.6-15.6 s. In each run 602-606 arrivals came
+before a group older than them (`out_of_order`). A newer group never replaced an older one: the relay
+sent every superseded group, late. An application that wants only the newest value drops older group
+IDs itself and moves to the live edge when the backlog grows. The TypeScript and Python guides show
+how.
+
 To re-measure, against a local relay as in [Reproduce against a local relay](#reproduce-against-a-local-relay)
 or a deployed one, and through an impairer for the slow-link rows (`RELAY_SUB_URL` is the
 subscriber's endpoint, `VOICE_*` set the payload, timing, delivery timeouts and group order; the
