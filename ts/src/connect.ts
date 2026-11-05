@@ -40,6 +40,7 @@ export type {
   RelayCredential,
   RelayTransportFactory,
 } from './connect-session.js';
+export { webTransport } from './connect-session.js';
 
 /** Which track to subscribe to, and how: what {@link RelaySubscriber.subscribe} and `subscribeEvents` take. */
 export interface RelayTrackOptions {
