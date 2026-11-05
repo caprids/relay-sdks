@@ -496,6 +496,8 @@ interface FetchRecord extends RequestRecordBase {
   requestId: number;
   handlers: FetchHandlers;
   groupOrder: 'ascending' | 'descending';
+  /** The data stream ended or reset. The session forgets the fetch once its request is answered too (#419). */
+  dataEnded?: boolean;
 }
 
 interface TrackStatusRecord extends RequestRecordBase {
@@ -1096,7 +1098,7 @@ class MoqtSessionImpl implements MoqtSession {
   #handleFetchMessage(record: FetchRecord, message: ControlMessage): void {
     switch (message.kind) {
       case 'fetch-ok':
-        this.#settleRequest(record);
+        this.#settleFetch(record);
         record.handlers.onOk?.({
           endOfTrack: message.endOfTrack,
           endLocation: message.endLocation,
@@ -1113,7 +1115,7 @@ class MoqtSessionImpl implements MoqtSession {
       // armed would fail an answered fetch (and drop its data stream)
       // once the deadline passed.
       case 'request-ok':
-        this.#settleRequest(record);
+        this.#settleFetch(record);
         break;
       case 'request-error':
         this.#settleRequest(record);
@@ -1205,6 +1207,12 @@ class MoqtSessionImpl implements MoqtSession {
     if (record.trackAlias !== undefined && this.#aliasRoutes.get(record.trackAlias) === record) {
       this.#aliasRoutes.delete(record.trackAlias);
     }
+  }
+
+  /** A fetch's response arrived: settle it, and forget it if its data stream has already ended (#419). */
+  #settleFetch(record: FetchRecord): void {
+    this.#settleRequest(record);
+    if (record.dataEnded) this.#fetches.delete(record.requestId);
   }
 
   #cancelFetch(record: FetchRecord, reason?: unknown): void {
@@ -1410,9 +1418,11 @@ class MoqtSessionImpl implements MoqtSession {
       // as the clean FIN `onEnd` promises.
       record.handlers.onReset?.({ error });
     } finally {
-      // The data stream was the fetch's last event, so the session forgets it here (#419): kept, the record's
-      // handlers held everything they had collected for the session's life.
-      this.#fetches.delete(requestId);
+      // Nothing more arrives for the fetch once its data stream and its response have, so the session forgets it
+      // then (#419): kept, the record's handlers held everything they had collected for the session's life. Data can
+      // beat the response; until the response, or the request timeout, the record stays for teardown to fail.
+      record.dataEnded = true;
+      if (record.settled) this.#fetches.delete(requestId);
     }
   }
 

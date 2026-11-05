@@ -6,9 +6,9 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
-- `caprid-moq-core`: a FETCH is removed from its session when its data stream ends (`on_end`) or resets
-  (`on_reset`) (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it, so its
-  handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
+- `caprid-moq-core`: a FETCH is removed from its session once its data stream has ended (`on_end`) or reset (`on_reset`)
+  and its response has arrived (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it,
+  so its handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
 - `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
   rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
   encoder's next scheduled keyframe. The open group still finishes on the old generation.

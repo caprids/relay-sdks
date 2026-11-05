@@ -7,12 +7,12 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
-- `@caprid/moq-core`: a FETCH is removed from its session when its data stream ends (`onEnd`) or resets (`onReset`)
-  (#419). Before, only a REQUEST_ERROR or `cancel()` removed it, so its handlers, and every payload they had
-  collected, stayed in memory for the session's life: each group a VOD consumer fetched through `trackSource.fetch`
-  stayed. Through relay.mux.global (moq-relay 0.17.9), 30 FETCHes of 2 MiB groups whose results were dropped left
-  60 MiB of `arrayBuffers` after `gc()` in Node; now 2 MiB. No API change: `cancel()` after the end is still
-  allowed, and code that called it to free the fetch can stop.
+- `@caprid/moq-core`: a FETCH is removed from its session once its data stream has ended (`onEnd`) or reset (`onReset`)
+  and its response has arrived (#419). Before, only a REQUEST_ERROR or `cancel()` removed it, so its handlers, and every
+  payload they had collected, stayed in memory for the session's life: each group a VOD consumer fetched through
+  `trackSource.fetch` stayed. Through relay.mux.global (moq-relay 0.17.9), 30 FETCHes of 2 MiB groups whose results were
+  dropped left 60 MiB of `arrayBuffers` after `gc()` in Node; now 2 MiB. No API change: `cancel()` after the end is
+  still allowed, and code that called it to free the fetch can stop.
 - `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
   rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
   so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only
