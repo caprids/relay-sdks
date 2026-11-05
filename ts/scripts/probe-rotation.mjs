@@ -5,13 +5,15 @@
 //
 // A supervised publisher writes a 30 fps video track through a frame writer, with a keyframe every
 // ROTATION_KEYFRAME_MS, and a 20 Hz telemetry track with one object per group. It calls `rotate()` every
-// ROTATION_EVERY_MS. With ROTATION_FORCE_KEYFRAME=1 the encoder honours `onKeyframeNeeded` by making its next frame a
-// keyframe, as the WebCodecs example does. A supervised subscriber wants both tracks with `generations: true`, video
-// through a frame reader on a playout clock as a player would. For each rotation it prints the longest gap between video
-// objects received, between video frames played, and between telemetry objects received, around it.
+// ROTATION_EVERY_MS. With ROTATION_FORCE_KEYFRAME=1 the encoder honors `onKeyframeNeeded` by making its next frame a
+// keyframe, as the WebCodecs example does. A supervised subscriber wants both tracks with `generations: true`. It reads
+// the video through a frame reader on a playout clock, as a player would. For each rotation the probe prints three
+// numbers: the longest gap between video objects received, between video frames played, and between telemetry objects
+// received.
 //
-// Environment: RELAY_URL, RELAY_SUB_URL (default RELAY_URL; another relay puts the viewer across relays), RELAY_TOKEN, RELAY_NAMESPACE_PREFIX, ROTATION_RUN_S (default 32), ROTATION_EVERY_MS
-// (default 5000), ROTATION_KEYFRAME_MS (default 1000), ROTATION_FORCE_KEYFRAME (default off),
+// Environment: RELAY_URL, RELAY_SUB_URL (default RELAY_URL; point it at another relay to put the viewer there),
+// RELAY_TOKEN, RELAY_NAMESPACE_PREFIX, ROTATION_RUN_S (default 32), ROTATION_EVERY_MS (default 5000),
+// ROTATION_KEYFRAME_MS (default 1000), ROTATION_FORCE_KEYFRAME (default off),
 // ROTATION_SUBSCRIBER_OFFSET_MS (unset: the subscriber never rotates; otherwise it rotates this long after each
 // publisher rotation, as a viewer on tokens of the same lifetime does).
 //

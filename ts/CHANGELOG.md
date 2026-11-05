@@ -8,9 +8,9 @@ each section says what changed and what to do about it. How to cut a release is 
 ## Unreleased
 
 - `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
-  rotation moves the track to the new generation (#444). Before, it waited for the encoder's next natural keyframe,
-  so viewers switched up to one keyframe interval late, and with keyframes made only on request only when the 10 s
-  overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
+  rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
+  so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only
+  when the 10 s overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
 - `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
   left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
   ([Test recovery by dropping the transport](GUIDE.md#test-recovery-by-dropping-the-transport)), instead of

@@ -761,9 +761,9 @@ taken over.
   follow the generation the writer is on, and report no `false` when demand carries over. They report
   `true` again on the move, as they do when the relay replaces its upstream subscription, so state an
   application writes on demand (a catalog) reaches the new generation. A frame writer on the track
-  needs a keyframe on the move, though its open group keeps finishing on the old generation, so its
-  encoder can start the new generation's first group at once instead of at its next natural keyframe
-  ([#444](https://github.com/muxinc/relay-sdks/issues/444)). When the
+  needs a keyframe on the move. Its open group keeps finishing on the old generation, and the
+  keyframe lets the encoder start the new generation's first group at once rather than at its next
+  scheduled keyframe ([#444](https://github.com/muxinc/relay-sdks/issues/444)). When the
   overlap runs out, every track moves regardless of demand, and the old generation closes as
   `close()` closes it.
 - **Subscriber.** The replacement is a new connection, and every want **moves** its subscription to
@@ -1545,11 +1545,11 @@ Implemented in both SDKs.
   finds it ended at the next frame, even one written before it has seen the change, and skips deltas
   until the next keyframe. The open group is not replayed.
 - Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
-  `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change
-  (a supervised track's [move](#rotation) to a new generation among them, which ends no group),
+  `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change,
   interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe
-  arrives when `write` is called with it, whether or not it is later sent. The optional
-  `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that
+  arrives when `write` is called with it, whether or not it is later sent. A supervised track's
+  [move](#rotation) to a new generation counts as a demand change, though it ends no group. The
+  optional `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that
   state after the start, so an encoder can force a keyframe instead of waiting out its interval. An
   exception from it is reported (to `console.error`, or to the asyncio loop's exception handler) and does not
   touch the writer. The writer watches the track's demand from its creation until it closes or the

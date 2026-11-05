@@ -682,13 +682,13 @@ no gap longer than 42 ms. See [rotation](../spec/behavior.md#rotation).
 
 For video, viewers keep the old generation's picture until the new generation's first keyframe. A
 frame writer asks for that keyframe through `onKeyframeNeeded` as soon as viewers subscribe to the
-new generation, so honor it. Measured on ORD with 30 fps video and `rotate()` every 5 s, no viewer
-went more than one frame interval without a picture. Video switched 46–206 ms after `rotate()`.
-An encoder that ignores the request switches at its next natural keyframe, up to one keyframe
-interval later. With keyframes made only on request, it switched only when the 10 s overlap ran
-out. The move also reports `true` from `demandChanges()` while demand carries over. Force a keyframe
-on it, but don't restart the encoder. A live connection can't take a new token on moq-relay today,
-so every rotation is a new connection and generation
+new generation, so honor it. In a test on ORD with 30 fps video and `rotate()` every 5 s, no viewer
+went more than one frame interval without a picture, and video switched 46 to 206 ms after
+`rotate()`. An encoder that ignores the request switches at its next scheduled keyframe, up to one
+keyframe interval later. An encoder that makes keyframes only on request and ignores it switches
+only when the 10 s overlap runs out. The move also reports `true` from `demandChanges()` while
+demand carries over. Force a keyframe on it, but don't restart the encoder. moq-relay can't give a
+live connection a new token today, so every rotation opens a new connection and generation
 ([#261](https://github.com/muxinc/relay-sdks/issues/261)).
 
 ### Test recovery by dropping the transport

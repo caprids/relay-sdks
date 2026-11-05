@@ -621,12 +621,12 @@ lost or repeated. Call `rotate()` to rotate now, for example after you revoke a 
 
 For video, viewers keep the old generation's picture until the new generation's first keyframe. A
 `FrameWriter` asks for that keyframe through `on_keyframe_needed` as soon as viewers subscribe to the
-new generation, so honor it. With the request honored, a live test switched video 46–206 ms after
-`rotate()` with no viewer more than one frame without a picture. An encoder that ignores the request
-switches at its next natural keyframe, up to one keyframe interval later. The move also reports
-`True` from `demand_changes()` while demand carries over. Force a keyframe on it, but don't restart
-the encoder. A live connection can't take a new token on moq-relay today, so every rotation is a new
-connection and generation ([#261](https://github.com/muxinc/relay-sdks/issues/261)).
+new generation, so honor it. In a live test that honored the request, video switched 46 to 206 ms
+after `rotate()`, and no viewer went more than one frame without a picture. An encoder that ignores
+the request switches at its next scheduled keyframe, up to one keyframe interval later. The move
+also reports `True` from `demand_changes()` while demand carries over. Force a keyframe on it, but
+don't restart the encoder. moq-relay can't give a live connection a new token today, so every
+rotation opens a new connection and generation ([#261](https://github.com/muxinc/relay-sdks/issues/261)).
 
 ### Test recovery by dropping the transport
 

@@ -8,7 +8,7 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 - `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
   rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
-  encoder's next natural keyframe. The open group still finishes on the old generation.
+  encoder's next scheduled keyframe. The open group still finishes on the old generation.
 - `caprid-moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
   passed over in the new `stats.behind`, no longer in `stats.late` (#431), as in the TypeScript SDK. `late` keeps the
   frames too late against the clock's position and those dropped past the held bound. A reader that reported `late`
