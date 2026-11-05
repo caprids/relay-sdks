@@ -129,8 +129,10 @@ jobs:
         timeout-minutes: 15
         working-directory: ts
         run: |
+          # The first try may have left root's apt-get downloading, or dpkg unpacking. Stop the download (what it has
+          # fetched stays in /var/cache/apt/archives), let dpkg finish, then repair any half-configured package.
           sudo pkill -x apt-get || true
-          while pgrep -x apt-get > /dev/null; do sleep 2; done
+          timeout 300 bash -c 'while pgrep -x apt-get > /dev/null || pgrep -x dpkg > /dev/null; do sleep 2; done'
           sudo dpkg --configure -a
           pnpm exec playwright install-deps chromium firefox webkit
       - name: Keep the downloaded .debs for the cache
