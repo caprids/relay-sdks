@@ -904,3 +904,24 @@ it('reports audio to a clock passed in, as a video watcher shares its own', asyn
   expect(clock.position()).toBeGreaterThanOrEqual(5_000_000);
   await listener.stop();
 });
+
+it('plays audio that arrives behind a shared clock that video is pacing', async () => {
+  const fake = fakeSubscriber();
+  const clock = createPlayoutClock({ now: () => 0 });
+  // A video frame anchored wall pacing 200 ms ahead of the audio about to arrive.
+  clock.due(1_200_000);
+  const listener = await listen(fake, audioCatalog(), { clock });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  for (const index of [0, 1, 2, 3]) {
+    audio.handlers.onObject?.({
+      groupId: index,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [{ type: LOC_TIMESTAMP, value: 1_000_000 + index * 20_000 }],
+      payload: OPUS_PACKETS[index] as Uint8Array,
+    } as MoqtObject);
+  }
+  expect(listener.input.stats.decoded).toBe(4);
+  await listener.stop();
+});

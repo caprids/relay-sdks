@@ -48,7 +48,8 @@ export interface ListenAudioOptions {
   context?: AudioContext;
   /**
    * The playout clock the audio reports to. Pass a video watcher's clock to play audio and video in sync; that clock's
-   * target latency then bounds the jitter buffer. Default: a clock for audio only, with `AUDIO_ONLY_TARGET_LATENCY_US`.
+   * target latency then bounds the jitter buffer, and audio up to `AUDIO_ONLY_TARGET_LATENCY_US` behind its position
+   * still plays, since video may be pacing it. Default: a clock for audio only, with `AUDIO_ONLY_TARGET_LATENCY_US`.
    */
   clock?: PlayoutClock;
   /**
@@ -161,7 +162,14 @@ export async function listenAudio(
   try {
     options.signal?.throwIfAborted();
     const clock = options.clock ?? createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
-    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    // A shared clock may be paced by video before any audio plays, and audio that arrives later than the video it goes
+    // with would be dropped as late against that position, so it never plays and never takes the clock over. Keep
+    // what the jitter buffer could still hold.
+    const sequencer = createFrameSequencer({
+      clock,
+      grouping: 'frame',
+      ...(options.clock ? { lateDropUs: AUDIO_ONLY_TARGET_LATENCY_US } : {}),
+    });
     const hold = createFrameHold<SequencedFrame>();
     interface Audio {
       reader: FrameReader;
