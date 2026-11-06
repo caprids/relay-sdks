@@ -4,7 +4,7 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.4.0
 
 - `caprid-relay`: `SupervisedSubscriber.catch_up(key)` replaces a want's accepted subscription at the live edge,
   break-before-make, when it delivers too late to use (#447), as in the TypeScript SDK. The relay drops what it still

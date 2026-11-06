@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.4.0
 
 - Voice bot and WebCodecs examples: `listenAudio`, `watchVideo` and `talkToBot` take a supervised subscriber
   (`connectSupervisedSubscriber`) instead of a plain one, and keep playing when the talker restarts (#404). Before, a
