@@ -218,6 +218,24 @@ describe('createVideoPlayer', () => {
     ]);
   });
 
+  it('shows or drops what is due at each decoded frame, so only frames ahead of the clock wait while timers stall', () => {
+    const { player, shown } = setUp();
+    player.push(key(0));
+    player.push(delta(1));
+    decoder().release();
+    expect(player.stats.queued).toBe(1);
+    // A hidden tab: a second passes and the timer for frame 1 does not fire, while the decoder outputs frames 2 to 30.
+    vi.setSystemTime(Date.now() + 1000);
+    for (let index = 2; index <= 30; index++) player.push(delta(index));
+    decoder().release();
+    expect(shown).toEqual([
+      [0, 0],
+      [24, 1_000_000],
+      [25, 1_000_000],
+    ]);
+    expect(player.stats).toMatchObject({ dropped: 23, queued: 5 });
+  });
+
   it('waits for a keyframe at the start, skipping the frames before it', () => {
     const { player, shown } = setUp();
     player.push(delta(0));

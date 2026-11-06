@@ -132,7 +132,8 @@ const isNotSupported = (error: unknown) => error instanceof Error && error.name 
 /**
  * Create a video player. Decoded frames wait in presentation order until the clock says the earliest is due, so a
  * decoder whose pool of frames is full resumes as they are shown: the earliest is due within the clock's
- * `maxVideoDelayUs`, or shown at once as a re-sync.
+ * `maxVideoDelayUs`, or shown at once as a re-sync. The player asks the clock at each decoded frame as well as on its
+ * timer, so only frames ahead of the clock wait, even while a hidden tab throttles timers.
  *
  * ```ts
  * const clock = createPlayoutClock();
@@ -225,7 +226,10 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
         stats.decoded++;
         joinPhases.firstDecodedUs ??= clock.localNow();
         queue.push(frame);
-        if (timer === undefined) pump();
+        // A hidden tab runs timers once a second or less. Paced by the timer alone, every frame decoded meanwhile
+        // would wait for it, due or not.
+        stopTimer();
+        pump();
       },
       error(error) {
         if (current() === decoder) fail(decoder, error);

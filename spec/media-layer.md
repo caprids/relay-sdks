@@ -1195,9 +1195,31 @@ milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The 0.3 ms 
 clamped to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up took the wall-paced
 p95 sync error from 3.8–4.0 ms to 1.0 ms on the hub run below.
 
-The queue has no bound of its own. Its head is the earliest frame, and the clock shows it within
-`maxVideoDelayUs` (1 s by default) or at once as a re-sync. A hardware decoder whose pool of frames
-is full therefore outputs again as frames are shown.
+The player also asks the clock each time the decoder outputs a frame, not only when its timer
+fires. A frame that is due or late then leaves the queue as soon as the next frame is decoded, and
+only frames ahead of the clock wait. That matters in a hidden tab. Chromium runs a hidden page's
+timers at most once a second, and once a minute after five minutes without sound (its throttling
+policy, not measured here). A player paced by its timer alone would hold every frame decoded
+meanwhile.
+
+The queue has no bound in frames. The clock bounds it in time: it shows the head within
+`maxVideoDelayUs` (1 s by default), or at once as a re-sync. A hardware decoder whose pool of frames
+is full therefore outputs again as frames are shown. The WebCodecs example's `watchVideo` kept at
+most 16 decoded frames and drew the oldest early past that, for three reasons. The player covers
+each without a frame count:
+
+- Throttled timers let decoded frames pile up. Asking the clock at each decoded frame keeps only
+  the frames ahead of it.
+- A hardware decoder stops outputting while its pool of frames is held. The head is due within
+  `maxVideoDelayUs`, so the decoder resumes. A bound larger than the pool never trips, because the
+  check runs on output and no output comes.
+- Audio may lag video by more than the bound. The bound counts frames, but the wait is time. The
+  audio player's 400 ms jitter ceiling plus its output delay, about 450 ms, is 14 frames at 30 fps
+  and 27 at 60 fps. A bound of 16 would draw 60 fps video about 180 ms early in normal playback. The
+  clock's limit holds at any frame rate.
+
+Before `watchVideo` moved onto the player, its live test drew no frame early past the bound in any
+phase (`overflowed` 0 through the in-memory hub, 2026-11-06).
 
 **Borrowed frames.** `render(frame)` borrows the frame. The player closes it when `render` returns,
 and a sink that keeps a frame keeps `frame.clone()`. A hardware decoder has a fixed pool of output
