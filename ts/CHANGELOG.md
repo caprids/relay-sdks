@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.4.0
 
 - `@caprid/relay/media`: `createLatestValueReader({ onValue, late, onCatchUp })` reads a latest-wins track, such as
   telemetry or a control, as its newest values (#447). Spread it into `subscribe` or `want` handlers. It drops an
