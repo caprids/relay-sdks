@@ -88,8 +88,9 @@ export interface VideoWatcher {
  *
  * The video is a want of the supervised subscriber, so the watcher outlives the publisher: when it restarts, at
  * `namespace` or (with `generations`) as a newer generation under it, or the subscriber reconnects, the want
- * subscribes again, and the next frame is a restart, where the decoder resets and waits for a keyframe. The decoder
- * config is the first catalog's: a publisher that comes back with another codec or avcC is not followed.
+ * subscribes again. The decoder resets at once, the decoded frames still waiting are dropped rather than drawn into
+ * the gap, and it starts again at the new subscription's keyframe. The decoder config is the first catalog's: a
+ * publisher that comes back with another codec or avcC is not followed.
  *
  * For sound in sync, pass one clock to both this and `listenAudio`: audio is the master. Until audio reports reach the
  * clock, video plays on wall pacing, so it starts before any user gesture and keeps playing while the `AudioContext`
@@ -125,20 +126,23 @@ export async function watchVideo(
       reader: FrameReader;
       failed: { error: unknown } | undefined;
     }
+    // A restart or a move of the video want, after the reader has restarted the sequencer (and with it the clock).
+    // Before the decoder exists it drops the held frames of the old subscription; after, the decoded frames waiting
+    // too, at once: on the reset clock they would look due and fill the gap with the old subscription's picture.
+    let restarted = () => hold.clear();
     const wantVideo = (name: string): Video => {
       const reader = createFrameReader(sequencer, { onFrame: hold.push });
       const video: Video = { key: `${id}/video/${name}`, reader, failed: undefined };
       const handlers: WantHandlers = {
         ...reader,
-        // A restart or a move before the decoder exists: the held frames are the old subscription's. After, the
-        // reader's restart marks the next frame, and decode() resets the decoder there.
+        // The reader's restart also marks the next frame, where decode() counts the discontinuity.
         onRestarted() {
           reader.onRestarted();
-          if (!started) hold.clear();
+          restarted();
         },
         onSwitched(info) {
           reader.onSwitched(info);
-          if (!started) hold.clear();
+          restarted();
         },
         onError(error) {
           video.failed ??= { error };
@@ -272,21 +276,37 @@ export async function watchVideo(
     };
     let decoder = createDecoder();
     release.push(() => decoder.close());
+    // Set when a want restart has already reset the decoder for the restart mark the next frame carries.
+    let restartHandled = false;
     const decode = (frame: SequencedFrame) => {
       if (failedForGood) return;
+      const handled = restartHandled;
+      restartHandled = false;
       if (frame.discontinuity) {
         stats.discontinuities++;
-        // A resync or a restart moved the timeline: what waits was decoded for the old one.
-        if (frame.discontinuity !== 'gap') dropQueued();
-        decoder.reset();
-        decoder.configure(config);
-        needsKey = true;
+        if (!(handled && frame.discontinuity === 'restart')) {
+          // A resync or a restart moved the timeline: what waits was decoded for the old one.
+          if (frame.discontinuity !== 'gap') dropQueued();
+          decoder.reset();
+          decoder.configure(config);
+          needsKey = true;
+        }
       }
       if (needsKey && !frame.key) return;
       needsKey = false;
       decoder.decode(
         new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }),
       );
+    };
+    restarted = () => {
+      if (stopped) return;
+      dropQueued();
+      if (failedForGood || decoder.state === 'closed') return;
+      // Output the decoder still holds is the old subscription's too: reset discards it.
+      decoder.reset();
+      decoder.configure(config);
+      needsKey = true;
+      restartHandled = true;
     };
     started = true;
     hold.release(decode);
