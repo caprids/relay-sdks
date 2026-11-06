@@ -1067,6 +1067,10 @@ the wall clock. The [@caprid/moq-media README](packages/moq-media/README.md) sho
 audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing) for the
 sequencer's contract.
 
+For a complete player to copy, see the [WebCodecs example](examples/webcodecs/README.md#watch-the-video)'s
+`watch-video.ts`. It reads the catalog, decodes with `VideoDecoder`, draws to a canvas on the
+playout clock, and shares that clock with `listen-audio.ts`.
+
 A broadcast with no video never reports a keyframe interval, so its clock would keep the 2 s
 default. A lasting delay increase would then cost 2 s of silence before the reader resyncs. Create
 an audio-only clock with `createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US })`

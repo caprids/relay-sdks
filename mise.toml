@@ -78,6 +78,12 @@ depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:audio-player"
 
+[tasks."ts:test:watch-video"]
+description = "Opt-in live test of the WebCodecs example's watchVideo with listenAudio: Chromium through the Relay, audio suspended, resumed and muted (RELAY_TOKEN)"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm test:watch-video"
+
 [tasks."ts:test:conformance"]
 description = "Run the transport adapter conformance suite in headless Chromium against the Python accepting end"
 depends = ["ts:install", "python:install"]
@@ -129,6 +135,12 @@ description = "Serve the voice bot page on http://127.0.0.1:8320 for python:exam
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm example:voice-bot"
+
+[tasks."ts:example:webcodecs"]
+description = "Serve the WebCodecs example page on http://127.0.0.1:8321: publish a canvas and microphone, watch them (RELAY_TOKEN); pass options after --"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm example:webcodecs"
 
 [tasks."python:install"]
 description = "Create the Python workspace environment from uv.lock"
