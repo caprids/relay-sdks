@@ -4,7 +4,6 @@ import {
   type AudioPlayer,
   type AudioPlayerInput,
   audioDecoderConfigFromTrack,
-  CATALOG_TRACK,
   createAudioPlayer,
   createEchoCancellationLoopback,
   createFrameHold,
@@ -16,10 +15,8 @@ import {
   findReplacementTrack,
   INTERRUPT_TRACK,
   type Interrupt,
-  type MsfCatalogTrack,
   type PlayoutClock,
   parseInterrupt,
-  parseMsfCatalog,
   parseTranscriptSegment,
   type SequencedFrame,
   TRANSCRIPT_TRACK,
@@ -28,7 +25,8 @@ import {
   warmAudioPlayer,
 } from '@caprid/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
-import { createFrameReader, type FrameReader } from '@caprid/relay/media';
+import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
+import { type LaterCatalogs, readCatalog } from './read-catalog.js';
 
 /**
  * One step of an audio track replacement (a talker talked over): `seen`, the catalog listing the new track arrived
@@ -48,6 +46,12 @@ export interface AudioTrackReplacedEvent {
 export interface ListenAudioOptions {
   /** The context to play through; create or resume it from a user gesture. Default: a new 48 kHz context. */
   context?: AudioContext;
+  /**
+   * The playout clock the audio reports to. Pass a video watcher's clock to play audio and video in sync; that clock's
+   * target latency then bounds the jitter buffer, and audio up to `AUDIO_ONLY_TARGET_LATENCY_US` behind its position
+   * still plays, since video may be pacing it. Default: a clock for audio only, with `AUDIO_ONLY_TARGET_LATENCY_US`.
+   */
+  clock?: PlayoutClock;
   /**
    * Play through a WebRTC loopback, so Chromium's echo canceller hears this audio when the page also captures a
    * microphone. Default `false`: connect straight to the context's destination.
@@ -94,100 +98,32 @@ export interface AudioListener {
 }
 
 /**
- * Catalogs after the first: the listener's handlers once it has started, and the newest one that came before. An error
- * of the catalog subscription after the first catalog, which the listener depends on for replacements, or a later
- * catalog that does not parse, goes to `onError`; before the listener has started it is kept, the first one only, in
- * `pendingError` and reported once the handlers exist, as `pending` is kept.
+ * Resolve once `context` is running, as after a user gesture resumes it. Start `listenAudio` then: the player takes
+ * every frame that arrives, and a suspended context plays none of them, so a listener started earlier holds all the
+ * audio since it started and spends seconds trimming it once the context resumes, with the clock (and any video on
+ * it) following that backlog. Rejects if the context closes first.
  */
-interface LaterCatalogs {
-  onCatalog?(tracks: MsfCatalogTrack[]): void;
-  onError?(error: unknown): void;
-  pending?: MsfCatalogTrack[];
-  pendingError?: { error: unknown };
-}
-
-function readCatalog(
-  subscriber: RelaySubscriber,
-  namespace: readonly string[],
-  signal: AbortSignal,
-  later: LaterCatalogs,
-) {
-  return new Promise<{ tracks: MsfCatalogTrack[]; subscription: RelaySubscription }>((resolve, reject) => {
-    signal.throwIfAborted();
-    let subscription: RelaySubscription | undefined;
-    // The first catalog object, or the first error, decides; later ones change nothing.
-    let outcome: { tracks: MsfCatalogTrack[] } | { error: unknown; ended: boolean } | undefined;
-    // An object may arrive before subscribe() returns, so the outcome waits until the subscription is in hand.
-    const settle = () => {
-      if (!outcome || !subscription) return;
-      signal.removeEventListener('abort', abort);
-      if ('tracks' in outcome) resolve({ tracks: outcome.tracks, subscription });
-      else {
-        // An error ends the subscription; a catalog that does not parse leaves it open.
-        if (!outcome.ended) subscription.cancel();
-        reject(outcome.error);
-      }
+export function whenRunning(context: BaseAudioContext): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (context.state !== 'running' && context.state !== 'closed') return;
+      context.removeEventListener('statechange', check);
+      if (context.state === 'running') resolve();
+      else reject(new Error('The AudioContext closed before it ran'));
     };
-    // Aborted before the catalog came: cancel the subscription and reject.
-    const abort = () => {
-      if (outcome) return;
-      outcome = { error: signal.reason, ended: false };
-      settle();
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    subscription = subscriber.subscribe(
-      { namespace: [...namespace], track: CATALOG_TRACK },
-      {
-        onObject(object) {
-          if (object.status !== 'normal') return;
-          if (outcome) {
-            // A later catalog: for the listener once it has started, and kept, the newest only, until then.
-            if (!('tracks' in outcome)) return;
-            let tracks: MsfCatalogTrack[];
-            try {
-              tracks = parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks;
-            } catch (error) {
-              if (later.onError) later.onError(error);
-              else later.pendingError ??= { error };
-              return;
-            }
-            if (later.onCatalog) later.onCatalog(tracks);
-            else later.pending = tracks;
-            return;
-          }
-          try {
-            outcome = { tracks: parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks };
-          } catch (error) {
-            outcome = { error, ended: false };
-          }
-          settle();
-        },
-        onError(error) {
-          if (outcome) {
-            // The catalog subscription ended after its first catalog: no replacement can follow, which is reported.
-            if ('tracks' in outcome) {
-              if (later.onError) later.onError(error);
-              else later.pendingError ??= { error };
-            }
-            return;
-          }
-          outcome = { error, ended: true };
-          settle();
-        },
-      },
-    );
-    settle();
+    context.addEventListener('statechange', check);
+    check();
   });
 }
 
 /**
- * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone, with no video:
- * the catalog gives the decoder config, a frame reader orders the frames, and the audio player buffers and plays
- * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come. When the
- * catalog lists the interrupt track, each interrupt for the audio track cuts the audio the player holds; when it lists
- * the transcript track, the listener keeps the audio track's transcript, which interrupts cut too. When a later catalog
- * lists a new audio track in place of the one playing (a talker's track replacement), the listener drops the old
- * track's audio and plays the new one.
+ * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone: the catalog gives
+ * the decoder config, a frame reader orders the frames, and the audio player buffers and plays them. With no video,
+ * the playout clock is created for audio only, so it does not wait 2 s for keyframes that never come; with
+ * `watchVideo`, pass its clock as `clock`. When the catalog lists the interrupt track, each interrupt for the audio
+ * track cuts the audio the player holds; when it lists the transcript track, the listener keeps the audio track's
+ * transcript, which interrupts cut too. When a later catalog lists a new audio track in place of the one playing (a
+ * talker's track replacement), the listener drops the old track's audio and plays the new one.
  *
  * It joins quickly. It starts `warmAudioPlayer(context)` at once, so the worklet module and libopus load while the
  * catalog is on its way (create the context in the user's gesture, as the click that connects, so the warm happens
@@ -225,8 +161,15 @@ export async function listenAudio(
   let reading: ReturnType<typeof readCatalog> | undefined;
   try {
     options.signal?.throwIfAborted();
-    const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
-    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    const clock = options.clock ?? createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
+    // A shared clock may be paced by video before any audio plays, and audio that arrives later than the video it goes
+    // with would be dropped as late against that position, so it never plays and never takes the clock over. Keep
+    // what the jitter buffer could still hold.
+    const sequencer = createFrameSequencer({
+      clock,
+      grouping: 'frame',
+      ...(options.clock ? { lateDropUs: AUDIO_ONLY_TARGET_LATENCY_US } : {}),
+    });
     const hold = createFrameHold<SequencedFrame>();
     interface Audio {
       reader: FrameReader;
@@ -245,7 +188,7 @@ export async function listenAudio(
       };
       try {
         subscribed.subscription = subscriber.subscribe(
-          { namespace: [...namespace], track: name },
+          { namespace: [...namespace], track: name, parameters: mediaSubscribeParameters('audio') },
           {
             ...reader,
             onError(error) {

@@ -33,8 +33,11 @@ subscribe** under its root, which is the namespace prefix the token grants. Ask 
 backend owner for it. For another Relay deployment, also ask its operator for an HTTPS Relay
 endpoint.
 
-The SDK uses tokens but does not issue them, and there is no public token signup. A Mux API access
-token is not a Relay JWT.
+The SDK uses tokens but does not issue them. Switchboard does, and calls them Client tokens. Sign up
+at `app.caprid.com`, then mint a Client token through Switchboard's API, or sign one in your backend
+with a signing key. [Credentials](https://www.caprid.com/docs/guides/credentials/) says which
+credential goes where. Only the Client token belongs in a client, and a relay never accepts an API
+key.
 
 A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
 root as the path. A token rooted at `acme/rooms/42` connects to

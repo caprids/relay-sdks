@@ -1882,9 +1882,13 @@ is a subscription's or a want's handlers that deliver only values newer than the
   and a generic MOQT core package that is protocol-only.
 - The core has no runtime dependencies, no knowledge of Relay, and no player, UI, or media engine
   imports. It works over an abstract transport that the product package supplies.
-- Transport adapters are separate packages the application passes in, and the product package
-  depends on none of them. The TypeScript WebSocket adapter is the only package with a third-party
-  runtime dependency, `@moq/qmux` at an exact version (ADR 0005).
+- In TypeScript, transport adapters are separate packages the application passes in as
+  `createTransport`, and the product package has none as a dependency. `@caprid/relay-quic` is an
+  optional peer, which the Node entry point `@caprid/relay/node` loads when no `createTransport` is
+  given (ADR 0002). The WebSocket adapter is the only TypeScript package with a third-party runtime
+  dependency, `@moq/qmux` at an exact version (ADR 0005).
+- Python's product package ships its adapter, the aioquic native QUIC client `caprid_relay.quic`,
+  and depends on aioquic (ADR 0004). The core imports no transport library.
 - Each language enforces this mechanically in its check task.
 
 ## Tooling conventions

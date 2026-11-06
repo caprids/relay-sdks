@@ -12,10 +12,13 @@ Everything between the microphone and the speaker is the SDKs':
 browser page                          Relay                       bot.py
 captureMicrophone → publishMicrophone ──▶ <namespace>/user/audio ──▶ want → FrameReader → OpusDecoder (16 kHz)
                                                                      → EnergyGate → respond(utterance)
-listenAudio ◀── <namespace>/bot/audio ◀── FrameWriter ◀── OpusEncoder, paced in real time
-  input.cut ◀── <namespace>/bot/interrupt ◀── build_interrupt(until_us=end of what was sent)
- transcript ◀── <namespace>/bot/transcript ◀── build_transcript_segment(seq, from_us, text, until_us, final)
+listenAudio ◀── <namespace>/bot/<gen>/audio ◀── FrameWriter ◀── OpusEncoder, paced in real time
+  input.cut ◀── <namespace>/bot/<gen>/interrupt ◀── build_interrupt(until_us=end of what was sent)
+ transcript ◀── <namespace>/bot/<gen>/transcript ◀── build_transcript_segment(seq, from_us, text, until_us, final)
 ```
+
+`<gen>` is the bot's generation. The bot publishes through a supervised publisher, which serves each
+connection one field below `<namespace>/bot`, and the page plays the newest one.
 
 ## Run it
 
@@ -30,20 +33,21 @@ Open http://127.0.0.1:8320/ in Chromium, press **Talk**, say something and pause
 about 0.7 s after you stop. Talk while it answers and it goes quiet. Replace `acme/voice-bot` with a namespace your token can
 publish and subscribe in. Without `--namespace`, both sides default to `RELAY_NAMESPACE_PREFIX` (or
 `relay-sdk-example`) plus `voice-bot`, for example `relay-sdk-example/voice-bot`. Either side can start first, and the bot keeps waiting for
-the page across reloads. The bot's own publisher is not supervised: if its connection closes, the
-bot exits with the error, and you start it again.
+the page across reloads. If the bot's connection drops, it reconnects as a new generation and the
+page switches to it, so the bot answers the next thing you say.
 
 | Flag | Meaning |
 | --- | --- |
-| `--namespace` | The conversation. The page publishes at `<namespace>/user` and the bot at `<namespace>/bot` |
+| `--namespace` | The conversation. The page publishes at `<namespace>/user` and the bot one generation below `<namespace>/bot` |
 | `--threshold` | Speech is louder than this, in dBFS (default -45). Raise it in a noisy room |
 | `--url` | Relay endpoint (default `RELAY_URL` or `https://relay.mux.global`) |
 | `--room` | Fields appended to the `--url` path with `room_endpoint`, such as your token's root on the bare host. `--namespace` is then relative to them. The page's `--room` must match |
 
-Its output shows each turn:
+The bot's output shows each turn:
 
 ```text
-listening        user=acme/voice-bot/user bot=acme/voice-bot/bot
+publishing       bot=acme/voice-bot/bot/0mw40kc9g3qh6
+listening        user=acme/voice-bot/user
 user subscribed
 heard speech
 utterance        ms=1520
@@ -52,6 +56,27 @@ interrupted      untilUs=1792443548311433
 utterance        ms=660
 replied          ms=680
 ```
+
+After a dropped connection, it logs the error and the new generation, then carries on:
+
+```text
+reconnecting     error=RelayError: QUIC connection terminated: Idle timeout (code 0x1)
+publishing       bot=acme/voice-bot/bot/0mw40kq2jrg7q
+```
+
+### Without mise
+
+`bot.py` is a single file. Copy it into a project (`uv init` makes one) and install the packages it
+imports:
+
+```sh
+uv add caprid-relay "caprid-moq-media[opus]" numpy   # or: pip install caprid-relay "caprid-moq-media[opus]" numpy
+RELAY_TOKEN=... uv run python bot.py --namespace acme/voice-bot
+```
+
+`caprid-relay` includes the native QUIC transport. The `opus` extra installs PyAV, whose wheels bundle
+FFmpeg and are large, so plan for that on small hosts ([ADR 0006](../../../docs/adr/0006-opus-codec-behind-an-extra.md)).
+The page still runs from a checkout of this repository. To serve your own, build it on `talkToBot`.
 
 ## Plug in a real brain
 
@@ -70,11 +95,34 @@ async def respond(utterance: Utterance) -> AsyncIterator[bytes | str]:
             yield pcm
 
 
-await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., respond=respond, log=log)
+publisher = await connect_supervised_publisher(url, namespace=[*conversation, "bot"], get_token=get_token)
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+await run_bot(publisher, subscriber, user_namespace=[*conversation, "user"], respond=respond, log=log)
 ```
+
+Await your STT, LLM and TTS calls, or run blocking ones with `asyncio.to_thread`. A synchronous call
+blocks the event loop, so the bot's connections stop answering the relay. After 10 s the relay's QUIC
+idle timeout ends them with `Idle timeout`. The supervisors reconnect, but the user hears nothing
+until they do.
+
+## Drive it from a script
+
+The browser's microphone sends audio all the time, so this never comes up on the page. A test harness
+or a server-side talker that sends one short utterance as soon as it connects may get no answer. The
+bot's subscription joins at the live edge, so it doesn't get anything sent before the subscription
+was in place, and hears only the silence after it. Before you speak, wait for the bot to subscribe
+(your microphone track's `has_demand`, logged by the bot as `user subscribed`), or send a second or
+two of silence first. Keep sending silence between utterances, as a microphone does, so the bot's
+pause detection sees each one end. `Talker` in [the tests](tests/test_voice_bot.py) does both.
 
 ## How it works
 
+- **Staying up.** The bot publishes through `connect_supervised_publisher`. When the connection is
+  lost, the bot's writers raise `RECONNECTING` until the next generation is up, and then move to it.
+  The frame writer counts those packets as interrupted and carries on. Each generation is a new
+  broadcast at its own namespace. The bot's catalog names no namespace, so each listener reads its
+  tracks as being in the namespace it fetched the catalog from. The page finds the newest
+  generation through namespace discovery and moves to it.
 - **Listening.** A supervised subscriber wants the user's `audio` track, so a page that reloads or
   starts late is picked up again. A frame reader with an idle playout clock orders the frames and
   never judges one late: nothing plays them. `OpusDecoder` decodes at 16 kHz and resets at every
@@ -112,6 +160,14 @@ await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., resp
 it answers after a pause, interrupts itself when talked over, and every packet of the first reply
 lies before the interrupt's `until_us` and every packet of the next at or after it. Each reply's
 transcript segment starts at its first packet, and only the uninterrupted one gets a final version.
+When the connection under the bot's publisher closes, the bot answers the next utterance on the new
+generation, which serves the same catalog.
+
+Measured on 2026-11-05 against `ord.relay.mux.global`, with the page in headless Chromium on a
+scripted microphone: dropping every packet the bot's publisher received ended its connection with
+`Idle timeout` 8.3 s later. The next generation was up 0.4 s after that, and the page played the
+bot's answer to the next utterance and showed its transcript. An idle publisher with nothing to send
+stayed connected for 5 minutes, so an idle bot doesn't need a keepalive of its own.
 
 Measured on 2026-10-19 against `sjc.relay.mux.global`, with the page in headless Chromium on a
 scripted microphone (1.5 s of speech, a 1 s pause, 0.6 s talking over the reply): over four runs of

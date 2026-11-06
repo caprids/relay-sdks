@@ -16,6 +16,7 @@
     "examples/webcodecs/**/*.ts",
     "examples/voice-bot/**/*.ts",
     "scripts/av-sync/**/*.ts",
-    "scripts/audio-player/**/*.ts"
+    "scripts/audio-player/**/*.ts",
+    "scripts/watch-video/**/*.ts"
   ]
 }

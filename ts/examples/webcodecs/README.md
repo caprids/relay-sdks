@@ -93,6 +93,78 @@ await listener.stop();
 `listen-audio.ts` in headless Chromium, through an in-memory relay hub, or the Relay with
 `AUDIO_PLAYER_RUNS=relay`, then interrupts it over the interrupt track.
 
+## Watch the video
+
+[`watch-video.ts`](watch-video.ts) plays a broadcast's `video` track onto a canvas. It reads the
+catalog for the decoder config: the codec, and the avcC in the track's `initData`, the only place an
+H.264 track carries it. A frame reader orders the frames, a `VideoDecoder` decodes them, and the
+playout clock decides when to draw each one. The decoder starts at a keyframe. At each
+`discontinuity` it resets and waits for the next keyframe. At most 16 decoded frames wait for their
+time, so a hidden tab, whose timers the browser throttles, cannot hold the decoder's frames open and
+stall it. Past that the oldest is drawn early, so when audio lags further the video runs ahead of it
+rather than freezing. Like `listenAudio`, it subscribes to the video track by its conventional name together
+with the catalog and holds the frames until the decoder exists, which saves the catalog's round trip.
+
+For sound in sync, pass one playout clock to `watchVideo` and `listenAudio`. Audio is the master.
+Until the audio player reports to the clock, the clock paces video by the wall clock, so video plays
+before the user's first click. Start `listenAudio` once the `AudioContext` runs (`whenRunning`). A
+listener started on a suspended context holds every frame that arrives. When the context resumes,
+the player trims that backlog for seconds, and the video on the same clock freezes while it does.
+To mute, set the listener's `input.gain` to 0. The player keeps reporting, so audio stays the
+master and video stays in sync.
+
+```ts
+import { createPlayoutClock } from '@caprid/moq-media';
+import { connectRelaySubscriber } from '@caprid/relay';
+import { listenAudio, whenRunning } from './listen-audio.js';
+import { watchVideo } from './watch-video.js';
+
+const canvas = document.querySelector('canvas');
+if (!canvas) throw new Error('Missing canvas');
+const namespace = ['demo', 'live'];
+// Without a user gesture the context starts suspended; resume it in your Unmute button's click.
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+const clock = createPlayoutClock(); // one per broadcast: video and audio share it
+const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
+const watcher = await watchVideo(subscriber, namespace, canvas, { clock, onError: console.error });
+await whenRunning(context);
+const listener = await listenAudio(subscriber, namespace, { context, clock, onError: console.error });
+console.log(watcher.stats); // shown, late, overflowed, discontinuities, lastOffsetUs (the A/V offset)
+listener.input.gain = 0; // mute
+await Promise.all([watcher.stop(), listener.stop()]);
+```
+
+A subscriber that starts before the publisher has announced the namespace is rejected (the
+[announce race](../../GUIDE.md#discover-namespaces)), so retry the start, as the example page does.
+These examples use `connectRelaySubscriber`, which never reconnects
+([#404](https://github.com/muxinc/relay-sdks/issues/404)).
+
+### Run the example page
+
+[`page.ts`](page.ts) publishes a test pattern (a sweeping bar that flashes white once a second) with
+the microphone, and watches the broadcast with `watchVideo` and `listenAudio`, in the same tab or
+another one. [`serve.mjs`](serve.mjs) serves it on http://127.0.0.1:8321, a secure context as
+WebTransport needs:
+
+```sh
+RELAY_TOKEN=... mise run ts:example:webcodecs -- --namespace acme/webcodecs
+```
+
+Without `--namespace`, the broadcast is `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`) plus
+`webcodecs`. `--port` picks another port, and `--room` roots `RELAY_URL` with `roomEndpoint`. With
+`RELAY_TOKEN` set, the page holds the token. The server listens on the loopback interface only and
+never prints the token. Without `RELAY_TOKEN`, paste a token into the page.
+
+Click Publish in one tab. Open the page with `?watch` in another tab, and it starts watching without
+a click. The video plays, and the audio waits for Unmute. The status line shows the clock's mode,
+the last video frame's offset from the audio, and the audio buffer.
+
+`mise run ts:test:watch-video` checks this end to end in headless Chromium against the Relay
+(`RELAY_TOKEN`). One page publishes a flash and a beep every 600 ms and watches them through
+`watchVideo` and `listenAudio`. The test passes when video keeps moving while the context is
+suspended, when every flash is within 45 ms of its beep once audio plays, and when video keeps
+moving while muted.
+
 ## Audio and the shared timeline
 
 Both tracks are stamped from one broadcast clock, in microseconds since the Unix epoch
