@@ -1197,7 +1197,7 @@ sequencer can move or reset the shared clock meanwhile. The frame reader polls a
 for the same reason. Waits are rounded up to whole milliseconds. Browsers truncate a timeout to whole
 milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The 0.3 ms wait after that was
 clamped to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up took the wall-paced
-p95 sync error from 3.8–4.0 ms to 1.0 ms on the hub run below.
+p95 sync error from 3.8–4.0 ms to 1.0 ms on a hub run.
 
 The player also asks the clock each time the decoder outputs a frame, not only when its timer
 fires. A frame that is due or late then leaves the queue as soon as the next frame is decoded, and
@@ -1291,15 +1291,16 @@ publisher encoded 241 frames:
 
 | Player | Shown | Dropped | Errors | Sync error p50 / p95 / max, ms | First frame shown, ms after creation |
 | --- | --- | --- | --- | --- | --- |
-| `wall` | 241 | 0 | 0 | 0.1 / 1.0 / 1.5 | 23 |
-| `audio` | 241 | 0 | 0 | 0.65 / 8.5 / 10.3 | 24 |
-| `worker` | 241 | 0 | 0 | 0.9 / 1.0 / 1.1 | 10 |
+| `wall` | 241 | 0 | 0 | 0.2 / 0.5 / 0.8 | 26 |
+| `audio` | 241 | 0 | 0 | 0.62 / 8.6 / 10.3 | 27 |
+| `worker` | 241 | 0 | 0 | 0.9 / 1.0 / 1.0 | 11 |
 
 The sync error is the clock's `|offsetUs|` for each frame shown. The `audio` player's is larger
 because each audio report moves the clock a little between the player's timers. Its clock ran on
 audio for every 20 ms sample in the window. Every canvas showed the publisher's two colors within
-one level per channel. The page's decoders output 722 frames and the worker's 361. The players
-closed every one exactly once.
+one level per channel. The page's decoders output 724 frames and the worker's 362. The players
+closed every one exactly once. This run is after the player began asking the clock at each decoded
+frame.
 
 ## Interrupt track
 
