@@ -17,6 +17,7 @@
     "examples/voice-bot/**/*.ts",
     "scripts/av-sync/**/*.ts",
     "scripts/audio-player/**/*.ts",
-    "scripts/watch-video/**/*.ts"
+    "scripts/watch-video/**/*.ts",
+    "scripts/video-player/**/*.ts"
   ]
 }
