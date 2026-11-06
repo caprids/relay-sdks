@@ -123,7 +123,7 @@ const CLOCK_RECHECK_US = 50_000;
  */
 type Decoding =
   | { state: 'awaiting-key'; decoder: VideoDecoder | undefined }
-  | { state: 'decoding'; decoder: VideoDecoder; configured: VideoDecoderConfig }
+  | { state: 'decoding'; decoder: VideoDecoder; configured: number }
   | { state: 'failed' }
   | { state: 'closed' };
 
@@ -149,6 +149,10 @@ const isNotSupported = (error: unknown) => error instanceof Error && error.name 
 export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
   const { clock, render, onError } = options;
   let config = options.decoderConfig;
+  // Counts configure() calls, so a config object changed in place and passed again still counts as new.
+  let revision = 0;
+  // The revision the current decoder was last configured with, or tried to be.
+  let attempted = -1;
   let decoding: Decoding = { state: 'awaiting-key', decoder: undefined };
   // Whether the current decoder has output a frame: one that fails before it does would fail again.
   let output = false;
@@ -175,9 +179,17 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
 
   const report = (error: unknown, what: string) => {
     stats.errors++;
-    if (onError) onError(error);
-    // biome-ignore lint/suspicious/noConsole: the application gave no handler to report to
-    else console.error(new Error(what, { cause: error }));
+    let logged = { what, error };
+    try {
+      if (onError) {
+        onError(error);
+        return;
+      }
+    } catch (thrown) {
+      logged = { what: 'onError threw; the video player carries on', error: thrown };
+    }
+    // biome-ignore lint/suspicious/noConsole: the application gave no handler, or its handler threw
+    console.error(new Error(logged.what, { cause: logged.error }));
   };
   const current = () => ('decoder' in decoding ? decoding.decoder : undefined);
   const stopTimer = () => {
@@ -241,7 +253,8 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
   // unless this one failed for good.
   const fail = (decoder: VideoDecoder, error: unknown) => {
     if (decoder.state !== 'closed') decoder.close();
-    if (!output || isNotSupported(error)) {
+    // A config passed to configure() since this decoder's may well decode: the next keyframe tries it.
+    if ((!output || isNotSupported(error)) && attempted === revision) {
       decoding = { state: 'failed' };
       report(error, 'The video decoder failed for good; the video player decodes nothing until configure()');
       return;
@@ -274,12 +287,13 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
         stats.skipped++;
         return;
       }
-      const configure = decoding.state === 'awaiting-key' || (frame.key && decoding.configured !== config);
+      const configure = decoding.state === 'awaiting-key' || (frame.key && decoding.configured !== revision);
       const decoder = decoding.decoder ?? open();
       try {
         if (configure) {
+          attempted = revision;
           decoder.configure(config);
-          decoding = { state: 'decoding', decoder, configured: config };
+          decoding = { state: 'decoding', decoder, configured: revision };
         }
         decoder.decode(
           new EncodedVideoChunk({
@@ -295,6 +309,7 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
     configure(decoderConfig) {
       if (decoding.state === 'closed') return;
       config = decoderConfig;
+      revision++;
       if (decoding.state === 'failed') decoding = { state: 'awaiting-key', decoder: undefined };
     },
     stats,

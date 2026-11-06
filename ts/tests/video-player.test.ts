@@ -397,6 +397,52 @@ describe('createVideoPlayer', () => {
     expect(player.stats).toMatchObject({ skipped: 0, decoderResets: 0 });
   });
 
+  it('tries a config passed to configure() when the decoder it replaces fails before its first frame', () => {
+    const onError = vi.fn();
+    const { player, shown } = setUp({ onError });
+    player.push(key(0, { payload: new Uint8Array([FAIL]) }));
+    player.configure({ codec: 'avc1.64001f' });
+    decoder().release();
+    player.push(key(1));
+    expect(FakeDecoder.instances).toHaveLength(2);
+    expect(decoder().chunks).toEqual([{ type: 'key', index: 1, codec: 'avc1.64001f' }]);
+    decoder().release();
+    expect(shown.map(([index]) => index)).toEqual([1]);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it('reconfigures at the next keyframe when the same config object, changed in place, is passed again', () => {
+    const config = { codec: 'avc1.42001f' };
+    const { player } = setUp({ decoderConfig: config });
+    player.push(key(0));
+    const configure = vi.spyOn(decoder(), 'configure');
+    config.codec = 'avc1.64001f';
+    player.configure(config);
+    player.push(key(1));
+    expect(configure).toHaveBeenCalledExactlyOnceWith(config);
+    decoder().release();
+  });
+
+  it('plays on when onError throws, logging what it threw', () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rendered: number[] = [];
+    const { player } = setUp({
+      onError() {
+        throw new Error('handler failed');
+      },
+      render(shownFrame) {
+        rendered.push(indexOf(shownFrame.timestamp));
+        if (rendered.length === 2) throw new Error('sink failed');
+      },
+    });
+    for (let index = 0; index < 4; index++) player.push(index === 0 ? key(index) : delta(index));
+    decoder().release();
+    vi.advanceTimersByTime(200);
+    expect(rendered).toEqual([0, 1, 2, 3]);
+    expect(logged).toHaveBeenCalledOnce();
+    expect(player.stats.errors).toBe(1);
+  });
+
   it('reports a render that throws, closes the frame anyway, and plays on', () => {
     const onError = vi.fn();
     const failure = new Error('sink failed');
