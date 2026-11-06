@@ -9,6 +9,11 @@ is in [docs/releasing.md](../docs/releasing.md).
 - `caprid-moq-core`: a FETCH is removed from its session once its data stream has ended (`on_end`) or reset (`on_reset`)
   and its response has arrived (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it,
   so its handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
+- Voice bot example: the bot publishes through `connect_supervised_publisher` (#442), so a lost connection no longer
+  ends it. It reconnects as a new generation under `<namespace>/bot` and answers the next utterance; the voice bot
+  page follows it. `run_bot` takes the `SupervisedPublisher` and no longer takes `bot_namespace`, and `bot_catalog()`
+  takes no namespace. Its tracks name none, so they are in whichever generation's namespace serves the catalog. The
+  README adds an install without mise and a note for scripted talkers.
 - `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
   rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
   encoder's next scheduled keyframe. The open group still finishes on the old generation.

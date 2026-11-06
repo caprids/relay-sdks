@@ -8,7 +8,10 @@ import { publishMicrophone } from '../webcodecs/publish-microphone.js';
 export interface TalkToBotOptions {
   /** Aborting hangs up. */
   signal: AbortSignal;
-  /** The bot's namespace, where it publishes its catalog, its audio, and its interrupt and transcript tracks. */
+  /**
+   * The bot's root namespace. Its supervised publisher serves each connection one generation field below it, with the
+   * catalog, the audio, and the interrupt and transcript tracks; the newest generation is the bot.
+   */
   botNamespace: readonly string[];
   /** The namespace `publisher` was connected with, where the microphone goes. */
   userNamespace: readonly string[];
@@ -16,7 +19,10 @@ export interface TalkToBotOptions {
   context: AudioContext;
   /** The microphone, from `getUserMedia` with echo cancellation on. */
   stream: MediaStream;
-  /** The bot's audio is playing: its catalog arrived, and the listener subscribed. */
+  /**
+   * The bot's audio is playing: its catalog arrived, and the listener subscribed. Called again with a new listener each
+   * time the bot reconnects as a new generation; the previous one has stopped by then.
+   */
   onListening?(listener: AudioListener): void;
   /** The bot stopped talking because it was talked over; the player has already cut what it held. */
   onInterrupt?(interrupt: Interrupt): void;
@@ -48,7 +54,9 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
  * Talk to a voice bot such as python/examples/voice_bot: publish the microphone alone, and play the bot's audio
  * through the audio player, cutting it and its transcript on each interrupt. Playback goes through Chromium's echo
  * canceller, so the bot does not hear itself and take it for being talked over. The bot can start before or after the
- * page: until its catalog arrives, the listener retries every second, waiting at most 5 s for each attempt. Runs until
+ * page. Namespace discovery under `botNamespace` finds the bot's newest generation, and the page listens there; when
+ * the bot reconnects as a newer generation, the page stops listening to the old one and listens to the new one. Until
+ * a generation's catalog arrives, the listener retries every second, waiting at most 5 s for each attempt. Runs until
  * aborted, or until publishing fails.
  */
 export async function talkToBot(
@@ -63,10 +71,56 @@ export async function talkToBot(
   const microphone = await captureMicrophone(createBroadcastClock(), options.stream, { context });
   let listener: AudioListener | undefined;
   const publishing = publishMicrophone(publisher, options.userNamespace, { signal, microphone });
-  const listening = (async () => {
-    while (!listener) {
+  const root = [...options.botNamespace];
+  // The generations announced one field below the root, and a wake for the loop that follows the newest.
+  const generations = new Set<string>();
+  let wake: (() => void) | undefined;
+  const changes = () =>
+    new Promise<void>((resolve, reject) => {
+      signal.throwIfAborted();
+      const abort = () => reject(signal.reason);
+      wake = () => {
+        signal.removeEventListener('abort', abort);
+        resolve();
+      };
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  const discovering = (async () => {
+    while (!signal.aborted) {
+      generations.clear();
       try {
-        listener = await listenAudio(subscriber, options.botNamespace, {
+        for await (const event of subscriber.namespaceEvents({ prefix: root, signal })) {
+          // Only one field below the root is a generation; anything deeper is someone else's.
+          if (event.namespace.length !== root.length + 1) continue;
+          const generation = event.namespace[root.length] as string;
+          if (event.type === 'announced') generations.add(generation);
+          else generations.delete(generation);
+          wake?.();
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        options.onError?.(error);
+      }
+      // The relay ended the discovery: ask again.
+      await wait(1000, signal).catch(() => {});
+    }
+  })();
+  const listening = (async () => {
+    let playing: string | undefined;
+    for (;;) {
+      // Generation fields sort by start time, so the greatest is the bot's newest connection.
+      const newest = [...generations].sort().at(-1);
+      if (newest === undefined || newest === playing) {
+        await changes();
+        continue;
+      }
+      // The bot started or reconnected. The old generation sends nothing more, so stop listening to it.
+      const previous = listener;
+      listener = undefined;
+      playing = undefined;
+      await previous?.stop();
+      try {
+        listener = await listenAudio(subscriber, [...root, newest], {
           context,
           echoCancellation: true,
           // A catalog subscription the relay accepts can still deliver nothing; give up on it and try again.
@@ -75,21 +129,22 @@ export async function talkToBot(
           ...(options.onInterrupt ? { onInterrupt: options.onInterrupt } : {}),
           ...(options.onTranscript ? { onTranscript: options.onTranscript } : {}),
         });
+        playing = newest;
+        signal.throwIfAborted();
+        options.onListening?.(listener);
       } catch (error) {
-        // Not announced yet, or announced but not serving its catalog yet (the announce race).
+        // Announced but not serving its catalog yet.
         signal.throwIfAborted();
         options.onError?.(error);
         await wait(1000, signal);
       }
     }
-    signal.throwIfAborted();
-    options.onListening?.(listener);
   })();
   try {
     await Promise.all([publishing, listening]);
   } finally {
     lifetime.abort(new Error('Hung up'));
-    await Promise.allSettled([publishing, listening]);
+    await Promise.allSettled([publishing, listening, discovering]);
     await listener?.stop();
     microphone.close();
   }
