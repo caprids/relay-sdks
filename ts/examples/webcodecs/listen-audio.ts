@@ -30,6 +30,8 @@ import { type LaterCatalogs, readCatalog } from './read-catalog.js';
 
 /** Numbers each listener, so the want keys of two listeners on one supervised subscriber never collide. */
 let listeners = 0;
+/** How many of the latest interrupts a restart applies again. */
+const MAX_RECENT_INTERRUPTS = 8;
 
 /**
  * One step of an audio track replacement (a talker talked over): `seen`, the catalog listing the new track arrived
@@ -300,6 +302,11 @@ export async function listenAudio(
     // handed over as the track's latest object (a relay cache, on every restart too), and drops only older audio.
     let cutTarget: AudioPlayerInput | undefined;
     const waitingInterrupts: Interrupt[] = [];
+    // The latest interrupts applied. The audio, interrupt and transcript wants restart and move each on its own, so a
+    // restarted talker's interrupt can come before its first audio frame, whose restart mark makes the player forget
+    // the cuts it holds for arriving audio, or before the transcript want moves and starts a new transcript. Both take
+    // these again then. Interrupts share the broadcast timeline across restarts, so an older one cuts nothing new.
+    const recentInterrupts: Interrupt[] = [];
     const applyInterrupt = (interrupt: Interrupt) => {
       if (!cutTarget) {
         waitingInterrupts.push(interrupt);
@@ -307,7 +314,16 @@ export async function listenAudio(
       }
       cutTarget.cut(interrupt);
       transcript.cut(interrupt, clock.position());
+      recentInterrupts.push(interrupt);
+      if (recentInterrupts.length > MAX_RECENT_INTERRUPTS) recentInterrupts.shift();
       options.onInterrupt?.(interrupt);
+    };
+    const recentFor = () => recentInterrupts.filter((interrupt) => interrupt.track === current.name);
+    /** A new transcript, cut where the latest interrupts for the playing track cut the last one. */
+    const newTranscript = () => {
+      const fresh = createTranscript();
+      for (const interrupt of recentFor()) fresh.cut(interrupt, clock.position());
+      return fresh;
     };
     const interruptKey = `${id}/interrupt`;
     const interrupts = listed(INTERRUPT_TRACK);
@@ -375,10 +391,16 @@ export async function listenAudio(
       },
     });
     cutTarget = input;
+    // Every frame goes to the input through here: the first of a new subscription carries a restart mark, which drops
+    // the input's cuts for arriving audio, so the latest interrupts cut again.
+    const pushAudio = (frame: SequencedFrame) => {
+      input.push(frame);
+      if (frame.discontinuity === 'restart') for (const interrupt of recentFor()) input.cut(interrupt);
+    };
     // Interrupts that came while the player was built cut first, then what arrived meanwhile plays, in order, then
     // every frame as it comes.
     for (const interrupt of waitingInterrupts.splice(0)) applyInterrupt(interrupt);
-    hold.release(input.push);
+    hold.release(pushAudio);
     // Each run of the talker numbers its segments anew: a transcript want that moves to another generation, or whose
     // publisher went away, starts a new transcript.
     const transcriptKey = `${id}/transcript`;
@@ -386,7 +408,7 @@ export async function listenAudio(
     let transcriptAt: string | undefined;
     const transcriptOn = (at: readonly string[]) => {
       const key = JSON.stringify(at);
-      if (transcriptAt !== undefined && transcriptAt !== key) transcript = createTranscript();
+      if (transcriptAt !== undefined && transcriptAt !== key) transcript = newTranscript();
       transcriptAt = key;
     };
     if (transcripts) {
@@ -397,7 +419,7 @@ export async function listenAudio(
           onSubscribed: (_, context) => transcriptOn(context.namespace),
           onSwitched: (info) => transcriptOn(info.to.namespace),
           onRestarted(info) {
-            if (info.reason === 'publisher-done') transcript = createTranscript();
+            if (info.reason === 'publisher-done') transcript = newTranscript();
           },
           onObject(object) {
             if (object.status !== 'normal') return;
@@ -452,7 +474,7 @@ export async function listenAudio(
       if (again) dropAudio(audio);
       let wanted: Audio;
       try {
-        wanted = wantAudio(next.name, input.push);
+        wanted = wantAudio(next.name, pushAudio);
       } catch (error) {
         options.onError?.(error);
         return;

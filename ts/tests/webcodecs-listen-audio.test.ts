@@ -1031,3 +1031,107 @@ it('starts a new transcript when the talker restarts', async () => {
   expect(listener.transcript.lines.map((line) => line.text)).toEqual(['third run']);
   await listener.stop();
 });
+
+/** What the player posted to its worklet, in order: decoded audio by timestamp, and cuts by their end. */
+const posted = () =>
+  (FakeWorkletNode.instances.at(-1) as FakeWorkletNode).port.postMessage.mock.calls
+    .map(([message]) => message as { type: string; timestampUs?: number; untilUs?: number | null })
+    .filter((message) => message.type === 'pcm' || message.type === 'cut')
+    .map((message) => (message.type === 'pcm' ? `pcm ${message.timestampUs}` : `cut ${message.untilUs}`));
+
+/** One Opus frame of the audio track at `timestampUs`, in group `groupId`. */
+const opusAt = (groupId: number, timestampUs: number) =>
+  ({
+    groupId,
+    objectId: 0,
+    subgroupId: 0,
+    status: 'normal',
+    properties: [{ type: LOC_TIMESTAMP, value: timestampUs }],
+    payload: OPUS_PACKETS[groupId % OPUS_PACKETS.length] as Uint8Array,
+  }) as MoqtObject;
+
+it("keeps a restarted talker's interrupt that came before its first audio, in either order", async () => {
+  for (const interruptFirst of [true, false]) {
+    const fake = fakeSubscriber();
+    const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true });
+    const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+    fake.deliverCatalog(generationCatalog('audio', [INTERRUPT_TRACK]));
+    const listener = await listening;
+    audio.handlers.onObject?.(opusAt(0, 1_000_000));
+    expect(listener.input.stats.decoded).toBe(1);
+    // The talker restarted. Its new generation's cached interrupt and its audio's restart come in either order, and
+    // then its first frame, which the interrupt says was never heard.
+    const interrupt = () => deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', untilUs: 5_000_000 }));
+    if (interruptFirst) interrupt();
+    audio.handlers.onRestarted?.({ reason: 'generation', namespace: generation('g1') });
+    if (!interruptFirst) interrupt();
+    audio.handlers.onObject?.(opusAt(0, 4_000_000));
+    audio.handlers.onObject?.(opusAt(1, 4_020_000));
+    // The restart's first frame drops the player's cuts for arriving audio, so the interrupt cuts again right after
+    // it, taking that frame out of what the worklet holds; the next frame inside the interrupt is not decoded at all.
+    audio.handlers.onObject?.(opusAt(2, 5_000_000));
+    const after = posted().slice(posted().lastIndexOf('pcm 4000000'));
+    expect(after).toEqual(['pcm 4000000', 'cut 5000000', 'pcm 5000000']);
+    await listener.stop();
+  }
+});
+
+it('keeps an interrupt that came while the player was built, across a restart before it existed', async () => {
+  const fake = fakeSubscriber();
+  let ready: () => void = () => {};
+  // The worklet module loads only when the test says so: the player cannot exist before then.
+  const loaded = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  const context = new FakeContext();
+  context.audioWorklet.addModule.mockImplementation(async () => loaded);
+  const listening = listenAudio(fake.subscriber, NAMESPACE, {
+    generations: true,
+    context: context as unknown as AudioContext,
+  });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  fake.deliverCatalog(generationCatalog('audio', [INTERRUPT_TRACK]));
+  // The interrupt want is made once the catalog is read, while the player is still being built.
+  await vi.waitFor(() => expect(fake.subscriptions.map(({ request }) => request.track)).toContain(INTERRUPT_TRACK));
+  expect(FakeWorkletNode.instances).toHaveLength(0);
+  audio.handlers.onObject?.(opusAt(0, 1_000_000));
+  audio.handlers.onRestarted?.({ reason: 'generation', namespace: generation('g1') });
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', untilUs: 5_000_000 }));
+  audio.handlers.onObject?.(opusAt(0, 4_000_000));
+  audio.handlers.onObject?.(opusAt(1, 5_000_000));
+  ready();
+  const listener = await listening;
+  // The old generation's frame was dropped at the restart. The new one's first frame carries the restart mark, so the
+  // interrupt cuts again after it, before the next frame plays.
+  expect(posted().filter((message) => message !== 'cut null')).toEqual([
+    'cut 5000000',
+    'pcm 4000000',
+    'cut 5000000',
+    'pcm 5000000',
+  ]);
+  await listener.stop();
+});
+
+it("cuts a restarted talker's new transcript where an interrupt already cut, whichever want moves first", async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true });
+  fake.deliverCatalog(generationCatalog('audio', [INTERRUPT_TRACK, TRANSCRIPT_TRACK]));
+  const listener = await listening;
+  const transcripts = fake.subscriptions.find(({ request }) => request.track === TRANSCRIPT_TRACK);
+  transcripts?.handlers.onSubscribed?.(accepted(), { namespace: generation('g1') });
+  // The interrupt want reached the new generation first, and its interrupt cut the old transcript.
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', fromUs: 2_000, untilUs: 9_000_000_000_000_000 }));
+  transcripts?.handlers.onSwitched?.({
+    from: { namespace: generation('g1'), track: TRANSCRIPT_TRACK },
+    to: { namespace: generation('g2'), track: TRANSCRIPT_TRACK },
+    subscribed: accepted(),
+  });
+  // The new generation's segment inside the cut was never heard.
+  deliver(
+    fake,
+    TRANSCRIPT_TRACK,
+    buildTranscriptSegment({ seq: 0, final: true, fromUs: 3_000, untilUs: 4_000, text: 'not heard' }),
+  );
+  expect(listener.transcript.lines).toEqual([]);
+  await listener.stop();
+});
