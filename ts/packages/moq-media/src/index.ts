@@ -124,10 +124,22 @@ export {
   type TranscriptSegmentInput,
 } from './transcript.js';
 export {
+  canvasRenderer,
+  createVideoPlayer,
+  type VideoCanvas,
+  type VideoPlayer,
+  type VideoPlayerClock,
+  type VideoPlayerFrame,
+  type VideoPlayerJoinPhases,
+  type VideoPlayerOptions,
+  type VideoPlayerStats,
+} from './video-player.js';
+export {
   audioDecoderConfigFromTrack,
   audioTrackFromDecoderConfig,
   type ChunkToLocFrameOptions,
   chunkToLocFrame,
   type LocFrame,
+  videoDecoderConfigFromTrack,
   videoTrackFromDecoderConfig,
 } from './webcodecs.js';
