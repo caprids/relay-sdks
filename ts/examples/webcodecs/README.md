@@ -96,14 +96,14 @@ await listener.stop();
 ## Watch the video
 
 [`watch-video.ts`](watch-video.ts) plays a broadcast's `video` track onto a canvas. It reads the
-catalog for the decoder config: the codec, and the avcC in the track's `initData`, the only place an
-H.264 track carries it. A frame reader orders the frames, a `VideoDecoder` decodes them, and the
-playout clock decides when to draw each one. The decoder starts at a keyframe. At each
-`discontinuity` it resets and waits for the next keyframe. At most 16 decoded frames wait for their
-time, so a hidden tab, whose timers the browser throttles, cannot hold the decoder's frames open and
-stall it. Past that the oldest is drawn early, so when audio lags further the video runs ahead of it
-rather than freezing. Like `listenAudio`, it subscribes to the video track by its conventional name together
-with the catalog and holds the frames until the decoder exists, which saves the catalog's round trip.
+decoder config from the catalog with `videoDecoderConfigFromTrack`: the codec, and the avcC in the
+track's `initData`, the only place an H.264 track carries it. A frame reader orders the frames.
+`createVideoPlayer` from `@caprid/moq-media` decodes them, and `canvasRenderer` draws each one when
+the playout clock says it is due. The player starts at a keyframe. At a `resync` or `restart` it
+resets the decoder and waits for the next keyframe. The [GUIDE](../../GUIDE.md#playing-video) and
+[spec/media-layer.md](../../../spec/media-layer.md#video-player) describe the player. Like
+`listenAudio`, `watchVideo` subscribes to the video track by its conventional name together with
+the catalog and holds the frames until the player exists, which saves the catalog's round trip.
 
 For sound in sync, pass one playout clock to `watchVideo` and `listenAudio`. Audio is the master.
 Until the audio player reports to the clock, the clock paces video by the wall clock, so video plays
@@ -129,7 +129,7 @@ const subscriber = await connectRelaySubscriber({ url, getToken: () => subscribe
 const watcher = await watchVideo(subscriber, namespace, canvas, { clock, onError: console.error });
 await whenRunning(context);
 const listener = await listenAudio(subscriber, namespace, { context, clock, onError: console.error });
-console.log(watcher.stats); // shown, late, overflowed, discontinuities, lastOffsetUs (the A/V offset)
+console.log(watcher.stats); // shown, late, discontinuities, lastOffsetUs (the A/V offset)
 listener.input.gain = 0; // mute
 await Promise.all([watcher.stop(), listener.stop()]);
 ```

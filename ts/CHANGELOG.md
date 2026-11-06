@@ -19,7 +19,8 @@ each section says what changed and what to do about it. How to cut a release is 
   closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
   an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
   the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player
-  reports it once and decodes nothing until `configure()`. The player runs in a dedicated worker as it is. Through the in-memory hub in headless Chromium, players
+  reports it once and decodes nothing until `configure()`. The player runs in a dedicated worker as it is. The WebCodecs
+  example's `watchVideo` is built on it. Through the in-memory hub in headless Chromium, players
   paced by the wall clock, by audio, and in a worker each showed all 241 frames published over 8 s
   (`mise run ts:test:video-player`).
 - `@caprid/moq-core`: a FETCH is removed from its session once its data stream has ended (`onEnd`) or reset (`onReset`)

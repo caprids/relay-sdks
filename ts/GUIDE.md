@@ -1069,8 +1069,8 @@ audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing
 sequencer's contract.
 
 For a complete player to copy, see the [WebCodecs example](examples/webcodecs/README.md#watch-the-video)'s
-`watch-video.ts`. It reads the catalog, decodes with `VideoDecoder`, draws to a canvas on the
-playout clock, and shares that clock with `listen-audio.ts`.
+`watch-video.ts`. It reads the catalog, plays the video with the [video player](#playing-video), and
+shares the playout clock with `listen-audio.ts`.
 
 A broadcast with no video never reports a keyframe interval, so its clock would keep the 2 s
 default. A lasting delay increase would then cost 2 s of silence before the reader resyncs. Create
@@ -1255,11 +1255,16 @@ subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
 
 `render` borrows the frame. The player closes it when `render` returns, because a hardware decoder stops when all of
 its frames are held. To keep a frame, keep `frame.clone()` and close the clone yourself. An exception from `render`
-goes to `onError`, or to `console.error`. For a rendition switch, call `player.configure(decoderConfig)` before the
-new track's first keyframe arrives. Frames before that keyframe still decode with the old config. The player uses only
-`VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a dedicated worker, drawing onto an
-`OffscreenCanvas` the page transferred to it. Video there follows a clock of the worker's own, since the audio clock
+goes to `onError`, or to `console.error`. A decoder that fails before its first frame, or with `NotSupportedError`,
+is reported once, and the player decodes nothing more until `player.configure(decoderConfig)`. For a rendition switch,
+call `player.configure(decoderConfig)` before the new track's first keyframe arrives. Frames before that keyframe still
+decode with the old config. The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a
+dedicated worker, drawing onto an `OffscreenCanvas` the page transferred to it. Video there follows a clock of the worker's own, since the audio clock
 lives on the main thread. See [spec/media-layer.md](../spec/media-layer.md#video-player) for the rules.
+
+The [WebCodecs example](examples/webcodecs/README.md#watch-the-video)'s `watchVideo` is a complete player built on it.
+It subscribes to the video track with the catalog, holds the frames until the catalog gives the decoder config, and
+draws with `canvasRenderer` on the clock it shares with `listenAudio`.
 
 ### Voice: delivery per direction
 

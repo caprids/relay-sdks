@@ -242,6 +242,8 @@ subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
 - The player waits for a keyframe at the start, after a decoder error, and after a `resync` or `restart`, which also
   reset the decoder and close the frames waiting. `player.configure(decoderConfig)` switches the config from the next
   keyframe, as at a rendition switch.
+- A decoder that fails before its first frame, or with `NotSupportedError`, is reported once. The player then decodes
+  nothing until `player.configure(decoderConfig)`.
 - Share the clock with the audio input so audio drives the video. Without audio, the clock paces it by the wall clock.
 - It uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it runs in a dedicated worker as it is.
 - `player.stats` counts frames decoded, shown, dropped by the clock, and skipped before a keyframe. `player.joinPhases`

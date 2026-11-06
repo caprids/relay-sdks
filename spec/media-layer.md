@@ -1184,6 +1184,10 @@ subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
 Share the clock with the broadcast's audio input and with every frame reader's sequencer. Audio
 then drives the video. Without audio, the clock paces it by the wall clock.
 
+The WebCodecs example's `watchVideo` is built on the player. It subscribes to the video track with
+the catalog, holds the frames until the catalog gives the decoder config, and draws with
+`canvasRenderer`. Before the player existed it kept its own decoder, keyframe wait and paced queue.
+
 **Presenting.** Decoded frames wait in a queue in the order the decoder outputs them, which is
 presentation order. The player asks the clock about the earliest, `clock.due(frame.timestamp)`. A
 decoded frame's timestamp is its chunk's, the LOC timestamp on the broadcast timeline. On `show` the
@@ -1219,7 +1223,14 @@ each without a frame count:
   clock's limit holds at any frame rate.
 
 Before `watchVideo` moved onto the player, its live test drew no frame early past the bound in any
-phase (`overflowed` 0 through the in-memory hub, 2026-11-06).
+phase (`overflowed` 0 through the in-memory hub, 2026-11-06). The move changed one number. Over
+four runs of each through the hub (`WATCH_VIDEO_TRANSPORT=hub mise run ts:test:watch-video`), the
+old `watchVideo` drew frames 3.2 to 4.1 ms after the clock said they were due in 10 of 12 samples
+taken at the phase boundaries. Its timers took fractional milliseconds, so the truncation and 4 ms
+clamp above applied. The player drew them 0.1 to 1.0 ms after in all 12. The resumed phase's mean A/V offset moved by about the
+same amount, from 0 to 3.7 ms to 5.5 to 7.1 ms (positive is audio late), well inside the test's
+±45 ms. The player's frames are within 1 ms of the clock, so the rest of that offset lies between
+the clock and the audible audio.
 
 **Borrowed frames.** `render(frame)` borrows the frame. The player closes it when `render` returns,
 and a sink that keeps a frame keeps `frame.clone()`. A hardware decoder has a fixed pool of output
