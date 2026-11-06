@@ -4,7 +4,7 @@
  * the token in `window.voiceBot`.
  */
 import { warmAudioPlayer } from '@caprid/moq-media';
-import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@caprid/relay';
 import type { AudioListener } from '../webcodecs/listen-audio.js';
 import { talkToBot } from './talk-to-bot.js';
 
@@ -65,7 +65,16 @@ talk.addEventListener('click', async () => {
     // Hanging up while connecting ends the attempts.
     const publisher = await connectRelayPublisher({ url, namespace: userNamespace, getToken, signal: stop.signal });
     release.push(() => publisher.close());
-    const subscriber = await connectRelaySubscriber({ url, getToken, signal: stop.signal });
+    // Supervised: it reconnects, and its wants follow the bot's newest generation.
+    const subscriber = await connectSupervisedSubscriber({
+      url,
+      getToken,
+      signal: stop.signal,
+      onStatus: (state, error) => {
+        if (state === 'reconnecting')
+          say(`subscriber reconnecting${error === undefined ? '' : `: ${describe(error)}`}`);
+      },
+    });
     release.push(() => subscriber.close());
     say('connected; waiting for the bot');
     let interrupts = 0;
@@ -77,8 +86,6 @@ talk.addEventListener('click', async () => {
       context,
       stream,
       onListening(listener: AudioListener) {
-        // Called again when the bot reconnects: the new listener replaces the old one's stats.
-        clearInterval(stats);
         playing = listener;
         say('the bot is on: say something, pause, and it answers; talk over it and it stops');
         stats = setInterval(() => {
@@ -92,6 +99,10 @@ talk.addEventListener('click', async () => {
             .map((line) => `bot: ${line.text}${line.cut ? ' —' : ''}`)
             .join('\n');
         }, 250);
+      },
+      onRestarted({ reason, namespace: from }) {
+        // The same listener plays on: the bot came back as a newer generation, or the subscriber reconnected.
+        say(`the bot's audio restarted (${reason}) after ${from.at(-1)}; playing the new one`);
       },
       onInterrupt(interrupt) {
         interrupts++;

@@ -10,7 +10,7 @@ bot did not say.
 example:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@caprid/relay';
 import { talkToBot } from './talk-to-bot.js';
 
 // In a click handler, so the context may play and the microphone prompt shows.
@@ -18,7 +18,7 @@ const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive
 const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
 const userNamespace = ['demo', 'voice-bot', 'user'];
 const publisher = await connectRelayPublisher({ url, namespace: userNamespace, getToken });
-const subscriber = await connectRelaySubscriber({ url, getToken });
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
 await talkToBot(publisher, subscriber, {
   signal: hangUp.signal,
   userNamespace,
@@ -26,6 +26,7 @@ await talkToBot(publisher, subscriber, {
   context,
   stream,
   onInterrupt: (interrupt) => console.log('the bot stopped', interrupt.untilUs),
+  onRestarted: ({ reason }) => console.log('the bot came back', reason),
 });
 ```
 
@@ -40,12 +41,19 @@ await talkToBot(publisher, subscriber, {
   [transcript](../../../spec/media-layer.md#transcript-track): `listener.transcript.linesAt(listener.clock.position())`
   is what the bot has said so far, each line marked `cut` where it was talked over.
 - `botNamespace` is the bot's root. The bot publishes through a supervised publisher, which serves
-  each connection as a new generation one field below the root. `talkToBot` finds the newest one with
-  namespace discovery (`subscriber.namespaceEvents`) and plays it. When the bot reconnects, the page
-  stops the old listener, plays the new generation, and calls `onListening` again with the new
-  listener.
-- The bot can start before or after the page. Until a generation's catalog arrives, `talkToBot`
-  retries every second and reports each failed attempt to `onError`.
+  each connection as a new generation one field below the root. The subscriber is supervised too:
+  `listenAudio` wants each track with `generations: true`, so the subscriber discovers the root and
+  keeps every want on the newest generation. When the bot reconnects as a newer generation, the same
+  listener moves to it within a round trip of its announcement. The player drops what it held of the
+  old generation and calls `onRestarted`. `onListening` runs once. A crashed generation stays
+  announced until the relay's idle timeout, about 11 s, but the newer one takes over as soon as it is
+  announced.
+- The bot can start before or after the page: the wants wait for it. A listener start that fails,
+  such as a catalog with no audio track, goes to `onError` and is tried again a second later.
+- One window remains, inside the supervised subscriber: when the relay ends namespace discovery or
+  the subscriber reconnects while a crashed generation is still announced, the want can play that
+  older generation until the newer one's announcement arrives
+  ([#482](https://github.com/muxinc/relay-sdks/issues/482)).
 
 ## Run it
 
@@ -68,4 +76,4 @@ and never prints the token. Without `RELAY_TOKEN`, paste a token into the page.
 The status line shows how much of the bot's audio the player has played, its buffer, underruns,
 interrupts, and how much they cut. Below it, the bot's words appear as they play, with a dash where
 the user talked over the bot. The log says how long after the bot's last audio each interrupt
-landed.
+landed, and when the bot's audio restarted because the bot came back as a newer generation.

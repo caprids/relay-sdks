@@ -71,19 +71,19 @@ The listener joins quickly. The audio side builds while the handshake and the ca
 way: `warmAudioPlayer(context)` loads the player's worklet module and libopus at once, so start it in
 the click that connects, right after creating the context (a context created outside a gesture stays
 suspended, and `listenAudio` also warms it, which costs nothing when the page already has). The
-audio track is subscribed together with the catalog, by its conventional name, and the frames are held
+audio track is wanted together with the catalog, by its conventional name, and the frames are held
 until the player exists, then passed on in order. On relay-dev's benchmark this took the first audio
 from 627 to 249 ms after the connect started ([spec](../../../spec/media-layer.md), "Joining sooner").
 
 ```ts
 import { warmAudioPlayer } from '@caprid/moq-media';
-import { connectRelaySubscriber } from '@caprid/relay';
+import { connectSupervisedSubscriber } from '@caprid/relay';
 import { listenAudio } from './listen-audio.js';
 
 // In the user's click: create the context there, and start the player's parts loading before the connect.
 const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
 warmAudioPlayer(context).catch(() => {});
-const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
+const subscriber = await connectSupervisedSubscriber({ url, getToken: () => subscriberToken });
 const listener = await listenAudio(subscriber, ['demo', 'live'], { context, onError: console.error });
 console.log(listener.input.stats); // underruns, buffer depth and target, frames dropped as late
 await listener.stop();
@@ -115,7 +115,7 @@ master and video stays in sync.
 
 ```ts
 import { createPlayoutClock } from '@caprid/moq-media';
-import { connectRelaySubscriber } from '@caprid/relay';
+import { connectSupervisedSubscriber } from '@caprid/relay';
 import { listenAudio, whenRunning } from './listen-audio.js';
 import { watchVideo } from './watch-video.js';
 
@@ -125,7 +125,7 @@ const namespace = ['demo', 'live'];
 // Without a user gesture the context starts suspended; resume it in your Unmute button's click.
 const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
 const clock = createPlayoutClock(); // one per broadcast: video and audio share it
-const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
+const subscriber = await connectSupervisedSubscriber({ url, getToken: () => subscriberToken });
 const watcher = await watchVideo(subscriber, namespace, canvas, { clock, onError: console.error });
 await whenRunning(context);
 const listener = await listenAudio(subscriber, namespace, { context, clock, onError: console.error });
@@ -134,10 +134,21 @@ listener.input.gain = 0; // mute
 await Promise.all([watcher.stop(), listener.stop()]);
 ```
 
-A subscriber that starts before the publisher has announced the namespace is rejected (the
-[announce race](../../GUIDE.md#discover-namespaces)), so retry the start, as the example page does.
-These examples use `connectRelaySubscriber`, which never reconnects
-([#404](https://github.com/muxinc/relay-sdks/issues/404)).
+Both take a supervised subscriber (`connectSupervisedSubscriber`) and want each track through it, so
+they outlive the publisher. A start before the publisher has announced waits for it rather than
+failing on the [announce race](../../GUIDE.md#discover-namespaces). When the publisher restarts, the
+want subscribes again within a round trip of the new announcement, and the new subscription plays
+live, with the gap unfilled. `listenAudio` drops the audio it held and calls `onRestarted`. `watchVideo`
+resets its decoder and waits for the next keyframe. Pass `generations: true` when the namespace is a
+supervised publisher's root, as the [voice bot](../voice-bot/README.md) does, to follow its newest
+generation. This page's publisher is a plain one on a fixed namespace, so the page leaves it off. A
+publisher stopped with Stop publishing ends its tracks at once. One that crashes holds its
+subscriptions until the relay's idle timeout, about 11 s, and the watcher resumes then.
+
+Across a restart, audio and video restart separately, each with its own want, and each restart
+resets the shared playout clock. Video plays on wall pacing from its first keyframe until audio
+plays again and takes the clock back, then follows audio as before. Sync is back once both have
+resumed, with no state carried over from before the restart.
 
 ### Run the example page
 

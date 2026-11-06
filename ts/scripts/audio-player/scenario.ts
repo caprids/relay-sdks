@@ -8,7 +8,7 @@
  * for a second, then 1.05 for a second (issue #329).
  */
 import { buildInterrupt, createBroadcastClock, INTERRUPT_TRACK, type Interrupt } from '@caprid/moq-media';
-import { connectRelayPublisher, connectRelaySubscriber, type RelayTransportFactory } from '@caprid/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber, type RelayTransportFactory } from '@caprid/relay';
 import { captureMicrophone } from '../../examples/webcodecs/capture-microphone.js';
 import { listenAudio } from '../../examples/webcodecs/listen-audio.js';
 import { publishCanvas } from '../../examples/webcodecs/publish-canvas.js';
@@ -27,7 +27,6 @@ export interface ScenarioOptions {
   report(value: object): unknown;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const quantile = (values: number[], q: number) => {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
@@ -44,7 +43,7 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     getToken,
     ...(transport.kind === 'hub' ? { createTransport: transport.publisher } : {}),
   });
-  const subscriber = await connectRelaySubscriber({
+  const subscriber = await connectSupervisedSubscriber({
     url,
     getToken,
     ...(transport.kind === 'hub' ? { createTransport: transport.subscriber } : {}),
@@ -78,21 +77,14 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
   // The listener plays through its own context, as a page would; 48 kHz so no resampling is involved.
   const playback = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
   await playback.resume();
-  let listener: Awaited<ReturnType<typeof listenAudio>> | undefined;
   const applied: { interrupt: Interrupt; at: number }[] = [];
-  for (const deadline = performance.now() + 15_000; !listener; ) {
-    try {
-      listener = await listenAudio(subscriber, options.namespace, {
-        context: playback,
-        onError: (error) => failures.push(error),
-        onInterrupt: (interrupt) => applied.push({ interrupt, at: performance.now() }),
-      });
-    } catch (error) {
-      // A subscribe that reaches the relay before the announce is rejected (the announce race); retry for a while.
-      if (performance.now() > deadline) throw error;
-      await sleep(250);
-    }
-  }
+  // The supervised subscriber's wants retry the announce race themselves.
+  const listener = await listenAudio(subscriber, options.namespace, {
+    context: playback,
+    onError: (error) => failures.push(error),
+    onInterrupt: (interrupt) => applied.push({ interrupt, at: performance.now() }),
+    signal: AbortSignal.timeout(15_000),
+  });
   const { input, clock, sequencer } = listener;
   // The largest step between two output samples: the tone's own is about 0.017, and a click is a larger one.
   const analyser = new AnalyserNode(playback, { fftSize: 2048 });
@@ -187,7 +179,7 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     microphone.close();
     await publishing.catch(() => {});
     for (const context of [tone, captureContext, playback]) await context.close().catch(() => {});
-    await subscriber.close();
+    subscriber.close();
     await publisher.close();
   }
 }

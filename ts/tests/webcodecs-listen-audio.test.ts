@@ -1,4 +1,3 @@
-import { resolveObjectURL } from 'node:buffer';
 import type { MoqtObject } from '@caprid/moq-core';
 import {
   buildInterrupt,
@@ -10,81 +9,42 @@ import {
   TRANSCRIPT_TRACK,
   warmAudioPlayer,
 } from '@caprid/moq-media';
-import type { RelaySubscriber } from '@caprid/relay';
+import type { SupervisedSubscriber, WantHandlers, WantOptions } from '@caprid/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listenAudio } from '../examples/webcodecs/listen-audio.js';
+import { FakeContext, FakeWorkletNode, OPUS_PACKETS, stubAudioGlobals } from './helpers/fake-audio.js';
 
 const NAMESPACE = ['room', 'mic'];
 
-// Consecutive 20 ms Opus packets (SILK, mono, a 300 Hz tone), as the audio player's tests use.
-const OPUS_PACKETS = [
-  'eNsq0lbYDhjw3GMFVER1GLNe/OddAMhCpLUNddotogMYjyI+Lqw7/cGB8SUyVzLYYg1p+OhrUr8GRx9EnlvinGV2IKO9G2mTqw==',
-  'eNsq7WglA7LrXjVTAhZx0u/bcYjn2IQ+nZkkmbqtIvM/GUdF096ifK6pJfCiP31rkbzF9I+RIOc5eIcG43G2Lg+9G2mTqw==',
-  'eNsqyzGGB/WI4/gZs/o8XsQJA0SUE8aydrKEZ/l2yDY60kCD8mNSJpMyMiKnR9ho9tnY2k1lWBhoNZrsbpXKJnPrRdc2kh1vW+mTpw==',
-  'eNsqyzGGGB8x8vZN7XpxGSMf/LkvWKgFq+6+0RYrb/bGxwU3ZW65u2NIDiMUQ5vXkRTsudkJIZrXTjS8UxZOz//FKJXciG+9GxPpqw==',
-].map((base64) => new Uint8Array(Buffer.from(base64, 'base64')));
+type Handlers = WantHandlers;
 
-class FakeNode {
-  gain = { value: 1 };
-  connect = vi.fn();
-  disconnect = vi.fn();
-}
-
-class FakeWorkletNode extends FakeNode {
-  static instances: FakeWorkletNode[] = [];
-  port: {
-    onmessage: ((event: { data: unknown }) => void) | null;
-    postMessage: ReturnType<typeof vi.fn>;
-    close: ReturnType<typeof vi.fn>;
-  } = {
-    onmessage: null,
-    postMessage: vi.fn(),
-    close: vi.fn(),
-  };
-  constructor() {
-    super();
-    FakeWorkletNode.instances.push(this);
-  }
-}
-
-class FakeContext {
-  static instances: FakeContext[] = [];
-  /** Fails the worklet module's load, from the context's construction on. */
-  static moduleFailure: Error | undefined;
-  readonly sampleRate = 48_000;
-  readonly baseLatency = 0;
-  readonly outputLatency = 0;
-  destination = new FakeNode();
-  close = vi.fn(async () => {});
-  audioWorklet = {
-    addModule: vi.fn(async (url: string) => {
-      if (FakeContext.moduleFailure) throw FakeContext.moduleFailure;
-      if (!resolveObjectURL(url)) throw new Error('Not a blob URL');
-    }),
-  };
-  constructor() {
-    FakeContext.instances.push(this);
-  }
-  createGain() {
-    return new FakeNode();
-  }
-}
-
-type Handlers = NonNullable<Parameters<RelaySubscriber['subscribe']>[1]>;
-type Request = { namespace: string[]; track: string };
-
-/** A subscriber that records each subscription and lets the test deliver catalog objects. */
+/** A supervised subscriber that records each want and lets the test deliver catalog objects. */
 function fakeSubscriber() {
-  const subscriptions: { request: Request; handlers: Handlers; cancel: ReturnType<typeof vi.fn> }[] = [];
+  const subscriptions: {
+    key: string;
+    request: WantOptions;
+    handlers: Handlers;
+    cancel: ReturnType<typeof vi.fn<() => void>>;
+  }[] = [];
   const subscriber = {
-    subscribe: vi.fn((request: Request, handlers: Handlers) => {
-      const subscription = { request, handlers, cancel: vi.fn() };
-      subscriptions.push(subscription);
-      return subscription;
+    want: vi.fn((key: string, options: WantOptions, handlers: Handlers) => {
+      subscriptions.push({ key, request: options, handlers, cancel: vi.fn() });
     }),
+    // Withdraws the newest want of that key not withdrawn yet; a `cancel` that throws throws out of here.
+    unwant: vi.fn((key: string) => {
+      const record = [...subscriptions]
+        .reverse()
+        .find((candidate) => candidate.key === key && candidate.cancel.mock.calls.length === 0);
+      record?.cancel();
+    }),
+    catchUp: vi.fn(),
+    rotate: vi.fn(),
+    close: vi.fn(),
+    status: 'live',
+    closed: new Promise(() => {}),
   };
   return {
-    subscriber: subscriber as unknown as RelaySubscriber,
+    subscriber: subscriber as unknown as SupervisedSubscriber,
     subscriptions,
     /** The catalog subscription: the first the listener makes. */
     get catalog() {
@@ -94,7 +54,7 @@ function fakeSubscriber() {
       (subscriptions[0] as (typeof subscriptions)[number]).handlers.onObject?.({
         status: 'normal',
         payload,
-      } as unknown as Parameters<NonNullable<Handlers['onObject']>>[0]);
+      } as unknown as Parameters<NonNullable<WantHandlers['onObject']>>[0]);
     },
   };
 }
@@ -116,13 +76,7 @@ function listen(
   return listening;
 }
 
-beforeEach(() => {
-  FakeContext.instances.length = 0;
-  FakeContext.moduleFailure = undefined;
-  FakeWorkletNode.instances.length = 0;
-  vi.stubGlobal('AudioContext', FakeContext);
-  vi.stubGlobal('AudioWorkletNode', FakeWorkletNode);
-});
+beforeEach(stubAudioGlobals);
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -159,11 +113,11 @@ it('closes the context and cancels the catalog when the audio player cannot load
 it('releases the player and subscriptions when the audio subscription cannot start', async () => {
   const fake = fakeSubscriber();
   const failure = new Error('The relay is gone');
-  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
-  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
-  subscribe.mockImplementation((request: Request, handlers: Handlers) => {
-    if (request.track === 'audio') throw failure;
-    return original(request, handlers);
+  const want = fake.subscriber.want as unknown as ReturnType<typeof vi.fn>;
+  const original = want.getMockImplementation() as (key: string, options: WantOptions, handlers: Handlers) => void;
+  want.mockImplementation((key: string, options: WantOptions, handlers: Handlers) => {
+    if (options.track === 'audio') throw failure;
+    return original(key, options, handlers);
   });
   await expect(listen(fake, audioCatalog())).rejects.toBe(failure);
   expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
@@ -216,14 +170,13 @@ it('reports an audio subscription failure after it started to onError', async ()
 it('cancels a catalog that came at once when the audio subscribe then throws', async () => {
   const fake = fakeSubscriber();
   const failure = new Error('The relay is gone');
-  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
-  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
-  subscribe.mockImplementation((request: Request, handlers: Handlers) => {
-    if (request.track === 'audio') throw failure;
-    const subscription = original(request, handlers);
-    // The catalog's first object arrives before subscribe() returns.
+  const want = fake.subscriber.want as unknown as ReturnType<typeof vi.fn>;
+  const original = want.getMockImplementation() as (key: string, options: WantOptions, handlers: Handlers) => void;
+  want.mockImplementation((key: string, options: WantOptions, handlers: Handlers) => {
+    if (options.track === 'audio') throw failure;
+    original(key, options, handlers);
+    // The catalog's first object arrives before want() returns.
     handlers.onObject?.({ status: 'normal', payload: audioCatalog() } as never);
-    return subscription;
   });
   const listening = listenAudio(fake.subscriber, NAMESPACE);
   await expect(listening).rejects.toBe(failure);
@@ -358,7 +311,7 @@ const interruptCatalog = () => buildMsfCatalog({ namespace: NAMESPACE, audio: {}
 function deliver(fake: ReturnType<typeof fakeSubscriber>, track: string, payload: Uint8Array) {
   const subscription = fake.subscriptions.find(({ request }) => request.track === track);
   subscription?.handlers.onObject?.({ status: 'normal', payload } as unknown as Parameters<
-    NonNullable<Handlers['onObject']>
+    NonNullable<WantHandlers['onObject']>
   >[0]);
 }
 
@@ -653,10 +606,10 @@ it('keeps the old track when the replacement cannot be subscribed, and tries aga
   const listening = listenAudio(fake.subscriber, NAMESPACE, { onError, onTrackReplaced });
   fake.deliverCatalog(audioCatalog());
   const listener = await listening;
-  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
-  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
+  const want = fake.subscriber.want as unknown as ReturnType<typeof vi.fn>;
+  const original = want.getMockImplementation() as (key: string, options: WantOptions, handlers: Handlers) => void;
   const failure = new Error('The relay is gone');
-  subscribe.mockImplementationOnce(() => {
+  want.mockImplementationOnce(() => {
     throw failure;
   });
   const cut = vi.spyOn(listener.input, 'cut');
@@ -666,7 +619,7 @@ it('keeps the old track when the replacement cannot be subscribed, and tries aga
   expect(fake.subscriptions[1]?.cancel).not.toHaveBeenCalled();
   expect(cut).not.toHaveBeenCalled();
   expect(onTrackReplaced).not.toHaveBeenCalled();
-  subscribe.mockImplementation(original);
+  want.mockImplementation(original);
   fake.deliverCatalog(replacementCatalog('audio-2'));
   expect(listener.track).toBe('audio-2');
   expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
@@ -923,5 +876,158 @@ it('plays audio that arrives behind a shared clock that video is pacing', async 
     } as MoqtObject);
   }
   expect(listener.input.stats.decoded).toBe(4);
+  await listener.stop();
+});
+
+/** A catalog whose tracks name no namespace, as a supervised talker's is: each inherits its generation's. */
+const generationCatalog = (name: string, data: string[] = []) => {
+  const catalog = JSON.parse(
+    new TextDecoder().decode(
+      buildMsfCatalog({
+        namespace: NAMESPACE,
+        media: [{ role: 'audio', name }],
+        data: data.map((track) => ({ name: track })),
+      }),
+    ),
+  ) as { tracks: Record<string, unknown>[] };
+  for (const track of catalog.tracks) delete track['namespace'];
+  return new TextEncoder().encode(JSON.stringify(catalog));
+};
+const generation = (field: string) => [...NAMESPACE, field];
+const accepted = (trackProperties: { type: number; value: number }[] = []) =>
+  ({ trackAlias: 1, parameters: {}, trackProperties }) as unknown as Parameters<
+    NonNullable<WantHandlers['onSubscribed']>
+  >[0];
+
+it('wants every track under the root with generations, and keeps one listener across a talker restart', async () => {
+  const fake = fakeSubscriber();
+  const onRestarted = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true, onRestarted });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  // The reader takes each subscription's track properties, the Timescale among them.
+  audio.handlers.onSubscribed?.(accepted([{ type: 0x40, value: 1 }]), { namespace: generation('g1') });
+  fake.catalog.handlers.onSubscribed?.(accepted(), { namespace: generation('g1') });
+  fake.deliverCatalog(generationCatalog('audio', [INTERRUPT_TRACK, TRANSCRIPT_TRACK]));
+  const listener = await listening;
+  expect(fake.subscriptions.map(({ request }) => [request.track, request.namespace, request.generations])).toEqual([
+    ['catalog', NAMESPACE, true],
+    ['audio', NAMESPACE, true],
+    [INTERRUPT_TRACK, NAMESPACE, true],
+    [TRANSCRIPT_TRACK, NAMESPACE, true],
+  ]);
+  expect(listener.sequencer.trackProperties).toEqual([{ type: 0x40, value: 1 }]);
+  const cut = vi.spyOn(listener.input, 'cut');
+  const restart = vi.spyOn(listener.sequencer, 'restart');
+
+  // The talker's publisher went away and came back: the want subscribed again, and the reader takes the new
+  // subscription's properties.
+  audio.handlers.onRestarted?.({ reason: 'publisher-done', namespace: generation('g1') });
+  expect(restart).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledWith();
+  expect(onRestarted).toHaveBeenLastCalledWith({ reason: 'publisher-done', namespace: generation('g1') });
+  audio.handlers.onSubscribed?.(accepted([{ type: 0x40, value: 2 }]), { namespace: generation('g1') });
+  expect(listener.sequencer.trackProperties).toEqual([{ type: 0x40, value: 2 }]);
+
+  // It restarted as a newer generation: the want moved there, with that subscription's properties.
+  audio.handlers.onSwitched?.({
+    from: { namespace: generation('g1'), track: 'audio' },
+    to: { namespace: generation('g2'), track: 'audio' },
+    subscribed: accepted([{ type: 0x40, value: 3 }]),
+  });
+  expect(restart).toHaveBeenCalledTimes(2);
+  expect(cut).toHaveBeenCalledTimes(2);
+  expect(onRestarted).toHaveBeenLastCalledWith({ reason: 'generation', namespace: generation('g1') });
+  expect(listener.sequencer.trackProperties).toEqual([{ type: 0x40, value: 3 }]);
+  // The same wants carry on: nothing was wanted again.
+  expect(fake.subscriptions).toHaveLength(4);
+  await listener.stop();
+  expect(fake.subscriptions.every(({ cancel }) => cancel.mock.calls.length === 1)).toBe(true);
+  // Nothing is reported after stop().
+  audio.handlers.onRestarted?.({ reason: 'connection', namespace: generation('g2') });
+  expect(onRestarted).toHaveBeenCalledTimes(2);
+});
+
+it('drops the frames it holds for a subscription that restarts before the player exists', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  const object = (index: number) =>
+    ({
+      groupId: index,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [{ type: LOC_TIMESTAMP, value: 1_000_000 + index * 20_000 }],
+      payload: OPUS_PACKETS[index] as Uint8Array,
+    }) as MoqtObject;
+  audio.handlers.onObject?.(object(0));
+  audio.handlers.onObject?.(object(1));
+  // The talker restarted while the catalog was on its way: what came before is the old generation's.
+  audio.handlers.onRestarted?.({ reason: 'generation', namespace: generation('g1') });
+  audio.handlers.onObject?.(object(2));
+  fake.deliverCatalog(generationCatalog('audio'));
+  const listener = await listening;
+  expect(listener.input.stats.decoded).toBe(1);
+  await listener.stop();
+});
+
+it("plays the audio track a restarted talker's new generation lists, and keeps the one it lists still", async () => {
+  const fake = fakeSubscriber();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true, onTrackReplaced });
+  fake.catalog.handlers.onSubscribed?.(accepted(), { namespace: generation('g1') });
+  fake.deliverCatalog(generationCatalog('audio'));
+  const listener = await listening;
+  // A replacement within the generation.
+  fake.deliverCatalog(generationCatalog('audio-2'));
+  expect(listener.track).toBe('audio-2');
+  // The talker restarted as a newer generation, still with audio-2: its catalog replaces nothing, though every track in
+  // it is under the new generation's namespace.
+  fake.catalog.handlers.onSwitched?.({
+    from: { namespace: generation('g1'), track: 'catalog' },
+    to: { namespace: generation('g2'), track: 'catalog' },
+    subscribed: accepted(),
+  });
+  fake.deliverCatalog(generationCatalog('audio-2'));
+  expect(listener.track).toBe('audio-2');
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
+  // Restarted again, it starts over with its conventional track: that one plays.
+  fake.catalog.handlers.onRestarted?.({ reason: 'generation', namespace: generation('g2') });
+  fake.catalog.handlers.onSubscribed?.(accepted(), { namespace: generation('g3') });
+  fake.deliverCatalog(generationCatalog('audio'));
+  expect(listener.track).toBe('audio');
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2', 'audio']);
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+  expect(onTrackReplaced).toHaveBeenLastCalledWith(expect.objectContaining({ from: 'audio-2', to: 'audio' }));
+  await listener.stop();
+});
+
+it('starts a new transcript when the talker restarts', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { generations: true });
+  fake.deliverCatalog(generationCatalog('audio', [TRANSCRIPT_TRACK]));
+  const listener = await listening;
+  const transcripts = fake.subscriptions.find(({ request }) => request.track === TRANSCRIPT_TRACK);
+  const segment = (seq: number, text: string, fromUs: number) =>
+    deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq, final: true, fromUs, untilUs: fromUs + 500, text }));
+  transcripts?.handlers.onSubscribed?.(accepted(), { namespace: generation('g1') });
+  segment(0, 'first run', 1_000);
+  // A reconnect to the same generation keeps it.
+  transcripts?.handlers.onRestarted?.({ reason: 'connection', namespace: generation('g1') });
+  transcripts?.handlers.onSubscribed?.(accepted(), { namespace: generation('g1') });
+  expect(listener.transcript.lines.map((line) => line.text)).toEqual(['first run']);
+  // A newer generation numbers its segments from 0 again.
+  transcripts?.handlers.onSwitched?.({
+    from: { namespace: generation('g1'), track: TRANSCRIPT_TRACK },
+    to: { namespace: generation('g2'), track: TRANSCRIPT_TRACK },
+    subscribed: accepted(),
+  });
+  expect(listener.transcript.lines).toEqual([]);
+  segment(0, 'second run', 2_000);
+  expect(listener.transcript.lines.map((line) => line.text)).toEqual(['second run']);
+  // So does a publisher that went away at a fixed namespace and came back.
+  transcripts?.handlers.onRestarted?.({ reason: 'publisher-done', namespace: generation('g2') });
+  segment(0, 'third run', 3_000);
+  expect(listener.transcript.lines.map((line) => line.text)).toEqual(['third run']);
   await listener.stop();
 });

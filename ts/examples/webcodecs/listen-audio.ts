@@ -24,9 +24,12 @@ import {
   type TranscriptSegment,
   warmAudioPlayer,
 } from '@caprid/moq-media';
-import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
+import type { RestartReason, SupervisedSubscriber, WantHandlers } from '@caprid/relay';
 import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 import { type LaterCatalogs, readCatalog } from './read-catalog.js';
+
+/** Numbers each listener, so the want keys of two listeners on one supervised subscriber never collide. */
+let listeners = 0;
 
 /**
  * One step of an audio track replacement (a talker talked over): `seen`, the catalog listing the new track arrived
@@ -58,10 +61,23 @@ export interface ListenAudioOptions {
    */
   echoCancellation?: boolean;
   /**
-   * A failure after the listener started: the audio, interrupt or transcript subscription ended with an error, a
-   * decoder failed, or an interrupt or transcript object did not parse.
+   * `namespace` is a supervised publisher's root, such as a voice bot's: follow its newest generation, so a talker
+   * that restarts as a new generation is played again within a round trip of its announcement. Default `false`: play
+   * `namespace` itself, resubscribing when its publisher restarts there.
+   */
+  generations?: boolean;
+  /**
+   * A failure after the listener started that its supervised subscriber does not retry (the audio, interrupt or
+   * transcript want stopped), a decoder failed, or an interrupt or transcript object did not parse.
    */
   onError?(error: unknown): void;
+  /**
+   * The audio subscription was replaced after the relay had accepted it: the talker restarted (`'generation'`, a newer
+   * generation took over; `'publisher-done'`, its publisher went away), the subscriber reconnected (`'connection'`),
+   * or the relay ended it. The player has dropped the audio it held, and the next audio is the new subscription's,
+   * live. `namespace` is the one the replaced subscription was on: the old generation's, when following one.
+   */
+  onRestarted?(info: { reason: RestartReason; namespace: string[] }): void;
   /** An interrupt for the audio track, called after the player and the transcript have cut. */
   onInterrupt?(interrupt: Interrupt): void;
   /** A transcript segment for the audio track that changed `transcript`. */
@@ -73,8 +89,9 @@ export interface ListenAudioOptions {
    */
   onTrackReplaced?(event: AudioTrackReplacedEvent): void;
   /**
-   * Aborting while the listener starts cancels what it set up and rejects with the reason, as when the catalog is
-   * slow to arrive. Once started, stop it with `stop()`.
+   * Aborting while the listener starts withdraws what it set up and rejects with the reason. It waits for the
+   * catalog as long as it takes, since the supervised subscriber retries until the talker is there. Once started,
+   * stop it with `stop()`.
    */
   signal?: AbortSignal;
 }
@@ -93,7 +110,7 @@ export interface AudioListener {
   readonly transcript: Transcript;
   /** The audio track playing now: `audio`, or the track that last replaced it. */
   readonly track: string;
-  /** Stop playing and cancel the subscriptions. A context the listener created is closed too. */
+  /** Stop playing and withdraw the wants. A context the listener created is closed too. */
   stop(): Promise<void>;
 }
 
@@ -125,20 +142,27 @@ export function whenRunning(context: BaseAudioContext): Promise<void> {
  * transcript, which interrupts cut too. When a later catalog lists a new audio track in place of the one playing (a
  * talker's track replacement), the listener drops the old track's audio and plays the new one.
  *
+ * Every track is a want of the supervised subscriber, so the listener outlives the talker. It waits for a talker that
+ * has not announced yet. When the talker restarts, at `namespace` or (with `generations`) as a newer generation under
+ * it, or the subscriber reconnects, the want subscribes again: the player drops what it held of the old subscription,
+ * the new one plays live, and `onRestarted` says so.
+ *
  * It joins quickly. It starts `warmAudioPlayer(context)` at once, so the worklet module and libopus load while the
  * catalog is on its way (create the context in the user's gesture, as the click that connects, so the warm happens
- * there; a context the page already warmed is not loaded again). It subscribes to the audio track by its conventional
- * name together with the catalog, before the catalog arrives, and a frame hold keeps the frames until the player's
- * input exists. When the catalog names the track, it adds the input and passes the held frames to it, in order; a
- * catalog that names another audio track (the listener joined after a replacement) has it subscribed instead. The
- * interrupt track is subscribed when the catalog lists it, before the player exists, and interrupts that come
- * meanwhile cut the held audio before it is released.
+ * there; a context the page already warmed is not loaded again). It wants the audio track by its conventional name
+ * together with the catalog, before the catalog arrives, and a frame hold keeps the frames until the player's input
+ * exists. When the catalog names the track, it adds the input and passes the held frames to it, in order; a catalog
+ * that names another audio track (the listener joined after a replacement) has that one wanted instead. The
+ * interrupt track is wanted when the catalog lists it, before the player exists, and interrupts that come meanwhile
+ * cut the held audio before it is released.
  */
 export async function listenAudio(
-  subscriber: RelaySubscriber,
+  subscriber: SupervisedSubscriber,
   namespace: readonly string[],
   options: ListenAudioOptions = {},
 ): Promise<AudioListener> {
+  const generations = options.generations ?? false;
+  const id = `listen-audio/${++listeners}`;
   const ownsContext = !options.context;
   const context = options.context ?? new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
   // What setup has created so far, released in reverse order if a later step fails.
@@ -153,10 +177,10 @@ export async function listenAudio(
   options.signal?.addEventListener('abort', abortSetup, { once: true });
   // Later catalogs, once the listener has started: a track replacement.
   const later: LaterCatalogs = {};
-  // Once started, an audio subscription's failure goes to onError; before, it fails the setup (below).
+  // Once started, an audio want's failure goes to onError; before, it fails the setup (below).
   let started = false;
-  // Whether the catalog's subscription is in `release` yet: a catalog that came before a later step failed is
-  // cancelled here otherwise.
+  // Whether the catalog's want is in `release` yet: a catalog that came before a later step failed is withdrawn here
+  // otherwise.
   let catalogReleased = false;
   let reading: ReturnType<typeof readCatalog> | undefined;
   try {
@@ -172,46 +196,65 @@ export async function listenAudio(
     });
     const hold = createFrameHold<SequencedFrame>();
     interface Audio {
+      key: string;
       reader: FrameReader;
-      subscription: RelaySubscription;
-      /** The relay ended this subscription with an error, a rejected replacement for one. */
+      /** The want stopped on a failure the subscriber does not retry: a rejected replacement, say. */
       failed: { error: unknown } | undefined;
     }
-    // Subscribe to one audio track, its frames to `onFrame`. A failure is kept on the subscription: before the listener
-    // has started it fails the setup once the catalog has named the track (the subscription by the conventional name
-    // can fail only because a replacement retired that track); after, it goes to onError, and the next catalog that
-    // still lists the track subscribes again.
-    const subscribeAudio = (name: string, onFrame: (frame: SequencedFrame) => void): Audio => {
+    // A restart or a move of the audio want, after the reader has restarted the sequencer. Before the player exists it
+    // drops the held frames of the replaced subscription; once the input exists it cuts what the player holds.
+    let restarted = (_reason: RestartReason, _from: string[]) => hold.clear();
+    // Want one audio track, its frames to `onFrame`. A failure the subscriber does not retry is kept on the want:
+    // before the listener has started it fails the setup once the catalog has named the track (the want by the
+    // conventional name can fail so only because a replacement retired that track); after, it goes to onError, and
+    // the next catalog that still lists the track wants it again. Each track has a key of its own, so a replacement is
+    // a new want and the old track's is withdrawn at once.
+    const audioKey = (name: string) => `${id}/audio/${name}`;
+    const wantAudio = (name: string, onFrame: (frame: SequencedFrame) => void): Audio => {
       const reader = createFrameReader(sequencer, { onFrame });
-      const subscribed: { reader: FrameReader; subscription?: RelaySubscription; failed?: { error: unknown } } = {
-        reader,
+      const wanted: Audio = { key: audioKey(name), reader, failed: undefined };
+      const handlers: WantHandlers = {
+        ...reader,
+        // A talker restart or a reconnect: the reader restarts the sequencer (the clock with it), and its onSubscribed
+        // takes the new subscription's track properties; the listener drops what it holds of the old subscription.
+        onRestarted(info) {
+          reader.onRestarted();
+          restarted(info.reason, info.namespace);
+        },
+        // A move to a newer generation: the same, with the new subscription's track properties from the reader.
+        onSwitched(info) {
+          reader.onSwitched(info);
+          restarted('generation', info.from.namespace);
+        },
+        onError(error) {
+          wanted.failed ??= { error };
+          if (started) options.onError?.(error);
+        },
       };
       try {
-        subscribed.subscription = subscriber.subscribe(
-          { namespace: [...namespace], track: name, parameters: mediaSubscribeParameters('audio') },
-          {
-            ...reader,
-            onError(error) {
-              subscribed.failed ??= { error };
-              if (started) options.onError?.(error);
-            },
-          },
+        subscriber.want(
+          wanted.key,
+          { namespace, track: name, parameters: mediaSubscribeParameters('audio'), generations },
+          handlers,
         );
       } catch (error) {
         reader.close();
         throw error;
       }
-      return subscribed as Audio;
+      return wanted;
     };
-    // Subscribe to the catalog and the audio track at once: the audio does not wait for the catalog's round trips.
-    reading = readCatalog(subscriber, namespace, setup.signal, later);
+    const dropAudio = (dropped: Audio) => {
+      dropped.reader.close();
+      subscriber.unwant(dropped.key);
+    };
+    // Want the catalog and the audio track at once: the audio does not wait for the catalog's round trips.
+    reading = readCatalog(subscriber, `${id}/catalog`, namespace, generations, setup.signal, later);
     // A failure below ends the read through the setup signal; the rejection is awaited later.
     reading.catch(() => {});
-    let audio = subscribeAudio(AUDIO_TRACK, hold.push);
-    release.push(() => audio.reader.close());
-    release.push(() => audio.subscription.cancel());
-    const { tracks, subscription: catalog } = await reading;
-    release.push(() => catalog.cancel());
+    let audio = wantAudio(AUDIO_TRACK, hold.push);
+    release.push(() => dropAudio(audio));
+    const { tracks, stop: stopCatalog } = await reading;
+    release.push(stopCatalog);
     catalogReleased = true;
     // The audio track; one that joins after a replacement finds the replacement, the catalog's audio track.
     const track =
@@ -219,12 +262,11 @@ export async function listenAudio(
       tracks.find((candidate) => candidate.role === 'audio');
     if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
     if (track.name !== AUDIO_TRACK) {
-      // The track subscribed by its conventional name was replaced before this listener joined: play the catalog's.
-      audio.reader.close();
-      audio.subscription.cancel();
+      // The track wanted by its conventional name was replaced before this listener joined: play the catalog's.
+      dropAudio(audio);
       hold.clear();
       sequencer.restart();
-      audio = subscribeAudio(track.name, hold.push);
+      audio = wantAudio(track.name, hold.push);
     }
     const throwIfAudioFailed = () => {
       if (audio.failed) throw audio.failed.error;
@@ -235,8 +277,8 @@ export async function listenAudio(
     // is not passed to the clock either.
     let current = track;
     let replacing: { from: string; to: string; stopped: boolean } | undefined;
-    // From a restart's cut (a replacement, or a retried subscription) until the cut is heard: reports describe audio
-    // from before the restart and are not passed to the clock the restart reset.
+    // From a restart's cut (a replacement, a want's restart or move, or a retried want) until the cut is heard: reports
+    // describe audio from before the restart and are not passed to the clock the restart reset.
     let cutUnheard = false;
     const replaced = (phase: AudioTrackReplacedEvent['phase'], atUs: number) => {
       if (!replacing) return;
@@ -248,13 +290,14 @@ export async function listenAudio(
       }
     };
     const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
-    // A track replacement starts a new transcript: its sequence numbers and cuts belong to one run of one audio track.
+    // A track replacement starts a new transcript, and so does a restarted talker: its sequence numbers and cuts
+    // belong to one run of one audio track.
     let transcript = createTranscript();
     // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds, and
-    // the transcript of what was not heard. It is subscribed as soon as the catalog lists it, before the player
-    // exists: audio is already arriving into the hold, and an interrupt sent meanwhile must cut it. Interrupts that
-    // come before the input exists wait, and are applied before the held audio is released. One sent before this
-    // subscription is handed over as the track's latest object (a relay cache), and drops only older audio.
+    // the transcript of what was not heard. It is wanted as soon as the catalog lists it, before the player exists:
+    // audio is already arriving into the hold, and an interrupt sent meanwhile must cut it. Interrupts that come before
+    // the input exists wait, and are applied before the held audio is released. One sent before this subscription is
+    // handed over as the track's latest object (a relay cache, on every restart too), and drops only older audio.
     let cutTarget: AudioPlayerInput | undefined;
     const waitingInterrupts: Interrupt[] = [];
     const applyInterrupt = (interrupt: Interrupt) => {
@@ -266,27 +309,30 @@ export async function listenAudio(
       transcript.cut(interrupt, clock.position());
       options.onInterrupt?.(interrupt);
     };
-    const interrupts = listed(INTERRUPT_TRACK)
-      ? subscriber.subscribe(
-          { namespace: [...namespace], track: INTERRUPT_TRACK },
-          {
-            onObject(object) {
-              if (object.status !== 'normal') return;
-              let interrupt: Interrupt;
-              try {
-                interrupt = parseInterrupt(object.payload);
-              } catch (error) {
-                options.onError?.(error);
-                return;
-              }
-              if (interrupt.track !== current.name) return;
-              applyInterrupt(interrupt);
-            },
-            onError: (error) => options.onError?.(error),
+    const interruptKey = `${id}/interrupt`;
+    const interrupts = listed(INTERRUPT_TRACK);
+    if (interrupts) {
+      subscriber.want(
+        interruptKey,
+        { namespace, track: INTERRUPT_TRACK, generations },
+        {
+          onObject(object) {
+            if (object.status !== 'normal') return;
+            let interrupt: Interrupt;
+            try {
+              interrupt = parseInterrupt(object.payload);
+            } catch (error) {
+              options.onError?.(error);
+              return;
+            }
+            if (interrupt.track !== current.name) return;
+            applyInterrupt(interrupt);
           },
-        )
-      : undefined;
-    if (interrupts) release.push(() => interrupts.cancel());
+          onError: (error) => options.onError?.(error),
+        },
+      );
+      release.push(() => subscriber.unwant(interruptKey));
+    }
 
     await warm;
     const player = await createAudioPlayer({ context });
@@ -333,57 +379,90 @@ export async function listenAudio(
     // every frame as it comes.
     for (const interrupt of waitingInterrupts.splice(0)) applyInterrupt(interrupt);
     hold.release(input.push);
-    const transcripts = listed(TRANSCRIPT_TRACK)
-      ? subscriber.subscribe(
-          { namespace: [...namespace], track: TRANSCRIPT_TRACK },
-          {
-            onObject(object) {
-              if (object.status !== 'normal') return;
-              let segment: TranscriptSegment;
-              try {
-                segment = parseTranscriptSegment(object.payload);
-              } catch (error) {
-                options.onError?.(error);
-                return;
-              }
-              if (segment.track === current.name && transcript.apply(segment)) options.onTranscript?.(segment);
-            },
-            onError: (error) => options.onError?.(error),
+    // Each run of the talker numbers its segments anew: a transcript want that moves to another generation, or whose
+    // publisher went away, starts a new transcript.
+    const transcriptKey = `${id}/transcript`;
+    const transcripts = listed(TRANSCRIPT_TRACK);
+    let transcriptAt: string | undefined;
+    const transcriptOn = (at: readonly string[]) => {
+      const key = JSON.stringify(at);
+      if (transcriptAt !== undefined && transcriptAt !== key) transcript = createTranscript();
+      transcriptAt = key;
+    };
+    if (transcripts) {
+      subscriber.want(
+        transcriptKey,
+        { namespace, track: TRANSCRIPT_TRACK, generations },
+        {
+          onSubscribed: (_, context) => transcriptOn(context.namespace),
+          onSwitched: (info) => transcriptOn(info.to.namespace),
+          onRestarted(info) {
+            if (info.reason === 'publisher-done') transcript = createTranscript();
           },
-        )
-      : undefined;
-    if (transcripts) release.push(() => transcripts.cancel());
+          onObject(object) {
+            if (object.status !== 'normal') return;
+            let segment: TranscriptSegment;
+            try {
+              segment = parseTranscriptSegment(object.payload);
+            } catch (error) {
+              options.onError?.(error);
+              return;
+            }
+            if (segment.track === current.name && transcript.apply(segment)) options.onTranscript?.(segment);
+          },
+          onError: (error) => options.onError?.(error),
+        },
+      );
+      release.push(() => subscriber.unwant(transcriptKey));
+    }
     throwIfAudioFailed();
 
-    // A track replacement: stop the old track's subscription and drop what the sequencer and the player hold of it, then
-    // play the new track from its first frame, on a clock the sequencer's restart has reset. The new track is subscribed
-    // first: if that fails, nothing changes, the old track plays on, and the next catalog that lists the replacement
-    // tries again. A relay that rejects the subscription later, through its `onError`, leaves the new track current
-    // and silent: the next catalog that still lists it subscribes to it again, the same steps without a replacement.
+    // A track replacement: withdraw the old track's want and drop what the sequencer and the player hold of it, then
+    // play the new track from its first frame, on a clock the sequencer's restart has reset. The new track is wanted
+    // first: if that throws, nothing changes, the old track plays on, and the next catalog that lists the replacement
+    // tries again. A want that stops later, through its `onError`, leaves the new track current and silent: the next
+    // catalog that still lists it wants it again, the same steps without a replacement. A restarted talker's catalog
+    // comes from its new generation's namespace: the playing track is looked for there, and when that catalog lists
+    // another audio track instead, as a talker that restarts after a replacement does, that one plays.
     let stopped = false;
+    // A restart or a move of the audio want from now on: the reader has restarted the sequencer, so drop what the player
+    // holds of the old subscription, and tell the application.
+    restarted = (reason, from) => {
+      if (stopped) return;
+      input.cut();
+      cutUnheard = true;
+      try {
+        options.onRestarted?.({ reason, namespace: from });
+      } catch (error) {
+        console.error(new Error('onRestarted threw; the listener carries on', { cause: error }));
+      }
+    };
     later.onError = (error) => {
       if (!stopped) options.onError?.(error);
     };
-    later.onCatalog = (tracks) => {
+    later.onCatalog = (tracks, at) => {
       if (stopped) return;
-      const replacement = findReplacementTrack(current, tracks);
+      const replacement = findReplacementTrack({ ...current, namespace: at }, tracks);
       const next =
         replacement ?? (audio.failed ? tracks.find((candidate) => candidate.name === current.name) : undefined);
       if (!next) return;
-      let subscribed: Audio;
+      // Wanting again a track whose want stopped reuses its key: the old reader goes first, and the supervisor has
+      // forgotten that want already.
+      const again = audio.key === audioKey(next.name);
+      if (again) dropAudio(audio);
+      let wanted: Audio;
       try {
-        subscribed = subscribeAudio(next.name, input.push);
+        wanted = wantAudio(next.name, input.push);
       } catch (error) {
         options.onError?.(error);
         return;
       }
       // Objects arrive asynchronously, so none of the new track's reaches the sequencer before its restart.
-      audio.reader.close();
-      audio.subscription.cancel();
+      if (!again) dropAudio(audio);
       sequencer.restart();
       input.cut();
       cutUnheard = true;
-      audio = subscribed;
+      audio = wanted;
       if (!replacement) return;
       replacing = { from: current.name, to: next.name, stopped: false };
       current = next;
@@ -396,7 +475,7 @@ export async function listenAudio(
     delete later.pending;
     delete later.pendingError;
     if (pendingError) later.onError(pendingError.error);
-    if (pending) later.onCatalog(pending);
+    if (pending) later.onCatalog(pending.tracks, pending.namespace);
 
     return {
       context,
@@ -412,23 +491,22 @@ export async function listenAudio(
       },
       async stop() {
         stopped = true;
-        audio.reader.close();
-        audio.subscription.cancel();
-        interrupts?.cancel();
-        transcripts?.cancel();
-        catalog.cancel();
+        dropAudio(audio);
+        if (interrupts) subscriber.unwant(interruptKey);
+        if (transcripts) subscriber.unwant(transcriptKey);
+        stopCatalog();
         loopback?.close();
         player.close();
         if (ownsContext) await context.close();
       },
     };
   } catch (error) {
-    // A failure before the catalog arrived ends its read too: it cancels its own subscription. One that came already,
-    // before the step that failed could take it, is cancelled here.
+    // A failure before the catalog arrived ends its read too: it withdraws its own want. One that came already, before
+    // the step that failed could take it, is withdrawn here.
     setup.abort(error);
     if (!catalogReleased)
       reading?.then(
-        ({ subscription }) => subscription.cancel(),
+        ({ stop }) => stop(),
         () => {},
       );
     // A failure while cleaning up must not hide the one that stopped the setup.
