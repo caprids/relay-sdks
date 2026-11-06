@@ -160,7 +160,7 @@ a click. The video plays, and the audio waits for Unmute. The status line shows 
 the last video frame's offset from the audio, and the audio buffer.
 
 `mise run ts:test:watch-video` checks this end to end in headless Chromium against the Relay
-(`RELAY_TOKEN`). One page publishes a flash and a beep every 600 ms and watches them through
+(`RELAY_TOKEN`), or through an in-memory relay hub in the page with `WATCH_VIDEO_TRANSPORT=hub`. One page publishes a flash and a beep every 600 ms and watches them through
 `watchVideo` and `listenAudio`. The test passes when video keeps moving while the context is
 suspended, when every flash is within 45 ms of its beep once audio plays, and when video keeps
 moving while muted.

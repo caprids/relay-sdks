@@ -79,7 +79,7 @@ dir = "ts"
 run = "pnpm test:audio-player"
 
 [tasks."ts:test:watch-video"]
-description = "Opt-in live test of the WebCodecs example's watchVideo with listenAudio: Chromium through the Relay, audio suspended, resumed and muted (RELAY_TOKEN)"
+description = "Opt-in live test of the WebCodecs example's watchVideo with listenAudio: Chromium through the Relay (RELAY_TOKEN), or an in-memory hub with WATCH_VIDEO_TRANSPORT=hub, audio suspended, resumed and muted"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:watch-video"
