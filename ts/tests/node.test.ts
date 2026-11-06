@@ -13,6 +13,11 @@ const quic = {
   nativeQuicTransport: undefined as unknown as Mock<(options?: object) => Mock<RelayTransportFactory>>,
   /** Where the factories the stand-in returns send each dial. */
   route: undefined as unknown as RelayTransportFactory,
+  /**
+   * What importing the stand-in gives: its exports, a throw for a missing package, or a promise for one still loading.
+   * A test sets this rather than calling `vi.doMock` again, since a second `doMock` of the same module races the first.
+   */
+  load: undefined as unknown as () => unknown,
 };
 
 const url = 'https://relay.example.com/moq';
@@ -32,9 +37,8 @@ function hub() {
 }
 
 beforeEach(() => {
-  vi.doMock('@caprid/relay-quic', () => ({
-    nativeQuicTransport: (...args: [object?]) => quic.nativeQuicTransport(...args),
-  }));
+  quic.load = () => ({ nativeQuicTransport: (...args: [object?]) => quic.nativeQuicTransport(...args) });
+  vi.doMock('@caprid/relay-quic', () => quic.load());
   quic.nativeQuicTransport = vi.fn(() => vi.fn<RelayTransportFactory>((url, protocols) => quic.route(url, protocols)));
 });
 
@@ -115,9 +119,9 @@ describe('@caprid/relay/node', () => {
   });
 
   it('fails with TRANSPORT_UNAVAILABLE, naming the adapter, when @caprid/relay-quic is not installed', async () => {
-    vi.doMock('@caprid/relay-quic', () => {
+    quic.load = () => {
       throw new Error("Cannot find package '@caprid/relay-quic'");
-    });
+    };
     const { connectRelaySubscriber, RelayError } = await entry();
 
     const failure = await connectRelaySubscriber({ url }).catch((error: unknown) => error);
@@ -147,9 +151,9 @@ describe('@caprid/relay/node', () => {
   });
 
   it('checks its arguments and signal before reporting a missing adapter, as the browser default does', async () => {
-    vi.doMock('@caprid/relay-quic', () => {
+    quic.load = () => {
       throw new Error("Cannot find package '@caprid/relay-quic'");
-    });
+    };
     const { connectRelaySubscriber } = await entry();
 
     await expect(connectRelaySubscriber({ url: 'not a url' })).rejects.toThrow(TypeError);
@@ -159,7 +163,7 @@ describe('@caprid/relay/node', () => {
   });
 
   it('applies the signal and the deadline while the adapter is still loading', async () => {
-    vi.doMock('@caprid/relay-quic', () => new Promise(() => {}));
+    quic.load = () => new Promise(() => {});
     const { connectRelaySubscriber } = await entry();
 
     const owner = new AbortController();
