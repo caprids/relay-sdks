@@ -7,9 +7,12 @@ import {
   type SequencedFrame,
   VIDEO_TRACK,
 } from '@caprid/moq-media';
-import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
+import type { SupervisedSubscriber, WantHandlers } from '@caprid/relay';
 import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 import { readCatalog } from './read-catalog.js';
+
+/** Numbers each watcher, so the want keys of two watchers on one supervised subscriber never collide. */
+let watchers = 0;
 
 /**
  * Decoded frames waiting for their time, at most: a hidden tab throttles timers, so the pump falls behind the decoder,
@@ -27,7 +30,13 @@ export interface WatchVideoOptions {
   /** The playout clock that paces the video; pass the same one to `listenAudio`. Default: a new one. */
   clock?: PlayoutClock;
   /**
-   * A failure after the watcher started: the video subscription ended with an error, or the decoder failed. A decoder
+   * `namespace` is a supervised publisher's root: follow its newest generation, as `listenAudio`'s option does.
+   * Default `false`: play `namespace` itself, resubscribing when its publisher restarts there.
+   */
+  generations?: boolean;
+  /**
+   * A failure after the watcher started: the video want stopped on a failure its supervised subscriber does not retry,
+   * or the decoder failed. A decoder
    * that fails before its first frame, or that does not support the codec, fails for good: the watcher decodes nothing
    * more. Otherwise a new decoder starts at the next keyframe.
    */
@@ -35,8 +44,9 @@ export interface WatchVideoOptions {
   /** A frame was drawn: its timestamp on the broadcast timeline, and its offset from the clock (positive is early). */
   onShown?(timestampUs: number, offsetUs: number): void;
   /**
-   * Aborting while the watcher starts cancels what it set up and rejects with the reason, as when the catalog is slow
-   * to arrive. Once started, stop it with `stop()`.
+   * Aborting while the watcher starts withdraws what it set up and rejects with the reason. It waits for the catalog
+   * as long as it takes, since the supervised subscriber retries until the publisher is there. Once started, stop it
+   * with `stop()`.
    */
   signal?: AbortSignal;
 }
@@ -61,7 +71,7 @@ export interface VideoWatcher {
   readonly clock: PlayoutClock;
   readonly sequencer: FrameSequencer;
   readonly stats: Readonly<VideoWatcherStats>;
-  /** Stop drawing, cancel the subscription and close the decoder. The clock is left as it is. */
+  /** Stop drawing, withdraw the want and close the decoder. The clock is left as it is. */
   stop(): Promise<void>;
 }
 
@@ -72,20 +82,28 @@ export interface VideoWatcher {
  * one is drawn. The canvas takes the size of the frames. At a discontinuity the decoder is reset and waits for the next
  * keyframe.
  *
- * It joins quickly: it subscribes to the video track by its conventional name together with the catalog, before the
- * catalog arrives, and a frame hold keeps the frames until the decoder is configured, which saves the catalog's round
- * trip. A catalog that names another video track has it subscribed instead.
+ * It joins quickly: it wants the video track by its conventional name together with the catalog, before the catalog
+ * arrives, and a frame hold keeps the frames until the decoder is configured, which saves the catalog's round trip. A
+ * catalog that names another video track has that one wanted instead.
+ *
+ * The video is a want of the supervised subscriber, so the watcher outlives the publisher: when it restarts, at
+ * `namespace` or (with `generations`) as a newer generation under it, or the subscriber reconnects, the want
+ * subscribes again. The decoder resets at once, the decoded frames still waiting are dropped rather than drawn into
+ * the gap, and it starts again at the new subscription's keyframe. The decoder config is the first catalog's: a
+ * publisher that comes back with another codec or avcC is not followed.
  *
  * For sound in sync, pass one clock to both this and `listenAudio`: audio is the master. Until audio reports reach the
  * clock, video plays on wall pacing, so it starts before any user gesture and keeps playing while the `AudioContext`
  * is suspended; once audio plays, video follows it. Start `listenAudio` once the context runs (`whenRunning`).
  */
 export async function watchVideo(
-  subscriber: RelaySubscriber,
+  subscriber: SupervisedSubscriber,
   namespace: readonly string[],
   canvas: HTMLCanvasElement | OffscreenCanvas,
   options: WatchVideoOptions = {},
 ): Promise<VideoWatcher> {
+  const generations = options.generations ?? false;
+  const id = `watch-video/${++watchers}`;
   const draw = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
   if (!draw) throw new Error('The canvas has no 2D context');
   const clock = options.clock ?? createPlayoutClock();
@@ -98,57 +116,74 @@ export async function watchVideo(
   // Once started, a failure goes to onError; before, it fails the setup.
   let started = false;
   let reading: ReturnType<typeof readCatalog> | undefined;
-  let catalogCancelled = false;
+  let catalogStopped = false;
   try {
     options.signal?.throwIfAborted();
     const sequencer = createFrameSequencer({ clock });
     const hold = createFrameHold<SequencedFrame>();
     interface Video {
+      key: string;
       reader: FrameReader;
-      subscription: RelaySubscription;
       failed: { error: unknown } | undefined;
     }
-    const subscribeVideo = (name: string): Video => {
+    // A restart or a move of the video want, after the reader has restarted the sequencer (and with it the clock).
+    // Before the decoder exists it drops the held frames of the old subscription; after, the decoded frames waiting
+    // too, at once: on the reset clock they would look due and fill the gap with the old subscription's picture.
+    let restarted = () => hold.clear();
+    const wantVideo = (name: string): Video => {
       const reader = createFrameReader(sequencer, { onFrame: hold.push });
-      const video: Partial<Video> & { reader: FrameReader } = { reader, failed: undefined };
+      const video: Video = { key: `${id}/video/${name}`, reader, failed: undefined };
+      const handlers: WantHandlers = {
+        ...reader,
+        // The reader's restart also marks the next frame, where decode() counts the discontinuity.
+        onRestarted() {
+          reader.onRestarted();
+          restarted();
+        },
+        onSwitched(info) {
+          reader.onSwitched(info);
+          restarted();
+        },
+        onError(error) {
+          video.failed ??= { error };
+          if (started) options.onError?.(error);
+        },
+      };
       try {
-        video.subscription = subscriber.subscribe(
-          { namespace: [...namespace], track: name, parameters: mediaSubscribeParameters('video') },
-          {
-            ...reader,
-            onError(error) {
-              video.failed ??= { error };
-              if (started) options.onError?.(error);
-            },
-          },
+        subscriber.want(
+          video.key,
+          { namespace, track: name, parameters: mediaSubscribeParameters('video'), generations },
+          handlers,
         );
       } catch (error) {
         reader.close();
         throw error;
       }
-      return video as Video;
+      return video;
     };
-    // Subscribe to the catalog and the video track at once: the video does not wait for the catalog's round trips.
-    reading = readCatalog(subscriber, namespace, setup.signal, {});
+    const dropVideo = (dropped: Video) => {
+      dropped.reader.close();
+      subscriber.unwant(dropped.key);
+    };
+    // Want the catalog and the video track at once: the video does not wait for the catalog's round trips.
+    reading = readCatalog(subscriber, `${id}/catalog`, namespace, generations, setup.signal, {});
     reading.catch(() => {});
-    let video = subscribeVideo(VIDEO_TRACK);
-    release.push(() => video.reader.close());
-    release.push(() => video.subscription.cancel());
+    let video = wantVideo(VIDEO_TRACK);
+    release.push(() => dropVideo(video));
     // Later catalogs change nothing here.
-    const { tracks, subscription: catalog } = await reading;
-    catalog.cancel();
-    catalogCancelled = true;
+    const { tracks, stop: stopCatalog } = await reading;
+    stopCatalog();
+    catalogStopped = true;
     options.signal?.throwIfAborted();
     const track =
       tracks.find((candidate) => candidate.name === VIDEO_TRACK) ??
       tracks.find((candidate) => candidate.role === 'video');
     if (!track?.codec) throw new Error(`The catalog at ${namespace.join('/')} lists no ${VIDEO_TRACK} track`);
     if (track.name !== VIDEO_TRACK) {
-      video.reader.close();
-      video.subscription.cancel();
+      dropVideo(video);
       hold.clear();
       sequencer.restart();
-      video = subscribeVideo(track.name);
+      video = wantVideo(track.name);
     }
     if (video.failed) throw video.failed.error;
 
@@ -241,21 +276,37 @@ export async function watchVideo(
     };
     let decoder = createDecoder();
     release.push(() => decoder.close());
+    // Set when a want restart has already reset the decoder for the restart mark the next frame carries.
+    let restartHandled = false;
     const decode = (frame: SequencedFrame) => {
       if (failedForGood) return;
+      const handled = restartHandled;
+      restartHandled = false;
       if (frame.discontinuity) {
         stats.discontinuities++;
-        // A resync or a restart moved the timeline: what waits was decoded for the old one.
-        if (frame.discontinuity !== 'gap') dropQueued();
-        decoder.reset();
-        decoder.configure(config);
-        needsKey = true;
+        if (!(handled && frame.discontinuity === 'restart')) {
+          // A resync or a restart moved the timeline: what waits was decoded for the old one.
+          if (frame.discontinuity !== 'gap') dropQueued();
+          decoder.reset();
+          decoder.configure(config);
+          needsKey = true;
+        }
       }
       if (needsKey && !frame.key) return;
       needsKey = false;
       decoder.decode(
         new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }),
       );
+    };
+    restarted = () => {
+      if (stopped) return;
+      dropQueued();
+      if (failedForGood || decoder.state === 'closed') return;
+      // Output the decoder still holds is the old subscription's too: reset discards it.
+      decoder.reset();
+      decoder.configure(config);
+      needsKey = true;
+      restartHandled = true;
     };
     started = true;
     hold.release(decode);
@@ -266,19 +317,18 @@ export async function watchVideo(
       stats,
       async stop() {
         stopped = true;
-        video.reader.close();
-        video.subscription.cancel();
+        dropVideo(video);
         dropQueued();
         if (decoder.state !== 'closed') decoder.close();
       },
     };
   } catch (error) {
-    // A failure before the catalog arrived ends its read, which cancels its own subscription. One that came already,
-    // before the step that failed could take it, is cancelled here.
+    // A failure before the catalog arrived ends its read, which withdraws its own want. One that came already, before
+    // the step that failed could take it, is withdrawn here.
     setup.abort(error);
-    if (!catalogCancelled)
+    if (!catalogStopped)
       reading?.then(
-        ({ subscription }) => subscription.cancel(),
+        ({ stop }) => stop(),
         () => {},
       );
     for (const undo of release.reverse()) {

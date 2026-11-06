@@ -10,7 +10,7 @@
  * when it is audible, as the player's own clock reports count it.
  */
 import { createBroadcastClock, createPlayoutClock, createRenderClock } from '@caprid/moq-media';
-import { connectRelayPublisher, connectRelaySubscriber, type RelaySubscriber } from '@caprid/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber, type SupervisedSubscriber } from '@caprid/relay';
 import { captureMicrophone, type MicrophoneBlock } from '../../examples/webcodecs/capture-microphone.js';
 import { type AudioListener, listenAudio, whenRunning } from '../../examples/webcodecs/listen-audio.js';
 import { publishCanvas } from '../../examples/webcodecs/publish-canvas.js';
@@ -82,17 +82,8 @@ registerProcessor('output-tap', class extends AudioWorkletProcessor {
   }
 });`;
 
-/** Retry a start that the announce race can reject, for up to 15 s. */
-async function retry<T>(start: () => Promise<T>): Promise<T> {
-  for (const deadline = performance.now() + 15_000; ; ) {
-    try {
-      return await start();
-    } catch (error) {
-      if (performance.now() > deadline) throw error;
-      await sleep(250);
-    }
-  }
-}
+/** How long a start may wait for the publisher: the supervised subscriber's wants retry the announce race themselves. */
+const startDeadline = () => AbortSignal.timeout(15_000);
 
 /** Run the scenario; resolves with the measurements, rejects on the first failure. */
 export async function runWatchVideoScenario(options: ScenarioOptions) {
@@ -104,12 +95,12 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
   };
   const stop = new AbortController();
   const closers: (() => unknown)[] = [];
-  let subscriber: RelaySubscriber | undefined;
+  let subscriber: SupervisedSubscriber | undefined;
   try {
     const getToken = () => options.token;
     const publisher = await connectRelayPublisher({ url: options.endpoint, namespace: options.namespace, getToken });
     closers.push(() => publisher.close());
-    subscriber = await connectRelaySubscriber({ url: options.endpoint, getToken });
+    subscriber = await connectSupervisedSubscriber({ url: options.endpoint, getToken });
 
     // Publish: the test pattern and a synthetic microphone on one broadcast clock.
     const broadcast = createBroadcastClock();
@@ -179,14 +170,22 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
       if (bright && !wasBright) flashes.push({ timestampUs, shownAtUs });
       wasBright = bright;
     };
-    const watcher = await retry(() =>
-      watchVideo(subscriber as RelaySubscriber, options.namespace, canvas, { clock, onShown, onError: fail }),
-    );
+    const watcher = await watchVideo(subscriber, options.namespace, canvas, {
+      clock,
+      onShown,
+      onError: fail,
+      signal: startDeadline(),
+    });
     closers.push(() => watcher.stop());
     // As the example page does: audio starts once the context runs.
     let listener: AudioListener | undefined;
     const listening = whenRunning(context).then(() =>
-      retry(() => listenAudio(subscriber as RelaySubscriber, options.namespace, { context, clock, onError: fail })),
+      listenAudio(subscriber as SupervisedSubscriber, options.namespace, {
+        context,
+        clock,
+        onError: fail,
+        signal: startDeadline(),
+      }),
     );
     listening.then((started) => {
       listener = started;
