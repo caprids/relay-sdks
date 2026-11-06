@@ -180,7 +180,9 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
     for (let head = queue[0]; head !== undefined; head = queue[0]) {
       const decision = clock.due(head.timestamp);
       if (decision.action === 'wait') {
-        timer = setTimeout(pump, Math.min(decision.waitUs, CLOCK_RECHECK_US) / 1000);
+        // Whole milliseconds, rounded up: browsers truncate a timeout, so the timer fired early, and the sub-millisecond
+        // wait after it was clamped to 4 ms, showing frames about 4 ms late.
+        timer = setTimeout(pump, Math.ceil(Math.min(decision.waitUs, CLOCK_RECHECK_US) / 1000));
         return;
       }
       queue.shift();
