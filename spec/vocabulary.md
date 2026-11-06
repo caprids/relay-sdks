@@ -776,10 +776,9 @@ is WebCodecs' word for the same change on a decoder. `VideoCanvas` names the two
 WebWorker library with no DOM types. `VideoPlayerClock` is `Pick<PlayoutClock, …>` rather than its
 own interface, unlike `AudioInputClock`, because the player calls the clock exactly as a
 `PlayoutClock` takes it. Not adopted: a canvas in the options instead of `render` (a sink that is not
-a canvas would still need the callback, and `canvasRenderer` gives the canvas case one line); a
+a canvas would still need the callback, and `canvasRenderer` gives the canvas case one line); and a
 worker message bridge (the player runs in a worker as it is, and what crosses to the worker is the
-application's choice); a borrowed view of `SupervisedSubscriber` for a player (the issue's third
-question, which is its own issue).
+application's choice).
 
 ## Interrupts: `INTERRUPT_TRACK`, `buildInterrupt`, `parseInterrupt`
 
