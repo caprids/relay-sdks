@@ -55,7 +55,6 @@ export interface PhaseResult {
   /** The watcher's counters over the phase. */
   shown: number;
   late: number;
-  overflowed: number;
   discontinuities: number;
   /** The longest pause between two drawn frames, in ms. */
   longestGapMs: number;
@@ -336,7 +335,6 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
         modes: end.modes,
         shown: next.watcher.shown - mark.watcher.shown,
         late: next.watcher.late - mark.watcher.late,
-        overflowed: next.watcher.overflowed - mark.watcher.overflowed,
         discontinuities: next.watcher.discontinuities - mark.watcher.discontinuities,
         longestGapMs: Math.round(end.longestGapUs / 1000),
         audio: {

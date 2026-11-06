@@ -154,12 +154,15 @@ afterEach(() => {
 const decoder = () => FakeDecoder.instances.at(-1) as FakeDecoder;
 const decoded = () => decoder().chunks.map((chunk) => [chunk.type, chunk.timestamp]);
 
-it('configures the decoder from the catalog: codec, the avcC as description, and low latency', async () => {
+it('configures the decoder from the catalog: codec, the avcC as description, coded size, and low latency', async () => {
   const fake = fakeSubscriber();
   const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { clock: clockAtNow() });
   fake.deliverCatalog();
   const watcher = await watching;
-  expect(decoder().configs).toEqual([{ codec: 'avc1.42E01F', description: AVCC, optimizeForLatency: true }]);
+  fake.deliverVideo(0, 0);
+  expect(decoder().configs).toEqual([
+    { codec: 'avc1.42E01F', description: AVCC, codedWidth: 640, codedHeight: 360, optimizeForLatency: true },
+  ]);
   await watcher.stop();
 });
 
@@ -181,7 +184,7 @@ it('subscribes to video with the catalog and decodes what came before it, in ord
   await watcher.stop();
 });
 
-it('decodes nothing until a keyframe after a discontinuity, and resets the decoder there', async () => {
+it('keeps the decoder across a gap, and resets it and waits for a keyframe at a restart', async () => {
   const fake = fakeSubscriber();
   const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { clock: clockAtNow() });
   fake.deliverCatalog();
@@ -192,8 +195,8 @@ it('decodes nothing until a keyframe after a discontinuity, and resets the decod
   fake.byTrack('video').handlers.onSubgroupReset?.({ groupId: 0 } as never);
   fake.deliverVideo(1, 0);
   fake.deliverVideo(1, 1);
-  expect(decoder().resets).toBe(1);
-  expect(decoder().configs).toHaveLength(2);
+  expect(decoder().resets).toBe(0);
+  expect(decoder().configs).toHaveLength(1);
   expect(decoded()).toEqual([
     ['key', timestampOf(0, 0)],
     ['delta', timestampOf(0, 1)],
@@ -207,7 +210,8 @@ it('decodes nothing until a keyframe after a discontinuity, and resets the decod
   fake.deliverVideo(5, 3);
   fake.endGroup(5);
   fake.deliverVideo(6, 0);
-  expect(decoder().resets).toBe(2);
+  expect(decoder().resets).toBe(1);
+  expect(decoder().configs).toHaveLength(2);
   expect(decoded().slice(4)).toEqual([['key', timestampOf(6, 0)]]);
   expect(watcher.stats.discontinuities).toBe(2);
   await watcher.stop();
@@ -220,6 +224,7 @@ it('draws each decoded frame when the clock says it is due, and drops frames aud
   const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock });
   fake.deliverCatalog();
   const watcher = await watching;
+  fake.deliverVideo(0, 0);
   clock.reportAudio(timestampOf(0, 1));
   decoder().emit(timestampOf(0, 0));
   decoder().emit(timestampOf(0, 1));
@@ -229,57 +234,42 @@ it('draws each decoded frame when the clock says it is due, and drops frames aud
   expect(canvas.width).toBe(640);
   nowUs += FRAME_US;
   clock.reportAudio(timestampOf(0, 2));
-  await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
+  await vi.advanceTimersByTimeAsync(Math.ceil(FRAME_US / 1000));
   expect(drawn).toEqual([timestampOf(0, 0), timestampOf(0, 1), timestampOf(0, 2)]);
   // Audio jumps 100 ms ahead: the next frame is too late to show.
   nowUs += 1000;
   clock.reportAudio(timestampOf(0, 6));
   decoder().emit(timestampOf(0, 3));
-  expect(watcher.stats).toMatchObject({ shown: 3, late: 1, overflowed: 0 });
+  expect(watcher.stats).toMatchObject({ shown: 3, late: 1 });
   expect(FakeFrame.closed).toBe(4);
   await watcher.stop();
 });
 
-it('keeps at most sixteen decoded frames waiting and draws the oldest early past that', async () => {
+it('draws in step with audio that lags the video by more than sixteen frames, none early and none dropped', async () => {
   const fake = fakeSubscriber();
   const clock = clockAtNow();
+  const offsets: number[] = [];
   const { canvas, drawn } = fakeCanvas();
-  const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock });
+  const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, {
+    clock,
+    onShown: (_, offsetUs) => offsets.push(offsetUs),
+  });
   fake.deliverCatalog();
   const watcher = await watching;
-  // Audio is half a second behind every frame, and no timer runs, as in a hidden tab.
-  clock.reportAudio(timestampOf(0, 0) - 500_000);
-  for (let objectId = 0; objectId < 20; objectId++) decoder().emit(timestampOf(0, objectId));
-  expect(drawn).toEqual([0, 1, 2, 3].map((objectId) => timestampOf(0, objectId)));
-  expect(watcher.stats).toMatchObject({ shown: 4, overflowed: 4, lastOffsetUs: 500_000 + 3 * FRAME_US });
-  expect(FakeFrame.closed).toBe(4);
-  // The sixteen newest are what is left to draw.
-  nowUs += 500_000;
-  clock.reportAudio(timestampOf(0, 4));
-  for (let step = 0; step < 16; step++) {
-    await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
-    nowUs += FRAME_US;
-  }
-  expect(drawn.slice(4)).toEqual(Array.from({ length: 16 }, (_, index) => timestampOf(0, index + 4)));
-  await watcher.stop();
-});
-
-it('keeps the picture moving when audio lags by more than the bound can wait for', async () => {
-  const fake = fakeSubscriber();
-  const clock = clockAtNow();
-  const { canvas, drawn } = fakeCanvas();
-  const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock });
-  fake.deliverCatalog();
-  const watcher = await watching;
-  // Audio plays 600 ms behind the frames as they decode, more than sixteen frames cover.
+  fake.deliverVideo(0, 0);
+  // Audio plays 600 ms, 18 frames, behind the frames as they decode.
   for (let objectId = 0; objectId < 60; objectId++) {
     clock.reportAudio(timestampOf(0, objectId) - 600_000);
     decoder().emit(timestampOf(0, objectId));
-    await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
+    await vi.advanceTimersByTimeAsync(Math.ceil(FRAME_US / 1000));
     nowUs += FRAME_US;
   }
-  expect(drawn).toEqual(Array.from({ length: 44 }, (_, objectId) => timestampOf(0, objectId)));
-  expect(watcher.stats).toMatchObject({ late: 0, overflowed: 44 });
+  // Two seconds of frames, less the 600 ms audio has yet to reach: about 42 drawn, in order.
+  expect(drawn.length).toBeGreaterThanOrEqual(40);
+  expect(drawn).toEqual(Array.from({ length: drawn.length }, (_, objectId) => timestampOf(0, objectId)));
+  for (const offsetUs of offsets) expect(offsetUs).toBeLessThanOrEqual(0);
+  for (const offsetUs of offsets) expect(offsetUs).toBeGreaterThanOrEqual(-clock.lateDropUs);
+  expect(watcher.stats.late).toBe(0);
   await watcher.stop();
 });
 
@@ -294,6 +284,7 @@ it('closes each frame and carries on when onShown throws', async () => {
   const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock, onShown });
   fake.deliverCatalog();
   const watcher = await watching;
+  fake.deliverVideo(0, 0);
   clock.reportAudio(timestampOf(0, 1));
   decoder().emit(timestampOf(0, 0));
   decoder().emit(timestampOf(0, 1));
@@ -313,6 +304,7 @@ it('stop() cancels the video subscription, closes waiting frames and the decoder
   const watcher = await watching;
   // The catalog is read once.
   expect(fake.byTrack('catalog').cancel).toHaveBeenCalledTimes(1);
+  fake.deliverVideo(0, 0);
   clock.reportAudio(timestampOf(0, 0) - 500_000);
   decoder().emit(timestampOf(0, 0));
   await watcher.stop();

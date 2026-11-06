@@ -1,26 +1,18 @@
 import {
+  canvasRenderer,
   createFrameHold,
   createFrameSequencer,
   createPlayoutClock,
+  createVideoPlayer,
   type FrameSequencer,
   type PlayoutClock,
   type SequencedFrame,
   VIDEO_TRACK,
+  videoDecoderConfigFromTrack,
 } from '@caprid/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
 import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 import { readCatalog } from './read-catalog.js';
-
-/**
- * Decoded frames waiting for their time, at most: a hidden tab throttles timers, so the pump falls behind the decoder,
- * and a decoder whose frames the app keeps open can stall. Video waits for audio by the audio player's jitter buffer and
- * output delay, up to about 450 ms, which is 14 frames at 30 fps (4 measured with a 50 ms buffer on a clean network).
- * Past the bound the oldest frame is drawn early rather than dropped: when audio lags by more, every frame would
- * otherwise be dropped before its time and the picture would freeze.
- */
-const MAX_DECODED_FRAMES = 16;
-/** Ask the clock again at least this often while a frame waits: an audio report can move its position meanwhile. */
-const CLOCK_RECHECK_MS = 50;
 
 /** Options for {@link watchVideo}. */
 export interface WatchVideoOptions {
@@ -47,9 +39,7 @@ export interface VideoWatcherStats {
   shown: number;
   /** Decoded frames dropped because audio had moved past them. */
   late: number;
-  /** Decoded frames drawn early because more were waiting than the bound allows. */
-  overflowed: number;
-  /** Frames after which the decoder was reset: a gap, a resync, or a restart. */
+  /** Frames that followed a discontinuity: a gap, a resync, or a restart. */
   discontinuities: number;
   /** The offset of the last frame drawn, in µs: positive is early. */
   lastOffsetUs: number | undefined;
@@ -68,13 +58,11 @@ export interface VideoWatcher {
 /**
  * Play the video track of the broadcast at `namespace`, such as the WebCodecs example's canvas, onto `canvas`: the
  * catalog gives the decoder config (the codec, and the avcC as `initData`, which is the only place an H.264 track
- * carries it), a frame reader orders the frames, a `VideoDecoder` decodes them, and the playout clock says when each
- * one is drawn. The canvas takes the size of the frames. At a discontinuity the decoder is reset and waits for the next
- * keyframe.
+ * carries it), a frame reader orders the frames, and `createVideoPlayer` decodes them and draws each one when the
+ * playout clock says it is due. The canvas takes the size of the frames.
  *
  * It joins quickly: it subscribes to the video track by its conventional name together with the catalog, before the
- * catalog arrives, and a frame hold keeps the frames until the decoder is configured, which saves the catalog's round
- * trip. A catalog that names another video track has it subscribed instead.
+ * catalog arrives, and a frame hold keeps the frames until the player exists, which saves the catalog's round trip. A catalog that names another video track has it subscribed instead.
  *
  * For sound in sync, pass one clock to both this and `listenAudio`: audio is the master. Until audio reports reach the
  * clock, video plays on wall pacing, so it starts before any user gesture and keeps playing while the `AudioContext`
@@ -86,8 +74,7 @@ export async function watchVideo(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   options: WatchVideoOptions = {},
 ): Promise<VideoWatcher> {
-  const draw = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-  if (!draw) throw new Error('The canvas has no 2D context');
+  const draw = canvasRenderer(canvas);
   const clock = options.clock ?? createPlayoutClock();
   // What setup has created so far, released in reverse order if a later step fails.
   const release: (() => void)[] = [];
@@ -152,124 +139,58 @@ export async function watchVideo(
     }
     if (video.failed) throw video.failed.error;
 
-    const config: VideoDecoderConfig = {
-      codec: track.codec,
-      ...(track.initData ? { description: track.initData } : {}),
-      optimizeForLatency: true,
-    };
-    const stats: VideoWatcherStats = { shown: 0, late: 0, overflowed: 0, discontinuities: 0, lastOffsetUs: undefined };
-    // Decoded frames in output order, each waiting for the clock to say it is due.
-    const queue: VideoFrame[] = [];
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stopped = false;
-    const show = (frame: VideoFrame, offsetUs: number) => {
-      try {
-        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-          canvas.width = frame.displayWidth;
-          canvas.height = frame.displayHeight;
-        }
-        draw.drawImage(frame, 0, 0);
-        stats.shown++;
-        stats.lastOffsetUs = offsetUs;
+    let discontinuities = 0;
+    const onError =
+      options.onError &&
+      ((error: unknown) => {
         try {
-          options.onShown?.(frame.timestamp, offsetUs);
+          options.onError?.(error);
+        } catch (thrown) {
+          console.error(new Error('onError threw; the watcher carries on', { cause: thrown }));
+        }
+      });
+    const player = createVideoPlayer({
+      clock,
+      decoderConfig: videoDecoderConfigFromTrack(track),
+      render(frame) {
+        draw(frame);
+        try {
+          options.onShown?.(frame.timestamp, player.stats.lastOffsetUs ?? 0);
         } catch (error) {
           console.error(new Error('onShown threw; the watcher carries on', { cause: error }));
         }
-      } finally {
-        frame.close();
-      }
-    };
-    const pump = () => {
-      timer = undefined;
-      for (let frame = queue[0]; frame; frame = queue[0]) {
-        const decision = clock.due(frame.timestamp);
-        if (decision.action === 'wait') {
-          timer = setTimeout(pump, Math.min(decision.waitUs / 1000, CLOCK_RECHECK_MS));
-          return;
-        }
-        queue.shift();
-        if (decision.action === 'show') show(frame, decision.offsetUs);
-        else {
-          stats.late++;
-          frame.close();
-        }
-      }
-    };
-    const dropQueued = () => {
-      for (const frame of queue.splice(0)) frame.close();
-      clearTimeout(timer);
-      timer = undefined;
-    };
-    // After configure and after every reset, the decoder can start only at a keyframe.
-    let needsKey = true;
-    let failedForGood = false;
-    const createDecoder = () => {
-      let producedOutput = false;
-      const created = new VideoDecoder({
-        output(frame) {
-          producedOutput = true;
-          if (stopped) {
-            frame.close();
-            return;
-          }
-          queue.push(frame);
-          if (timer === undefined) pump();
-          if (queue.length > MAX_DECODED_FRAMES) {
-            const oldest = queue.shift() as VideoFrame;
-            stats.overflowed++;
-            show(oldest, clock.due(oldest.timestamp).offsetUs);
-          }
-        },
-        error(error) {
-          if (stopped) return;
-          // A new decoder with the same config would fail the same way, again and again.
-          failedForGood = !producedOutput || error.name === 'NotSupportedError';
-          try {
-            options.onError?.(error);
-          } catch (thrown) {
-            console.error(new Error('onError threw; the watcher carries on', { cause: thrown }));
-          }
-          if (stopped || failedForGood) return;
-          // A decoder that failed is closed: decode again from the next keyframe with a new one.
-          decoder = createDecoder();
-          needsKey = true;
-        },
-      });
-      created.configure(config);
-      return created;
-    };
-    let decoder = createDecoder();
-    release.push(() => decoder.close());
-    const decode = (frame: SequencedFrame) => {
-      if (failedForGood) return;
-      if (frame.discontinuity) {
-        stats.discontinuities++;
-        // A resync or a restart moved the timeline: what waits was decoded for the old one.
-        if (frame.discontinuity !== 'gap') dropQueued();
-        decoder.reset();
-        decoder.configure(config);
-        needsKey = true;
-      }
-      if (needsKey && !frame.key) return;
-      needsKey = false;
-      decoder.decode(
-        new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }),
-      );
+      },
+      ...(onError ? { onError } : {}),
+    });
+    release.push(() => player.close());
+    const stats: VideoWatcherStats = {
+      get shown() {
+        return player.stats.shown;
+      },
+      get late() {
+        return player.stats.dropped;
+      },
+      get discontinuities() {
+        return discontinuities;
+      },
+      get lastOffsetUs() {
+        return player.stats.lastOffsetUs ?? undefined;
+      },
     };
     started = true;
-    hold.release(decode);
+    hold.release((frame) => {
+      if (frame.discontinuity) discontinuities++;
+      player.push(frame);
+    });
 
     return {
       clock,
       sequencer,
       stats,
       async stop() {
-        stopped = true;
         video.reader.close();
         video.subscription.cancel();
-        dropQueued();
-        if (decoder.state !== 'closed') decoder.close();
+        player.close();
       },
     };
   } catch (error) {
