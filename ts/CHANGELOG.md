@@ -13,6 +13,14 @@ each section says what changed and what to do about it. How to cut a release is 
   values start arriving late, typically to call a supervised subscriber's `catchUp(key)`. A want's restart or move
   starts it over. `reader.stats` counts what it delivered and dropped. Before, a viewer kept its own "newest group
   applied" marker and had no trigger to skip past a relay backlog.
+- `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a
+  frame reader's frames with WebCodecs and calls `render(frame)` when the playout clock says each is due. Video then
+  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame: the player
+  closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
+  an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
+  the catalog. The player runs in a dedicated worker as it is. Through the in-memory hub in headless Chromium, players
+  paced by the wall clock, by audio, and in a worker each showed all 241 frames published over 8 s
+  (`mise run ts:test:video-player`).
 - `@caprid/moq-core`: a FETCH is removed from its session once its data stream has ended (`onEnd`) or reset (`onReset`)
   and its response has arrived (#419). Before, only a REQUEST_ERROR or `cancel()` removed it, so its handlers, and every
   payload they had collected, stayed in memory for the session's life: each group a VOD consumer fetched through

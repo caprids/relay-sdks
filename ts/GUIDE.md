@@ -1060,8 +1060,9 @@ first frame after a skip, a resync, or a restart carries `discontinuity`, so res
 `sequencer.stats` counts delivered, late, and untimed frames, skipped groups, and resyncs.
 
 The reader paces decoding, not display. Audio is the master. Report what is audible with
-`clock.reportAudio(timestampUs, atUs)`. Before you show each decoded video frame, ask
-`clock.due(frame.timestamp)` whether to `wait` (for `waitUs`), `show`, or `drop` it. Until audio is
+`clock.reportAudio(timestampUs, atUs)`. The [video player](#playing-video) asks
+`clock.due(frame.timestamp)` before it shows each decoded video frame, whether to `wait` (for `waitUs`), `show`, or
+`drop` it. A player of your own asks the same. Until audio is
 reported or `due` is first asked, the clock is idle and nothing is late. With no audio, it paces by
 the wall clock. The [@caprid/moq-media README](packages/moq-media/README.md) shows how to compute the
 audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing) for the
@@ -1223,6 +1224,42 @@ WebRTC receiver's buffering, which no API reports. Set `player.outputDelayUs` if
 sync with the audio. The [WebCodecs example](examples/webcodecs/README.md)'s `listen-audio.ts`
 plays its microphone track this way. The [voice bot page](examples/voice-bot/README.md) plays a
 Python bot through the loopback while it publishes the microphone.
+
+### Playing video
+
+`createVideoPlayer({ clock, decoderConfig, render })` from `@caprid/moq-media` plays one video track, with no UI. It
+decodes the frames you push to it with WebCodecs and calls `render(frame)` when `clock` says each is due. Share the
+broadcast's clock with the audio input, so audio drives the video. Without audio it follows the wall clock. Pass
+`player.push` as a frame reader's `onFrame`:
+
+```ts
+import {
+  canvasRenderer,
+  createFrameSequencer,
+  createPlayoutClock,
+  createVideoPlayer,
+  videoDecoderConfigFromTrack,
+} from '@caprid/moq-media';
+import { createFrameReader } from '@caprid/relay/media';
+
+const clock = createPlayoutClock(); // one per broadcast, shared with the audio input
+const player = createVideoPlayer({
+  clock,
+  decoderConfig: videoDecoderConfigFromTrack(videoTrack),
+  render: canvasRenderer(canvas), // an HTMLCanvasElement or an OffscreenCanvas
+});
+const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
+subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
+// Later: reader.close(), cancel the subscription, player.close().
+```
+
+`render` borrows the frame. The player closes it when `render` returns, because a hardware decoder stops when all of
+its frames are held. To keep a frame, keep `frame.clone()` and close the clone yourself. An exception from `render`
+goes to `onError`, or to `console.error`. For a rendition switch, call `player.configure(decoderConfig)` before the
+new track's first keyframe arrives. Frames before that keyframe still decode with the old config. The player uses only
+`VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a dedicated worker, drawing onto an
+`OffscreenCanvas` the page transferred to it. Video there follows a clock of the worker's own, since the audio clock
+lives on the main thread. See [spec/media-layer.md](../spec/media-layer.md#video-player) for the rules.
 
 ### Voice: delivery per direction
 
