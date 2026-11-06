@@ -69,9 +69,11 @@ backlog:
   default), and the player conceals the gap
   ([subscribing to media](../ts/GUIDE.md#subscribing-to-media)).
 - When the delay rises and stays up, the clock re-anchors (a `resync`) instead of staying behind.
-- In TypeScript, `catchUpAfterUs` with a supervised subscriber's `catchUp()` replaces a subscription
-  that keeps delivering late with a new one at the live edge, which drops the relay's backlog.
-- For data that is not media, such as telemetry, the viewer drops superseded values itself
+- A supervised subscriber's `catchUp(key)` / `catch_up(key)` replaces a subscription that keeps
+  delivering late with a new one at the live edge, which drops the relay's backlog. In TypeScript,
+  the sequencer's `catchUpAfterUs` decides when.
+- For data that is not media, such as telemetry, a latest-value reader drops superseded values, and
+  its `late` predicate decides when to catch up
   ([latest-wins values](../ts/GUIDE.md#latest-wins-values)).
 
 A relay that supports the MoQ Timestamp extension's max age drops, for each viewer, any group that
@@ -213,4 +215,4 @@ need.
   ([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)). The viewer drops them instead.
 - Send-order prioritization from Chromium and from the Python publisher.
 - In Python, an FEC option on `OpusEncoder`, an audio player, the per-track delivery policy
-  (`lateDropUs`, `reorderWindowUs`, `catchUp`), and a WebSocket transport.
+  (`lateDropUs`, `reorderWindowUs`, `catchUpAfterUs`), and a WebSocket transport.

@@ -1344,7 +1344,7 @@ subscribing under the other's.
 
 ```ts
 import { connectRelayPublisher, connectSupervisedSubscriber, readJSON } from '@caprid/relay';
-import { createDocumentService } from '@caprid/relay/media';
+import { createDocumentService, createLatestValueReader } from '@caprid/relay/media';
 
 // On the robot.
 const publisher = await connectRelayPublisher({ url, getToken, namespace: ['room', 'robot'] });
@@ -1353,22 +1353,20 @@ telemetry.serve({ signal }).catch(onError);
 setInterval(() => telemetry.update(new TextEncoder().encode(JSON.stringify(readSensors()))), 50);
 
 const subscriber = await connectSupervisedSubscriber({ url, getToken });
-let newest = -1; // the newest control group applied
+const control = createLatestValueReader({
+  onValue: (object) => applyControl(readJSON(object)),
+  late: (object) => Date.now() - (readJSON(object) as { sentAt: number }).sentAt > 500,
+  onCatchUp: () => subscriber.catchUp('control'),
+});
 subscriber.want(
   'control',
   { namespace: ['room', 'cockpit'], track: 'control', parameters: { subscriberPriority: 0 } },
-  {
-    onObject(object) {
-      if (object.groupId <= newest) return; // superseded: a newer value already arrived
-      newest = object.groupId;
-      applyControl(readJSON(object));
-    },
-    onRestarted: () => (newest = -1), // the new subscription numbers its groups afresh
-    onSwitched: () => (newest = -1),
-    onError,
-  },
+  { ...control, onError },
 );
 ```
+
+The reader delivers a value only when it is newer than every value before it. The `late` and
+`onCatchUp` options are optional. The next section explains them.
 
 ### Latest-wins values
 
@@ -1398,13 +1396,17 @@ Delivery timeouts do not change this. The relay ignores the subscriber's, and th
 bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
 So the viewer does the dropping:
 
-- Ignore any group older than the newest one applied, as in the example above. Group IDs rise within
-  one subscription. They start over when a want restarts or moves to a new generation, so reset the
-  marker in `onRestarted` and `onSwitched`.
-- To know when a value is too old to act on, put the time it was taken in the payload. Comparing
-  that time with the viewer's clock assumes the two machines' clocks agree. When every value arrives
-  too late, call the supervised subscriber's `catchUp(key)`. It replaces the subscription at the live
-  edge, which drops the relay's backlog, and runs `onRestarted` with reason `'catch-up'`.
+- `createLatestValueReader` from `@caprid/relay/media` drops any value older than the newest one it
+  has seen, as in the example above. Group IDs rise within one subscription and start over when a
+  want restarts or moves to a new generation, so the reader starts over there too. Spread it into the
+  want's handlers, and keep the want's `drainMs` at 0.
+- To know when a value is too old to act on, put the time it was taken in the payload and pass a
+  `late` predicate. Comparing that time with the viewer's clock assumes the two machines' clocks
+  agree. The reader drops a late value. On the first late value after a value it delivered, it calls
+  `onCatchUp`. Set the limit above the lateness the viewer's link can reach. Below it, the values after a
+  catch-up are late too, and the reader delivers nothing until the link speeds up. There, call the supervised subscriber's `catchUp(key)`. It replaces the subscription at
+  the live edge, which drops the relay's backlog, and runs `onRestarted` with reason `'catch-up'`.
+  `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
   `staleAfterMs` does not help here, because a backlog is not silence.
 - Give control and telemetry a subscriber priority ahead of the video on the same connection. The
   relay orders what it sends you by your subscriber priority alone, where a lower number is more
@@ -1428,6 +1430,7 @@ The publisher and the viewer set different things, under similar names:
 | `createPlayoutClock({ targetLatencyUs })` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `lateDropUs` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([subscribing to media](#subscribing-to-media)). |
 | Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the sequencer re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
 | `catchUpAfterUs` with `catchUp(key)` | viewer | Replaces the subscription at the live edge once frames keep arriving late. The want restarts with reason `'catch-up'` ([voice](#voice-delivery-per-direction)). |
+| `late` with `onCatchUp` on `createLatestValueReader` | viewer | Drops values your predicate calls late, and on the first one calls `onCatchUp`, where `catchUp(key)` replaces the subscription ([latest-wins values](#latest-wins-values)). |
 | `staleAfterMs` on `want` | viewer | Resubscribes a track that has been silent that long. The want restarts with reason `'stale'`. Use it only for tracks that are never silent while live. |
 | `mediaTrackProperties(kind, { targetLatencyUs })` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
 | Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
