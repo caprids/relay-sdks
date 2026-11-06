@@ -1223,17 +1223,18 @@ before it are worth:
 | It starts | Skips frames until a keyframe, which configures a new decoder |
 | `gap` | Keeps the decoder and the frames waiting, which are still on the timeline. The sequencer delivers a keyframe after a gap, which decodes on its own. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
 | `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
-| The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A config the decoder refuses fails once per keyframe, never in a loop |
+| The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
 | `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
 
 The issue's sketch reset the decoder at every discontinuity. A gap does not reset it, because the
 frames decoded before the gap are still due on the same timeline.
 
 `player.stats` (`VideoPlayerStats`) counts frames `decoded`, `shown` (handed to `render`),
-`dropped` (by the clock), `skipped` (while waiting for a keyframe), `decoderResets` and `errors`,
+`dropped` (by the clock), `skipped` (while waiting for a keyframe, or after the decoder failed for
+good), `decoderResets` and `errors`,
 and holds the frames `queued` now and `lastOffsetUs`, the clock's offset for the last frame shown.
 `dropped` and `skipped` call for different fixes. Frames dropped mean video arrives too late for
-the clock. Frames skipped mean frames came before a keyframe. `player.joinPhases`
+the clock. Frames skipped mean frames came before a keyframe, or the decoder cannot decode the track. `player.joinPhases`
 (`VideoPlayerJoinPhases`) holds `createdUs`, `firstPushUs`, `firstDecodedUs` and `firstShownUs`, on
 the clock's local time source.
 

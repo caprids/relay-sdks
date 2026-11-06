@@ -34,7 +34,9 @@ export interface VideoPlayerOptions {
   render(frame: VideoFrame): void;
   /**
    * A decoder error, after which the player replaces the decoder and decodes again from the next keyframe, or an
-   * exception from `render`. Without it, both go to `console.error`.
+   * exception from `render`. Without it, both go to `console.error`. A decoder that fails before it output any frame,
+   * or with a `NotSupportedError`, fails for good: a new decoder with the same config would fail the same way, so the
+   * player decodes nothing more until `configure()` gives it another config.
    */
   onError?(error: unknown): void;
 }
@@ -47,7 +49,7 @@ export interface VideoPlayerStats {
   shown: number;
   /** Decoded frames the clock said to drop, as later than its late-drop limit. */
   dropped: number;
-  /** Frames pushed while the player waited for a keyframe, and not decoded. */
+  /** Frames pushed and not decoded: while the player waited for a keyframe, or after the decoder failed for good. */
   skipped: number;
   /** Times the decoder was reset or replaced: at a `resync` or `restart`, and after an error. */
   decoderResets: number;
@@ -86,7 +88,8 @@ export interface VideoPlayer {
   push(frame: VideoPlayerFrame): void;
   /**
    * Decode with another config from the next keyframe pushed on, as at a rendition switch. Frames pushed before that
-   * keyframe still decode with the config they belong to.
+   * keyframe still decode with the config they belong to. After the decoder failed for good, the next keyframe opens
+   * a new decoder with this config.
    */
   configure(decoderConfig: VideoDecoderConfig): void;
   /** Counters, updated in place. */
@@ -115,12 +118,16 @@ const CLOCK_RECHECK_US = 50_000;
 /**
  * Where decoding stands. While `awaiting-key`, frames that are not keyframes are skipped, and the next keyframe
  * configures `decoder` with the latest config, or a new decoder when there is none: at the start, and after an error.
- * While `decoding`, every frame is decoded, and a keyframe first applies a config newer than `configured`.
+ * While `decoding`, every frame is decoded, and a keyframe first applies a config newer than `configured`. While
+ * `failed`, every frame is skipped until `configure()`.
  */
 type Decoding =
   | { state: 'awaiting-key'; decoder: VideoDecoder | undefined }
   | { state: 'decoding'; decoder: VideoDecoder; configured: VideoDecoderConfig }
+  | { state: 'failed' }
   | { state: 'closed' };
+
+const isNotSupported = (error: unknown) => error instanceof Error && error.name === 'NotSupportedError';
 
 /**
  * Create a video player. Decoded frames wait in presentation order until the clock says the earliest is due, so a
@@ -142,6 +149,8 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
   const { clock, render, onError } = options;
   let config = options.decoderConfig;
   let decoding: Decoding = { state: 'awaiting-key', decoder: undefined };
+  // Whether the current decoder has output a frame: one that fails before it does would fail again.
+  let output = false;
   const queue: VideoFrame[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stats: VideoPlayerStats = {
@@ -169,7 +178,7 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
     // biome-ignore lint/suspicious/noConsole: the application gave no handler to report to
     else console.error(new Error(what, { cause: error }));
   };
-  const current = () => (decoding.state === 'closed' ? undefined : decoding.decoder);
+  const current = () => ('decoder' in decoding ? decoding.decoder : undefined);
   const stopTimer = () => {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
@@ -205,12 +214,14 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
   };
 
   const open = () => {
+    output = false;
     const decoder: VideoDecoder = new VideoDecoder({
       output(frame) {
         if (current() !== decoder) {
           frame.close();
           return;
         }
+        output = true;
         stats.decoded++;
         joinPhases.firstDecodedUs ??= clock.localNow();
         queue.push(frame);
@@ -222,9 +233,15 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
     });
     return decoder;
   };
-  // A decoder that failed is closed (WebCodecs closes it before its error callback): the next keyframe opens another.
+  // A decoder that failed is closed (WebCodecs closes it before its error callback): the next keyframe opens another,
+  // unless this one failed for good.
   const fail = (decoder: VideoDecoder, error: unknown) => {
     if (decoder.state !== 'closed') decoder.close();
+    if (!output || isNotSupported(error)) {
+      decoding = { state: 'failed' };
+      report(error, 'The video decoder failed for good; the video player decodes nothing until configure()');
+      return;
+    }
     decoding = { state: 'awaiting-key', decoder: undefined };
     stats.decoderResets++;
     report(error, 'The video decoder failed; the video player decodes again from the next keyframe');
@@ -238,7 +255,7 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
       decoder.reset();
       stats.decoderResets++;
     }
-    decoding = { state: 'awaiting-key', decoder };
+    if (decoding.state !== 'failed') decoding = { state: 'awaiting-key', decoder };
   };
 
   return {
@@ -249,7 +266,7 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
       else if (frame.discontinuity === 'gap' && !frame.key && decoding.state === 'decoding') {
         decoding = { state: 'awaiting-key', decoder: decoding.decoder };
       }
-      if (decoding.state === 'awaiting-key' && !frame.key) {
+      if (decoding.state === 'failed' || (decoding.state === 'awaiting-key' && !frame.key)) {
         stats.skipped++;
         return;
       }
@@ -272,7 +289,9 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
       }
     },
     configure(decoderConfig) {
-      if (decoding.state !== 'closed') config = decoderConfig;
+      if (decoding.state === 'closed') return;
+      config = decoderConfig;
+      if (decoding.state === 'failed') decoding = { state: 'awaiting-key', decoder: undefined };
     },
     stats,
     joinPhases,

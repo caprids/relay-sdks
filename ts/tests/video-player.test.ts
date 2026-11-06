@@ -21,6 +21,7 @@ import { createRelayHub } from './helpers/relay-hub.js';
 // Fake WebCodecs: a decoder that outputs one frame per chunk, in order, when a test releases them (or on a microtask
 // with `auto`), and frames that count how often they are closed, so every test checks that none leaks.
 const FAIL = 0xee;
+const UNSUPPORTED = 0xef;
 
 class FakeFrame {
   static made: FakeFrame[] = [];
@@ -84,9 +85,13 @@ class FakeDecoder {
   release() {
     for (const chunk of this.pending.splice(0)) {
       if (this.state !== 'configured') return;
-      if (chunk.data[0] === FAIL) {
+      if (chunk.data[0] === FAIL || chunk.data[0] === UNSUPPORTED) {
         this.state = 'closed';
-        this.init.error(new DOMException('Decoding failed', 'EncodingError'));
+        this.init.error(
+          chunk.data[0] === FAIL
+            ? new DOMException('Decoding failed', 'EncodingError')
+            : new DOMException('Unsupported', 'NotSupportedError'),
+        );
         return;
       }
       this.init.output(new FakeFrame(chunk.timestamp) as unknown as VideoFrame);
@@ -308,19 +313,48 @@ describe('createVideoPlayer', () => {
     expect(player.stats).toMatchObject({ errors: 1, decoderResets: 1, skipped: 1 });
   });
 
-  it('reports a config the decoder refuses once per keyframe, and decodes once a good one is configured', () => {
+  it('reports a config the decoder refuses once, and decodes once another is configured', () => {
     const onError = vi.fn();
     const { player, shown } = setUp({ decoderConfig: { codec: 'invalid' }, onError });
     player.push(key(0));
     player.push(delta(1));
     player.push(key(2));
-    expect(onError).toHaveBeenCalledTimes(2);
-    expect(onError.mock.calls.map(([error]) => error)).toEqual([expect.any(TypeError), expect.any(TypeError)]);
-    expect(player.stats).toMatchObject({ errors: 2, skipped: 1, decoded: 0 });
+    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.any(TypeError));
+    expect(FakeDecoder.instances).toHaveLength(1);
+    expect(player.stats).toMatchObject({ errors: 1, skipped: 2, decoded: 0 });
     player.configure(CONFIG);
     player.push(key(3));
     decoder().release();
     expect(shown.map(([index]) => index)).toEqual([3]);
+  });
+
+  it.each([
+    ['fails before its first frame', [key(0, { payload: new Uint8Array([FAIL]) })], 'EncodingError'],
+    [
+      'does not support the stream',
+      [key(0), delta(1, { payload: new Uint8Array([UNSUPPORTED]) })],
+      'NotSupportedError',
+    ],
+  ])('decodes nothing more when the decoder %s, until configure() gives it another config', (_, frames, name) => {
+    const onError = vi.fn();
+    const { player, shown } = setUp({ onError });
+    for (const each of frames) player.push(each);
+    decoder().release();
+    // A new decoder with the same config would fail the same way, at every keyframe.
+    player.push(key(5, { discontinuity: 'resync' }));
+    player.push(delta(6));
+    player.push(key(7));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name }));
+    expect(FakeDecoder.instances).toHaveLength(1);
+    expect(player.stats).toMatchObject({ errors: 1, skipped: 3, decoderResets: 0 });
+    player.configure({ codec: 'avc1.64001f' });
+    player.push(delta(8));
+    player.push(key(9));
+    expect(FakeDecoder.instances).toHaveLength(2);
+    expect(decoder().chunks).toEqual([{ type: 'key', index: 9, codec: 'avc1.64001f' }]);
+    decoder().release();
+    vi.advanceTimersByTime(1000);
+    expect(shown.map(([index]) => index).at(-1)).toBe(9);
   });
 
   it('decodes with a new config from the next keyframe, and frames before it with the old one', () => {
