@@ -51,7 +51,24 @@ jobs:
           install_args: node pnpm python uv
       - run: mise run ts:install
       - run: mise run python:install
-      - run: pnpm exec playwright install --with-deps chromium
+      # Playwright's browsers are cached per runner image and Playwright version (ts/pnpm-lock.yaml pins it). No
+      # --with-deps: the libraries Chromium needs ship on the runner image, so this job skips the apt-get download that
+      # can crawl (see conformance-websocket).
+      - name: Playwright version and runner image, for the cache key
+        id: pw
+        working-directory: ts
+        run: |
+          echo "version=$(pnpm exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright's browsers
+        id: browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ steps.pw.outputs.image }}-playwright-${{ steps.pw.outputs.version }}-chromium
+      - name: Download Chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install chromium
         working-directory: ts
       - run: mise run ts:test:conformance
 
@@ -65,8 +82,65 @@ jobs:
         with:
           install_args: node pnpm
       - run: mise run ts:install
-      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      # Playwright's browsers are cached as in `conformance`. Firefox and WebKit also need system libraries the runner
+      # image lacks (about 130 MB of fonts, GStreamer and codec packages), which apt-get downloads from the runner's
+      # Ubuntu mirror. That mirror sometimes crawls at tens of kB/s (once 49 minutes for one job), so the downloaded
+      # .debs are cached too, under a key that rolls with the runner image (restore-keys reuses the last image's .debs,
+      # and apt-get downloads only what changed). The apt-get index update still runs every time; it takes seconds.
+      # Each install gets a time limit and one retry, which keeps what the first try downloaded.
+      - name: Playwright version and runner image, for the cache keys
+        id: pw
         working-directory: ts
+        run: |
+          echo "version=$(pnpm exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "image-version=$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright's browsers
+        id: browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ steps.pw.outputs.image }}-playwright-${{ steps.pw.outputs.version }}-chromium-firefox-webkit
+      - name: Download Chromium, Firefox and WebKit
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install chromium firefox webkit
+        working-directory: ts
+      - name: Restore the browsers' system packages (.debs)
+        uses: actions/cache@v5
+        with:
+          path: ~/apt-archives
+          key: ${{ runner.os }}-${{ steps.pw.outputs.image }}-apt-playwright-${{ steps.pw.outputs.version }}-chromium-firefox-webkit-${{ steps.pw.outputs.image-version }}
+          restore-keys: |
+            ${{ runner.os }}-${{ steps.pw.outputs.image }}-apt-playwright-${{ steps.pw.outputs.version }}-chromium-firefox-webkit-
+      - name: Install the browsers' system libraries
+        id: deps
+        continue-on-error: true
+        timeout-minutes: 10
+        working-directory: ts
+        run: |
+          printf 'APT::Keep-Downloaded-Packages "true";\nDPkg::Lock::Timeout "120";\n' |
+            sudo tee /etc/apt/apt.conf.d/99-ci-playwright > /dev/null
+          if compgen -G "$HOME/apt-archives/*.deb" > /dev/null; then
+            sudo cp "$HOME"/apt-archives/*.deb /var/cache/apt/archives/
+          fi
+          pnpm exec playwright install-deps chromium firefox webkit
+      - name: Install the browsers' system libraries (second try)
+        if: steps.deps.outcome == 'failure'
+        timeout-minutes: 15
+        working-directory: ts
+        run: |
+          # The first try may have left root's apt-get downloading, or dpkg unpacking. Stop the download (what it has
+          # fetched stays in /var/cache/apt/archives), let dpkg finish, then repair any half-configured package.
+          sudo pkill -x apt-get || true
+          timeout 300 bash -c 'while pgrep -x apt-get > /dev/null || pgrep -x dpkg > /dev/null; do sleep 2; done'
+          sudo dpkg --configure -a
+          pnpm exec playwright install-deps chromium firefox webkit
+      - name: Keep the downloaded .debs for the cache
+        run: |
+          sudo apt-get autoclean
+          rm -rf ~/apt-archives
+          mkdir -p ~/apt-archives
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-archives {} +
       - run: mise run ts:test:conformance:websocket
       - run: mise run ts:test:conformance:websocket:browsers
 

@@ -5,8 +5,20 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.4.0
 
+- Voice bot and WebCodecs examples: `listenAudio`, `watchVideo` and `talkToBot` take a supervised subscriber
+  (`connectSupervisedSubscriber`) instead of a plain one, and keep playing when the talker restarts (#404). Before, a
+  listener built on `connectRelaySubscriber` went silent for good when its talker restarted. Each track is now a want:
+  a start waits for a publisher that has not announced yet instead of failing on the announce race, so the callers'
+  retry loops are gone. A restart cuts what the player held, and the new subscription plays live. `listenAudio`'s new
+  `onRestarted({ reason, namespace })` reports it. The new `generations: true` option follows a supervised publisher's
+  newest generation under the namespace, which `talkToBot` turns on. `talkToBot` replaces #442's own discovery loop
+  with it and calls `onListening` once, then `onRestarted` on each move. The page no longer waits up to 5 s on a
+  crashed generation that is still announced. To update a copy: pass a supervised subscriber, drop the start retries,
+  and handle `onRestarted` where you handled a second `onListening`. One window remains in the supervised subscriber:
+  after discovery ends or a reconnect, it can play an older generation that is still announced until the newer one is
+  announced again (#482).
 - `@caprid/relay/media`: `createLatestValueReader({ onValue, late, onCatchUp })` reads a latest-wins track, such as
   telemetry or a control, as its newest values (#447). Spread it into `subscribe` or `want` handlers. It drops an
   object that arrives after a newer one, drops a value the `late` predicate rejects, and calls `onCatchUp` once when
@@ -19,7 +31,8 @@ each section says what changed and what to do about it. How to cut a release is 
   closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
   an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
   the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player
-  reports it once and decodes nothing until `configure()`. The player runs in a dedicated worker as it is. The WebCodecs
+  reports it once and decodes nothing until `configure()`. `reset()` drops the frames waiting and what the decoder
+  holds at once, as at a restart the app learns of before the next frame. The player runs in a dedicated worker as it is. The WebCodecs
   example's `watchVideo` is built on it. Through the in-memory hub in headless Chromium, players
   paced by the wall clock, by audio, and in a worker each showed all 241 frames published over 8 s
   (`mise run ts:test:video-player`).

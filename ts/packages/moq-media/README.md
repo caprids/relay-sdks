@@ -240,7 +240,8 @@ subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
 - `canvasRenderer(canvas)` draws onto an `HTMLCanvasElement` or an `OffscreenCanvas`, sized to the frame.
 - `videoDecoderConfigFromTrack(track)` reads the decoder config from a catalog track.
 - The player waits for a keyframe at the start, after a decoder error, and after a `resync` or `restart`, which also
-  reset the decoder and close the frames waiting. `player.configure(decoderConfig)` switches the config from the next
+  reset the decoder and close the frames waiting. `player.reset()` does the same at once, for a restart the app hears
+  of before the next frame, such as a supervised want's `onRestarted`. `player.configure(decoderConfig)` switches the config from the next
   keyframe, as at a rendition switch.
 - A decoder that fails before its first frame, or with `NotSupportedError`, is reported once. The player then decodes
   nothing until `player.configure(decoderConfig)`.

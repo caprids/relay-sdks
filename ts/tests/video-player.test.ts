@@ -314,6 +314,28 @@ describe('createVideoPlayer', () => {
     },
   );
 
+  it('at reset(), closes the frames waiting at once, and the restart frame after it resets nothing more', () => {
+    const { clock, player, shown } = setUp();
+    player.push(key(0));
+    player.push(delta(1));
+    player.push(delta(2));
+    decoder().release();
+    player.push(delta(3));
+    player.reset();
+    expect(player.stats.queued).toBe(0);
+    clock.reset();
+    player.push(delta(1500));
+    player.push(key(1501, { discontinuity: 'restart' }));
+    decoder().release();
+    vi.advanceTimersByTime(1000);
+    expect(shown).toEqual([
+      [0, 0],
+      [1501, 0],
+    ]);
+    expect(decoder().resets).toBe(1);
+    expect(player.stats).toMatchObject({ decoderResets: 1, skipped: 1, shown: 2, dropped: 0 });
+  });
+
   it('replaces a decoder that fails and decodes again from the next keyframe', () => {
     const onError = vi.fn();
     const { player, shown } = setUp({ onError });

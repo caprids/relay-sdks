@@ -30,6 +30,7 @@ import {
 import {
   connectRelayPublisher,
   connectRelaySubscriber,
+  connectSupervisedSubscriber,
   type RelaySubscriber,
   type RelaySubscription,
   type RelayTransportFactory,
@@ -122,6 +123,12 @@ export async function runVideoPlayerScenario(options: ScenarioOptions) {
     getToken,
     ...(transport.kind === 'hub' ? { createTransport: transport.subscriber } : {}),
   });
+  // listenAudio takes a supervised subscriber; the video players subscribe on the plain one.
+  const audioSubscriber = await connectSupervisedSubscriber({
+    url,
+    getToken,
+    ...(transport.kind === 'hub' ? { createTransport: transport.subscriber } : {}),
+  });
   const failures: unknown[] = [];
   const stop = new AbortController();
   const tone = new AudioContext({ sampleRate: 48_000 });
@@ -166,7 +173,7 @@ export async function runVideoPlayerScenario(options: ScenarioOptions) {
   try {
     for (const deadline = performance.now() + 15_000; !listener; ) {
       try {
-        listener = await listenAudio(subscriber, options.namespace, {
+        listener = await listenAudio(audioSubscriber, options.namespace, {
           context: playback,
           onError: (error) => failures.push(error),
         });
@@ -305,6 +312,7 @@ export async function runVideoPlayerScenario(options: ScenarioOptions) {
     microphone.close();
     await publishing.catch(() => {});
     for (const context of [tone, captureContext, playback]) await context.close().catch(() => {});
+    audioSubscriber.close();
     await subscriber.close();
     await publisher.close();
   }

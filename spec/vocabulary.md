@@ -760,6 +760,7 @@ reader's `onFrame` feeds it.
 | Hand it a frame in decode order | `player.push(frame)` (`VideoPlayerFrame`: `timestampUs`, `payload`, `key`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
 | Show a decoded frame, borrowed until the callback returns | `render(frame)` on `VideoPlayerOptions` | — |
 | Decode with another config from the next keyframe | `player.configure(decoderConfig)` | — |
+| Replace the timeline now, as a `restart` frame would | `player.reset()` | — |
 | Counters | `player.stats`: `VideoPlayerStats { decoded, shown, dropped, skipped, decoderResets, errors, queued, lastOffsetUs }` | — |
 | When a join's steps happened | `player.joinPhases`: `VideoPlayerJoinPhases { createdUs, firstPushUs, firstDecodedUs, firstShownUs }` | — |
 | Stop | `player.close()`, `player.closed` | — |

@@ -1,6 +1,6 @@
 import type { MoqtObject } from '@caprid/moq-core';
 import { buildMsfCatalog, createPlayoutClock, LOC_TIMESTAMP } from '@caprid/moq-media';
-import type { RelaySubscriber } from '@caprid/relay';
+import type { SupervisedSubscriber, WantHandlers, WantOptions } from '@caprid/relay';
 import type { FrameReader } from '@caprid/relay/media';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { watchVideo } from '../examples/webcodecs/watch-video.js';
@@ -69,17 +69,31 @@ class FakeDecoder {
   }
 }
 
-type Handlers = NonNullable<Parameters<RelaySubscriber['subscribe']>[1]>;
-type Request = { namespace: string[]; track: string };
+type Handlers = WantHandlers;
 
 function fakeSubscriber() {
-  const subscriptions: { request: Request; handlers: Handlers; cancel: ReturnType<typeof vi.fn> }[] = [];
+  const subscriptions: {
+    key: string;
+    request: WantOptions;
+    handlers: Handlers;
+    cancel: ReturnType<typeof vi.fn<() => void>>;
+  }[] = [];
   const subscriber = {
-    subscribe: vi.fn((request: Request, handlers: Handlers) => {
-      const subscription = { request, handlers, cancel: vi.fn() };
-      subscriptions.push(subscription);
-      return subscription;
+    want: vi.fn((key: string, options: WantOptions, handlers: Handlers) => {
+      subscriptions.push({ key, request: options, handlers, cancel: vi.fn() });
     }),
+    // Withdraws the newest want of that key not withdrawn yet; a `cancel` that throws throws out of here.
+    unwant: vi.fn((key: string) => {
+      const record = [...subscriptions]
+        .reverse()
+        .find((candidate) => candidate.key === key && candidate.cancel.mock.calls.length === 0);
+      record?.cancel();
+    }),
+    catchUp: vi.fn(),
+    rotate: vi.fn(),
+    close: vi.fn(),
+    status: 'live',
+    closed: new Promise(() => {}),
   };
   const byTrack = (track: string) => {
     const found = subscriptions.find((subscription) => subscription.request.track === track);
@@ -87,7 +101,7 @@ function fakeSubscriber() {
     return found;
   };
   return {
-    subscriber: subscriber as unknown as RelaySubscriber,
+    subscriber: subscriber as unknown as SupervisedSubscriber,
     byTrack,
     deliverCatalog(payload = videoCatalog()) {
       byTrack('catalog').handlers.onObject?.({ status: 'normal', payload } as unknown as MoqtObject);
@@ -152,7 +166,7 @@ afterEach(() => {
 });
 
 const decoder = () => FakeDecoder.instances.at(-1) as FakeDecoder;
-const decoded = () => decoder().chunks.map((chunk) => [chunk.type, chunk.timestamp]);
+const decoded = () => (FakeDecoder.instances.at(-1)?.chunks ?? []).map((chunk) => [chunk.type, chunk.timestamp]);
 
 it('configures the decoder from the catalog: codec, the avcC as description, coded size, and low latency', async () => {
   const fake = fakeSubscriber();
@@ -422,4 +436,77 @@ it('creates no new decoder when onError stops the watcher', async () => {
   expect(onError).toHaveBeenCalledTimes(1);
   expect(FakeDecoder.instances).toHaveLength(1);
   expect(fake.byTrack('video').cancel).toHaveBeenCalledTimes(1);
+});
+
+it('follows the publisher across a restart: the decoder resets and starts again at the new keyframe', async () => {
+  const fake = fakeSubscriber();
+  const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, {
+    clock: clockAtNow(),
+    generations: true,
+  });
+  expect(fake.byTrack('catalog').request.generations).toBe(true);
+  expect(fake.byTrack('video').request.generations).toBe(true);
+  fake.deliverVideo(0, 0);
+  // The publisher restarted while the catalog was on its way: the frames held are the old one's.
+  fake.byTrack('video').handlers.onRestarted?.({ reason: 'generation', namespace: [...NAMESPACE, 'g1'] });
+  fake.deliverVideo(0, 1);
+  fake.deliverCatalog();
+  const watcher = await watching;
+  // Only the new subscription's frames reach the decoder, from its keyframe on.
+  expect(decoded()).toEqual([]);
+  fake.deliverVideo(1, 0);
+  expect(decoded()).toEqual([['key', timestampOf(1, 0)]]);
+
+  // A move to a newer generation: its groups number from 0 again, and the decoder resets at once and starts at its
+  // keyframe.
+  fake.deliverVideo(1, 1);
+  const resets = decoder().resets;
+  fake.byTrack('video').handlers.onSwitched?.({
+    from: { namespace: [...NAMESPACE, 'g1'], track: 'video' },
+    to: { namespace: [...NAMESPACE, 'g2'], track: 'video' },
+    subscribed: { trackAlias: 2, parameters: {}, trackProperties: [] } as never,
+  });
+  fake.deliverVideo(0, 0);
+  expect(decoder().resets).toBe(resets + 1);
+  expect(decoded().at(-1)).toEqual(['key', timestampOf(0, 0)]);
+  expect(watcher.stats.discontinuities).toBeGreaterThanOrEqual(1);
+  await watcher.stop();
+  expect(fake.byTrack('video').cancel).toHaveBeenCalledTimes(1);
+});
+
+it("drops the old subscription's decoded frames at a restart, so they do not fill the gap", async () => {
+  for (const move of [false, true]) {
+    const fake = fakeSubscriber();
+    const clock = clockAtNow();
+    const { canvas, drawn } = fakeCanvas();
+    const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock, generations: true });
+    fake.deliverCatalog();
+    const watcher = await watching;
+    fake.deliverVideo(0, 0);
+    clock.reportAudio(timestampOf(0, 0));
+    decoder().emit(timestampOf(0, 0));
+    // Three decoded frames wait for their time.
+    for (const objectId of [1, 2, 3]) decoder().emit(timestampOf(0, objectId));
+    expect(drawn).toEqual([timestampOf(0, 0)]);
+    const closed = FakeFrame.closed;
+    const resets = decoder().resets;
+    // The talker restarted: the reader resets the clock, and the waiting frames go at once with the decoder's output.
+    const video = fake.byTrack('video').handlers;
+    if (move)
+      video.onSwitched?.({
+        from: { namespace: [...NAMESPACE, 'g1'], track: 'video' },
+        to: { namespace: [...NAMESPACE, 'g2'], track: 'video' },
+        subscribed: { trackAlias: 2, parameters: {}, trackProperties: [] } as never,
+      });
+    else video.onRestarted?.({ reason: 'generation', namespace: [...NAMESPACE, 'g1'] });
+    expect(FakeFrame.closed).toBe(closed + 3);
+    expect(decoder().resets).toBe(resets + 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(drawn).toEqual([timestampOf(0, 0)]);
+    // The new subscription decodes from its keyframe.
+    fake.deliverVideo(0, 1);
+    fake.deliverVideo(1, 0);
+    expect(decoded().at(-1)).toEqual(['key', timestampOf(1, 0)]);
+    await watcher.stop();
+  }
 });

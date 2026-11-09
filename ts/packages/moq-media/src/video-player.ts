@@ -92,6 +92,12 @@ export interface VideoPlayer {
    * a new decoder with this config.
    */
   configure(decoderConfig: VideoDecoderConfig): void;
+  /**
+   * Replace the timeline now, as a `restart` frame would: the decoder resets, every decoded frame still waiting is
+   * closed, and decoding starts again at the next keyframe. For a restart the app learns of before the next frame
+   * arrives, such as a supervised want's `onRestarted`: on a clock the restart moved, those frames would look due.
+   */
+  reset(): void;
   /** Counters, updated in place. */
   readonly stats: Readonly<VideoPlayerStats>;
   /** When each step of the start happened, for measuring a join. */
@@ -311,6 +317,9 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
       config = decoderConfig;
       revision++;
       if (decoding.state === 'failed') decoding = { state: 'awaiting-key', decoder: undefined };
+    },
+    reset() {
+      if (decoding.state !== 'closed') replaceTimeline();
     },
     stats,
     joinPhases,

@@ -1257,6 +1257,7 @@ before it are worth:
 | `gap` | Keeps the decoder and the frames waiting, which are still on the timeline. The sequencer delivers a keyframe after a gap, which decodes on its own. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
 | `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
 | The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
+| `reset()` | Does now what a `resync` or `restart` does. For a restart the app learns of before the next frame arrives, such as a supervised want's `onRestarted`: on the clock the restart moved, the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
 | `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
 
 The issue's sketch reset the decoder at every discontinuity. A gap does not reset it, because the

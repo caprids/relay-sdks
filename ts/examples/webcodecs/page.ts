@@ -6,7 +6,7 @@
  * the endpoint, the namespace and, from RELAY_TOKEN, the token in `window.webcodecs`.
  */
 import { createBroadcastClock, createPlayoutClock, type PlayoutClock } from '@caprid/moq-media';
-import { connectRelayPublisher, connectRelaySubscriber, type RelaySubscriber } from '@caprid/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@caprid/relay';
 import { captureMicrophone } from './capture-microphone.js';
 import { type AudioListener, listenAudio, whenRunning } from './listen-audio.js';
 import { publishCanvas } from './publish-canvas.js';
@@ -96,23 +96,6 @@ publishButton.addEventListener('click', async () => {
 });
 stopPublishing.addEventListener('click', () => publishing?.abort(new Error('Stopped')));
 
-/**
- * Start with `start` until it succeeds, once a second: a watch that starts before the publisher's announce is
- * rejected (the announce race), and a catalog subscription the relay accepts can deliver nothing for a while.
- */
-async function retry<T>(what: string, signal: AbortSignal, start: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  for (;;) {
-    try {
-      return await start(AbortSignal.any([signal, AbortSignal.timeout(5000)]));
-    } catch (error) {
-      signal.throwIfAborted();
-      say(`${what}: ${describe(error)}; trying again`);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      signal.throwIfAborted();
-    }
-  }
-}
-
 interface Watching {
   stop: AbortController;
   context: AudioContext;
@@ -155,23 +138,35 @@ async function watch() {
   release.push(() => clearInterval(ticker));
   const onError = (error: unknown) => say(describe(error));
   try {
-    const subscriber: RelaySubscriber = await connectRelaySubscriber({ url, getToken, signal: stop.signal });
+    // Supervised: it reconnects, and its wants wait for the publisher and come back when it restarts, so nothing here
+    // retries.
+    const subscriber = await connectSupervisedSubscriber({
+      url,
+      getToken,
+      signal: stop.signal,
+      onStatus: (state, error) => {
+        if (state === 'reconnecting')
+          say(`subscriber reconnecting${error === undefined ? '' : `: ${describe(error)}`}`);
+      },
+    });
     release.push(() => subscriber.close());
     // Audio starts once the context runs: a listener on a suspended context would hold every frame until it resumed.
     const audio = (async () => {
       await whenRunning(context);
-      current.listener = await retry('audio', stop.signal, (signal) =>
-        listenAudio(subscriber, namespace, { context, clock, onError, signal }),
-      );
+      current.listener = await listenAudio(subscriber, namespace, {
+        context,
+        clock,
+        onError,
+        onRestarted: ({ reason }) => say(`audio restarted (${reason})`),
+        signal: stop.signal,
+      });
       release.push(() => current.listener?.stop());
       if (current.muted) current.listener.input.gain = 0;
       say('audio playing');
     })();
     // Stopping before video starts skips the await below, and closing the context then rejects whenRunning.
     audio.catch(() => {});
-    current.watcher = await retry('video', stop.signal, (signal) =>
-      watchVideo(subscriber, namespace, watched, { clock, onError, signal }),
-    );
+    current.watcher = await watchVideo(subscriber, namespace, watched, { clock, onError, signal: stop.signal });
     release.push(() => current.watcher?.stop());
     say(`video playing${context.state === 'running' ? '' : '; click Unmute for sound'}`);
     await Promise.all([audio, new Promise((_, reject) => stop.signal.addEventListener('abort', reject))]);
