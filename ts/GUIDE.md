@@ -1240,7 +1240,7 @@ import {
   createVideoPlayer,
   videoDecoderConfigFromTrack,
 } from '@caprid/moq-media';
-import { createFrameReader } from '@caprid/relay/media';
+import { createFrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 
 const clock = createPlayoutClock(); // one per broadcast, shared with the audio input
 const player = createVideoPlayer({
@@ -1249,7 +1249,7 @@ const player = createVideoPlayer({
   render: canvasRenderer(canvas), // an HTMLCanvasElement or an OffscreenCanvas
 });
 const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
-subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
 // Later: reader.close(), cancel the subscription, player.close().
 ```
 

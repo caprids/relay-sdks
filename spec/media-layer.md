@@ -75,7 +75,7 @@ above that line is rebuilt inside the example:
 | Catalog track | Registers a track named `catalog` and re-sends the document on every relay subscription, retrying transient failures while demand remains | Video.js `parse-source.ts`; the demand semantics in `behavior.md` |
 | Group mapping | Opens a video group on each keyframe and appends deltas; sends audio as one group per frame; after any failure or loss of demand, discards deltas until the next keyframe | MSF group mapping; Video.js `track-publisher.ts` |
 | Source URL | Composes `moqt://host/path#msf:<ns>--catalog&c4m=<token>`, escaping every byte outside `[A-Za-z0-9_]` in each namespace field as `.xx` | msf-01 §11.1; Video.js `parse-source.ts` |
-| Relay reality | Carries the avcC in the catalog even though LOC puts it on keyframes, because the relay drops odd-typed object properties | Issue #23, observed against relay 0.14.17 |
+| Relay reality | Carries the avcC in the catalog even though LOC puts it on keyframes, because the relay drops odd-typed object properties | Issue #23, observed against relay 0.14.17, and again on relay.mux.global on 2026-11-09 (Video Config on none of 10 keyframes) |
 
 That is 347 lines in `moq_media.py`, none of it encoder or network code, plus about 250 lines of
 catalog serving and group mapping in `stream.py`, before a single frame is encoded. None of it is
@@ -1178,7 +1178,7 @@ const player = createVideoPlayer({
   render: canvasRenderer(canvas),
 });
 const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
-subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
 ```
 
 Share the clock with the broadcast's audio input and with every frame reader's sequencer. Audio
@@ -1254,14 +1254,46 @@ before it are worth:
 | When | The player |
 | --- | --- |
 | It starts | Skips frames until a keyframe, which configures a new decoder |
-| `gap` | Keeps the decoder and the frames waiting, which are still on the timeline. The sequencer delivers a keyframe after a gap, which decodes on its own. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
+| `gap` | Flushes the decoder and keeps the frames waiting, which are still on the timeline. The flush outputs what the decoder holds, including frames held for reordering, and the decoder then takes only a keyframe. The sequencer delivers a keyframe after a gap. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
 | `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
 | The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
 | `reset()` | Does now what a `resync` or `restart` does. For a restart the app learns of before the next frame arrives, such as a supervised want's `onRestarted`: on the clock the restart moved, the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
+| A frame marked `key` is not a keyframe | WebCodecs inspects a chunk marked `key` and throws a `DataError` when it is not one, leaving the decoder configured. The player reports it, keeps the decoder, and skips frames until the next keyframe. It does not count as the decoder failing for good |
 | `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
 
-The issue's sketch reset the decoder at every discontinuity. A gap does not reset it, because the
-frames decoded before the gap are still due on the same timeline.
+The issue's sketch reset the decoder at every discontinuity. A gap flushes it instead, because the
+frames decoded before the gap are still due on the same timeline. A reset would drop the ones the
+decoder still holds. Keeping the decoder as it is would leave it holding references from before the
+gap. After an open-GOP keyframe, such as an HEVC CRA, the leading pictures would decode against
+them. In headless Chromium 153, `flush()` followed at once by the next keyframe's `decode()` output
+every frame in order with no error (2026-11-09). That the flush also drops the references comes
+from how Chromium's decoders flush, not from a measurement: headless Chromium has no HEVC decoder.
+
+The player relies on these stream conventions. The drafts leave each one open, and the SDK's
+publishers follow them all:
+
+- **A keyframe opens each group.** The frame sequencer marks object 0 of a group as `key`. MOQT-22
+  lets a subgroup start at any Object ID, and MSF-01 §4.1 keeps a GOP within one group without
+  saying the group starts at a keyframe. LOC-04's "Object 0 is the IDR frame" is in an example. A
+  frame marked `key` that is not one is skipped, as above. Reading LOC Video Frame Marking (0x09)
+  where present would let the sequencer mark keyframes from the stream itself.
+- **The LOC timestamp is the presentation time.** LOC-04 §2.3.1.1 says only "the timestamp of the
+  encoded media frame", and there is no decode-time property. The player paces each decoded frame
+  by its timestamp, which is right for B-frames only when publishers stamp presentation time.
+- **The decoder config is the catalog's or `configure()`'s.** The player ignores Video Config
+  (0x0D). It is odd-typed, and relay.mux.global still drops it: in the video player's live test on
+  2026-11-09, none of 10 keyframes arrived with it, against 10 of 10 through the in-memory hub. Neither
+  draft says whether 0x0D or the catalog's init data wins. An adapter that sees a new config calls
+  `configure()`.
+- **Catalog `width` and `height` are a hint.** MSF-01 §5.2.26 makes them the maximum encoded size.
+  `videoDecoderConfigFromTrack` passes them as `codedWidth` and `codedHeight`, which WebCodecs also
+  treats as a hint.
+- **The payload format follows the codec string.** An `avc1` track with init data decodes as
+  length-prefixed NAL units with the avcC as `description`. A track with no init data decodes as
+  Annex B.
+- **Alternates share a timeline.** MSF-01 §4.2 requires altGroup tracks to be time-aligned, but not
+  to share an origin or a timescale. Switching renditions on one player by comparing timestamps
+  relies on the SDK's publishers stamping every rendition on one broadcast clock.
 
 `player.stats` (`VideoPlayerStats`) counts frames `decoded`, `shown` (handed to `render`),
 `dropped` (by the clock), `skipped` (while waiting for a keyframe, or after the decoder failed for

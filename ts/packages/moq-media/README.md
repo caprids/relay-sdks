@@ -227,12 +227,12 @@ says to drop.
 
 ```ts
 import { canvasRenderer, createFrameSequencer, createPlayoutClock, createVideoPlayer, videoDecoderConfigFromTrack } from '@caprid/moq-media';
-import { createFrameReader } from '@caprid/relay/media';
+import { createFrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 
 const clock = createPlayoutClock(); // one per broadcast, shared with the audio input
 const player = createVideoPlayer({ clock, decoderConfig: videoDecoderConfigFromTrack(videoTrack), render: canvasRenderer(canvas) });
 const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
-subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
 ```
 
 - `render` borrows the frame. The player closes it when `render` returns, so a hardware decoder never runs out of

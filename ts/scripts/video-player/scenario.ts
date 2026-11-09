@@ -19,6 +19,7 @@ import {
   createFrameSequencer,
   createPlayoutClock,
   createVideoPlayer,
+  LOC_VIDEO_CONFIG,
   type MsfCatalogTrack,
   type PlayoutClock,
   parseMsfCatalog,
@@ -219,7 +220,13 @@ export async function runVideoPlayerScenario(options: ScenarioOptions) {
       );
       return played;
     };
-    const wall = play(createPlayoutClock(), ({ timestampUs, payload, key, discontinuity }) => {
+    // Whether the relay passes on the Video Config (0x0D) the publisher puts on each keyframe: it is odd-typed.
+    const keyframes = { received: 0, withVideoConfig: 0 };
+    const wall = play(createPlayoutClock(), ({ timestampUs, payload, key, discontinuity, properties }) => {
+      if (key) {
+        keyframes.received++;
+        if (properties.some(({ type }) => type === LOC_VIDEO_CONFIG)) keyframes.withVideoConfig++;
+      }
       posted++;
       post({ type: 'frame', frame: { timestampUs, payload, key, ...(discontinuity ? { discontinuity } : {}) } });
     });
@@ -297,6 +304,7 @@ export async function runVideoPlayerScenario(options: ScenarioOptions) {
         }),
       },
       counts: { ...counts },
+      keyframes,
     };
     for (const each of players) each.player.close();
     result.counts = { ...counts };

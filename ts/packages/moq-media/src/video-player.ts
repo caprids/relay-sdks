@@ -82,8 +82,9 @@ export interface VideoPlayer {
    * Decode a frame, in decode order. A frame reader's `onFrame` can be this. The player waits for a keyframe at the
    * start, after a decoder error, and after a `resync` or `restart`, skipping the frames before it. A `resync` or
    * `restart` also resets the decoder and closes every decoded frame still waiting: they belong to the replaced
-   * timeline. A `gap` keeps both, since the frames before it are still on the timeline; a frame after a gap that is not
-   * a keyframe is skipped, as is every frame after it until one.
+   * timeline. A `gap` flushes the decoder instead, since the frames before it are still on the timeline; a frame after a
+   * gap that is not a keyframe is skipped, as is every frame after it until one. A frame marked `key` that the decoder
+   * finds is not a keyframe is reported and skipped, as are the frames after it until the next keyframe.
    */
   push(frame: VideoPlayerFrame): void;
   /**
@@ -134,6 +135,7 @@ type Decoding =
   | { state: 'closed' };
 
 const isNotSupported = (error: unknown) => error instanceof Error && error.name === 'NotSupportedError';
+const isDataError = (error: unknown) => error instanceof Error && error.name === 'DataError';
 
 /**
  * Create a video player. Decoded frames wait in presentation order until the clock says the earliest is due, so a
@@ -149,7 +151,7 @@ const isNotSupported = (error: unknown) => error instanceof Error && error.name 
  *   render: canvasRenderer(canvas),
  * });
  * const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
- * subscriber.subscribe({ namespace, track: 'video' }, { ...reader, onError });
+ * subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
  * ```
  */
 export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
@@ -286,8 +288,12 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
       if (decoding.state === 'closed') return;
       joinPhases.firstPushUs ??= clock.localNow();
       if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') replaceTimeline();
-      else if (frame.discontinuity === 'gap' && !frame.key && decoding.state === 'decoding') {
-        decoding = { state: 'awaiting-key', decoder: decoding.decoder };
+      else if (frame.discontinuity === 'gap' && decoding.state === 'decoding') {
+        // Flush rather than keep or reset: the frames before the gap still come out, including any held for reordering,
+        // and the decoder drops its references, which leading pictures after an open-GOP keyframe would otherwise use.
+        // Decodes after it queue behind it, and after it the decoder takes only a keyframe, as after a reset.
+        decoding.decoder.flush().catch(() => {});
+        if (!frame.key) decoding = { state: 'awaiting-key', decoder: decoding.decoder };
       }
       if (decoding.state === 'failed' || (decoding.state === 'awaiting-key' && !frame.key)) {
         stats.skipped++;
@@ -309,6 +315,14 @@ export function createVideoPlayer(options: VideoPlayerOptions): VideoPlayer {
           })
         );
       } catch (error) {
+        // A frame marked key that the decoder finds is not one (WebCodecs inspects the bitstream): the decoder is still
+        // configured, and the config is not at fault, so wait for the next keyframe on it.
+        if (isDataError(error) && decoder.state === 'configured') {
+          decoding = { state: 'awaiting-key', decoder };
+          stats.skipped++;
+          report(error, 'A frame marked key is not a keyframe; the video player waits for the next keyframe');
+          return;
+        }
         fail(decoder, error);
       }
     },

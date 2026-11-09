@@ -22,6 +22,8 @@ import { createRelayHub } from './helpers/relay-hub.js';
 // with `auto`), and frames that count how often they are closed, so every test checks that none leaks.
 const FAIL = 0xee;
 const UNSUPPORTED = 0xef;
+/** A payload the fake decoder finds is not a keyframe, as WebCodecs does when it inspects a chunk marked key. */
+const NOT_KEY = 0xed;
 
 class FakeFrame {
   static made: FakeFrame[] = [];
@@ -77,6 +79,7 @@ class FakeDecoder {
   decode(chunk: FakeChunk) {
     if (this.state !== 'configured') throw new DOMException('Not configured', 'InvalidStateError');
     if (this.keyRequired && chunk.type !== 'key') throw new DOMException('A key frame is required', 'DataError');
+    if (chunk.type === 'key' && chunk.data[0] === NOT_KEY) throw new DOMException('Not a key frame', 'DataError');
     this.keyRequired = false;
     this.chunks.push({ type: chunk.type, index: indexOf(chunk.timestamp), codec: this.config?.codec });
     this.pending.push(chunk);
@@ -96,6 +99,15 @@ class FakeDecoder {
       }
       this.init.output(new FakeFrame(chunk.timestamp) as unknown as VideoFrame);
     }
+  }
+  flushes = 0;
+  /** Outputs what it holds, then takes only a key chunk; decodes after it queue behind it. */
+  flush() {
+    if (this.state !== 'configured') return Promise.reject(new DOMException('Not configured', 'InvalidStateError'));
+    this.flushes++;
+    this.release();
+    this.keyRequired = true;
+    return Promise.resolve();
   }
   reset() {
     if (this.state === 'closed') throw new DOMException('Closed', 'InvalidStateError');
@@ -252,12 +264,11 @@ describe('createVideoPlayer', () => {
     expect(shown.map(([index]) => index)).toEqual([2, 3]);
   });
 
-  it('keeps the decoder and the frames waiting across a gap: they are still on the timeline', () => {
+  it('flushes the decoder at a gap and keeps the frames waiting: they are still on the timeline', () => {
     const { player, shown } = setUp();
     player.push(key(0));
     player.push(delta(1));
     player.push(delta(2));
-    decoder().release();
     player.push(key(5, { discontinuity: 'gap' }));
     decoder().release();
     vi.advanceTimersByTime(200);
@@ -268,8 +279,24 @@ describe('createVideoPlayer', () => {
       [5, 200_000],
     ]);
     expect(FakeDecoder.instances).toHaveLength(1);
+    expect(decoder().flushes).toBe(1);
     expect(decoder().resets).toBe(0);
     expect(player.stats).toMatchObject({ decoderResets: 0, skipped: 0 });
+  });
+
+  it('reports a frame marked key that is not a keyframe, skips to the next keyframe, and plays on', () => {
+    const onError = vi.fn();
+    const { player, shown } = setUp({ onError });
+    player.push(key(0, { payload: new Uint8Array([NOT_KEY]) }));
+    player.push(delta(1));
+    player.push(key(2));
+    player.push(delta(3));
+    decoder().release();
+    vi.advanceTimersByTime(200);
+    expect(shown.map(([index]) => index)).toEqual([2, 3]);
+    expect(onError.mock.calls.map(([error]) => (error as DOMException).name)).toEqual(['DataError']);
+    expect(FakeDecoder.instances).toHaveLength(1);
+    expect(player.stats).toMatchObject({ skipped: 2, errors: 1, decoderResets: 0 });
   });
 
   it('skips a frame after a gap that is not a keyframe, and every frame until one, on the same decoder', () => {

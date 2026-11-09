@@ -47,6 +47,12 @@ class FakeDecoder {
     this.throwIfClosed();
     this.chunks.push(chunk);
   }
+  flushes = 0;
+  flush() {
+    this.throwIfClosed();
+    this.flushes++;
+    return Promise.resolve();
+  }
   reset() {
     this.throwIfClosed();
     this.resets++;
