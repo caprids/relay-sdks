@@ -3,6 +3,11 @@
 Repo-level instructions for coding agents. Human-facing docs start at `README.md`; the contract
 every SDK implements lives in `spec/`.
 
+## Checks
+
+Run checks through mise, as CI does (`mise install`, then `mise run ts:check` or `mise run check`),
+so they use `mise.toml`'s pinned Node, pnpm, Python and uv rather than whatever the machine has.
+
 ## Agent skills
 
 ### Issue tracker
