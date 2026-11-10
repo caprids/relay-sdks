@@ -221,8 +221,8 @@ the real worklet. See [playing audio](https://github.com/caprids/relay-sdks/blob
 
 ## Video playout
 
-`createVideoPlayer({ clock, decoderConfig, render })` plays one video track with no UI. It decodes the frames it is
-pushed with WebCodecs and calls `render(frame)` when the playout clock says each is due. It closes the frames the clock
+`createVideoPlayer({ clock, decoderConfig, render })` plays one video track with no UI. It decodes the frames you
+push to it with WebCodecs and calls `render(frame)` when the playout clock says each is due. It closes the frames the clock
 says to drop.
 
 ```ts
@@ -241,9 +241,9 @@ subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribePara
 - `videoDecoderConfigFromTrack(track)` reads the decoder config from a catalog track.
 - The player waits for a keyframe at the start, after a decoder error, and after a `resync` or `restart`, which also
   reset the decoder and close the frames waiting. `player.reset()` does the same at once, for a restart the app hears
-  of before the next frame, such as a supervised want's `onRestarted`. `player.configure(decoderConfig)` switches the config from the next
-  keyframe, as at a rendition switch.
-- A decoder that fails before its first frame, or with `NotSupportedError`, is reported once. The player then decodes
+  of before the next frame, such as a supervised want's `onRestarted`. `player.configure(decoderConfig)` switches the
+  config from the next keyframe, as at a rendition switch.
+- The player reports a decoder that fails before its first frame, or with `NotSupportedError`, once. It then decodes
   nothing until `player.configure(decoderConfig)`.
 - Share the clock with the audio input so audio drives the video. Without audio, the clock paces it by the wall clock.
 - It uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it runs in a dedicated worker as it is.

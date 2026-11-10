@@ -66,8 +66,8 @@ export function audioDecoderConfigFromTrack(track: MsfCatalogTrack): AudioDecode
 
 /**
  * The decoder config for a catalog's video track: its codec, its init data as the description (an AVC track's avcC),
- * and its width and height as the coded size when it declares both. `optimizeForLatency` is set, since a live player
- * wants each frame as soon as it decodes.
+ * and its width and height as the coded size when it declares both. It sets `optimizeForLatency`, because a live
+ * player needs each frame as soon as it decodes.
  */
 export function videoDecoderConfigFromTrack(track: MsfCatalogTrack): VideoDecoderConfig {
   if (!track.codec) throw new Error(`Track ${track.name} declares no codec`);

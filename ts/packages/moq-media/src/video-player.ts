@@ -1,19 +1,19 @@
 /**
- * A headless video player: decodes frames with WebCodecs and hands each decoded frame to a sink when the broadcast's
- * playout clock says it is due. No DOM and no transport: it uses only `VideoDecoder`, `EncodedVideoChunk` and timers,
- * so it runs unchanged in a dedicated worker. See spec/media-layer.md, "Video player".
+ * A headless video player. It decodes frames with WebCodecs and hands each decoded frame to a sink when the
+ * broadcast's playout clock says it is due. It has no DOM and no transport. It uses only `VideoDecoder`,
+ * `EncodedVideoChunk` and timers, so it runs unchanged in a dedicated worker. See spec/media-layer.md, "Video player".
  */
 
 import type { PlayoutClock } from './clock.js';
 import type { FrameDiscontinuity, SequencedFrame } from './sequencer.js';
 
 /**
- * What the player calls on its clock: a `PlayoutClock` qualifies. Share the broadcast's clock with its audio input and
+ * What the player calls on its clock. A `PlayoutClock` qualifies. Share the broadcast's clock with its audio input and
  * with the frame reader's sequencer, so video follows the audio that drives it.
  */
 export type VideoPlayerClock = Pick<PlayoutClock, 'due' | 'localNow'>;
 
-/** One encoded video frame: a `SequencedFrame` from a frame reader qualifies. */
+/** One encoded video frame. A `SequencedFrame` from a frame reader qualifies. */
 export type VideoPlayerFrame = Pick<SequencedFrame, 'timestampUs' | 'payload' | 'key'> & {
   /** Set where the frame does not follow the one before; see {@link VideoPlayer.push}. */
   discontinuity?: FrameDiscontinuity | undefined;
@@ -26,22 +26,22 @@ export interface VideoPlayerOptions {
   /** How to decode. `videoDecoderConfigFromTrack` reads one from the catalog. */
   decoderConfig: VideoDecoderConfig;
   /**
-   * Show a frame: called when it is due. The frame is borrowed: the player closes it once this returns, because a
-   * hardware decoder has a fixed pool of frames and stalls while they are all held. A sink that keeps the frame keeps
-   * `frame.clone()`. An exception goes to `onError` (or `console.error` without one); the frame is still closed and
-   * playback carries on. `canvasRenderer(canvas)` draws onto a canvas.
+   * Show a frame. The player calls it when the frame is due. The frame is borrowed. The player closes it once this
+   * returns, because a hardware decoder has a fixed pool of frames and stalls while they are all held. A sink that
+   * keeps the frame keeps `frame.clone()`. An exception goes to `onError`, or to `console.error` without one. The player
+   * still closes the frame and plays on. `canvasRenderer(canvas)` draws onto a canvas.
    */
   render(frame: VideoFrame): void;
   /**
    * A decoder error, after which the player replaces the decoder and decodes again from the next keyframe, or an
    * exception from `render`. Without it, both go to `console.error`. A decoder that fails before it output any frame,
-   * or with a `NotSupportedError`, fails for good: a new decoder with the same config would fail the same way, so the
+   * or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way, so the
    * player decodes nothing more until `configure()` gives it another config.
    */
   onError?(error: unknown): void;
 }
 
-/** The player's counters. Counters are cumulative. */
+/** The player's counters. All but `queued` and `lastOffsetUs` only grow. */
 export interface VideoPlayerStats {
   /** Frames the decoder output. */
   decoded: number;
@@ -51,19 +51,19 @@ export interface VideoPlayerStats {
   dropped: number;
   /** Frames pushed and not decoded: while the player waited for a keyframe, or after the decoder failed for good. */
   skipped: number;
-  /** Times the decoder was reset or replaced: at a `resync` or `restart`, and after an error. */
+  /** Times the player reset or replaced the decoder, at a `resync` or `restart` and after an error. */
   decoderResets: number;
   /** Decoder errors and exceptions from `render`. */
   errors: number;
   /** Decoded frames waiting to be due now. */
   queued: number;
-  /** The clock's offset for the last frame shown, in microseconds: its sync error, positive when early. */
+  /** The clock's offset for the last frame shown, in microseconds. This is its sync error, positive when early. */
   lastOffsetUs: number | null;
 }
 
 /**
- * When each step of the player's start happened, in microseconds on its clock's local time source; `null` until it
- * happens. The object is updated in place.
+ * When each step of the player's start happened, in microseconds on its clock's local time source, or `null` until it
+ * happens. The player updates the object in place.
  */
 export interface VideoPlayerJoinPhases {
   /** `createVideoPlayer` returned. */
@@ -81,7 +81,7 @@ export interface VideoPlayer {
   /**
    * Decode a frame, in decode order. A frame reader's `onFrame` can be this. The player waits for a keyframe at the
    * start, after a decoder error, and after a `resync` or `restart`, skipping the frames before it. A `resync` or
-   * `restart` also resets the decoder and closes every decoded frame still waiting: they belong to the replaced
+   * `restart` also resets the decoder and closes every decoded frame still waiting. They belong to the replaced
    * timeline. A `gap` flushes the decoder instead, since the frames before it are still on the timeline; a frame after a
    * gap that is not a keyframe is skipped, as is every frame after it until one. A frame marked `key` that the decoder
    * finds is not a keyframe is reported and skipped, as are the frames after it until the next keyframe.
@@ -94,22 +94,23 @@ export interface VideoPlayer {
    */
   configure(decoderConfig: VideoDecoderConfig): void;
   /**
-   * Replace the timeline now, as a `restart` frame would: the decoder resets, every decoded frame still waiting is
-   * closed, and decoding starts again at the next keyframe. For a restart the app learns of before the next frame
-   * arrives, such as a supervised want's `onRestarted`: on a clock the restart moved, those frames would look due.
+   * Replace the timeline now, as a `restart` frame would. The player resets the decoder, closes every decoded frame
+   * still waiting, and starts decoding again at the next keyframe. Call it when the app learns of a restart before the
+   * next frame arrives, such as from a supervised want's `onRestarted`. The restart has already moved the clock, so
+   * those frames would look due.
    */
   reset(): void;
   /** Counters, updated in place. */
   readonly stats: Readonly<VideoPlayerStats>;
   /** When each step of the start happened, for measuring a join. */
   readonly joinPhases: Readonly<VideoPlayerJoinPhases>;
-  /** Stop: the decoder closes, every decoded frame still waiting is closed, and later pushes are ignored. */
+  /** Stop. The player closes the decoder and every decoded frame still waiting, and ignores later pushes. */
   close(): void;
   /** Whether `close()` was called. */
   readonly closed: boolean;
 }
 
-/** The part of a canvas that {@link canvasRenderer} draws on: an `HTMLCanvasElement` or an `OffscreenCanvas` qualifies. */
+/** The part of a canvas that {@link canvasRenderer} draws on. An `HTMLCanvasElement` or an `OffscreenCanvas` qualifies. */
 export interface VideoCanvas {
   /** The canvas's width in pixels. */
   width: number;
@@ -119,12 +120,12 @@ export interface VideoCanvas {
   getContext(contextId: '2d'): CanvasDrawImage | null;
 }
 
-/** Ask the clock again at least this often while a frame waits: the audio input or another track may move the clock. */
+/** Ask the clock again at least this often while a frame waits, because the audio input or another track may move it. */
 const CLOCK_RECHECK_US = 50_000;
 
 /**
  * Where decoding stands. While `awaiting-key`, frames that are not keyframes are skipped, and the next keyframe
- * configures `decoder` with the latest config, or a new decoder when there is none: at the start, and after an error.
+ * configures `decoder` with the latest config, or a new decoder when there is none, as at the start and after an error.
  * While `decoding`, every frame is decoded, and a keyframe first applies a config newer than `configured`. While
  * `failed`, every frame is skipped until `configure()`.
  */
@@ -139,9 +140,9 @@ const isDataError = (error: unknown) => error instanceof Error && error.name ===
 
 /**
  * Create a video player. Decoded frames wait in presentation order until the clock says the earliest is due, so a
- * decoder whose pool of frames is full resumes as they are shown: the earliest is due within the clock's
- * `maxVideoDelayUs`, or shown at once as a re-sync. The player asks the clock at each decoded frame as well as on its
- * timer, so only frames ahead of the clock wait, even while a hidden tab throttles timers.
+ * decoder whose pool of frames is full resumes as they are shown. The earliest is due within the clock's
+ * `maxVideoDelayUs`, or the player shows it at once as a re-sync. The player asks the clock at each decoded frame as
+ * well as on its timer, so only frames ahead of the clock wait, even while a hidden tab throttles timers.
  *
  * ```ts
  * const clock = createPlayoutClock();
