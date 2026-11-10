@@ -17,7 +17,7 @@ const quic = {
    * What importing the stand-in gives: its exports, a throw for a missing package, or a promise for one still loading.
    * A test sets this rather than calling `vi.doMock` again, since a second `doMock` of the same module races the first.
    */
-  load: undefined as unknown as () => unknown,
+  load: undefined as unknown as () => Record<string, unknown> | Promise<Record<string, unknown>>,
 };
 
 const url = 'https://relay.example.com/moq';
@@ -163,7 +163,7 @@ describe('@caprid/relay/node', () => {
   });
 
   it('applies the signal and the deadline while the adapter is still loading', async () => {
-    quic.load = () => new Promise(() => {});
+    quic.load = () => new Promise<never>(() => {});
     const { connectRelaySubscriber } = await entry();
 
     const owner = new AbortController();
