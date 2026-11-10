@@ -109,9 +109,9 @@ let watching: Watching | undefined;
 const showStatus = ({ clock, watcher, listener, context, muted }: Watching) => {
   const parts = [`clock ${clock.mode}`];
   if (watcher) {
-    const { shown, late, overflowed, lastOffsetUs } = watcher.stats;
+    const { shown, late, lastOffsetUs } = watcher.stats;
     const offset = lastOffsetUs === undefined ? '–' : `${Math.round(lastOffsetUs / 1000)} ms`;
-    parts.push(`video offset ${offset} · shown ${shown} · late ${late} · overflowed ${overflowed}`);
+    parts.push(`video offset ${offset} · shown ${shown} · late ${late}`);
   }
   if (listener) {
     const { underruns, bufferedUs } = listener.input.stats;

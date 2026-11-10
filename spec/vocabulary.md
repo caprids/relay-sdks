@@ -744,6 +744,43 @@ bumped per start: `reports` counts reports, and two meanings in one counter woul
 to read. `dryAtUs` and `heldUntilUs` are timeline timestamps, so they end in `Us` like `fromUs` and
 `untilUs`.
 
+## Video playout: `createVideoPlayer`
+
+A headless player for one video track: WebCodecs decoding, and each decoded frame handed to a
+render callback when the playout clock says it is due
+([issue #478](https://github.com/muxinc/relay-sdks/issues/478)). Its design is in
+[media-layer.md](media-layer.md#video-player). TypeScript only, in `@caprid/moq-media`, as the audio
+player is, since a Python process has no display. It takes frames, not a subscription, so a frame
+reader's `onFrame` feeds it.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| Play one video track on the playout clock | `createVideoPlayer({ clock, decoderConfig, render, onError })` → `VideoPlayer` (`VideoPlayerOptions`) | — |
+| What the player calls on its clock; a `PlayoutClock` qualifies | `VideoPlayerClock` (the clock's `due` and `localNow`) | — |
+| Hand it a frame in decode order | `player.push(frame)` (`VideoPlayerFrame`: `timestampUs`, `payload`, `key`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
+| Show a decoded frame, borrowed until the callback returns | `render(frame)` on `VideoPlayerOptions` | — |
+| Decode with another config from the next keyframe | `player.configure(decoderConfig)` | — |
+| Replace the timeline now, as a `restart` frame would | `player.reset()` | — |
+| Counters | `player.stats`: `VideoPlayerStats { decoded, shown, dropped, skipped, decoderResets, errors, queued, lastOffsetUs }` | — |
+| When a join's steps happened | `player.joinPhases`: `VideoPlayerJoinPhases { createdUs, firstPushUs, firstDecodedUs, firstShownUs }` | — |
+| Stop | `player.close()`, `player.closed` | — |
+| Draw frames onto a canvas | `canvasRenderer(canvas)` (`VideoCanvas`, which an `HTMLCanvasElement` or an `OffscreenCanvas` is) | — |
+| A catalog video track's decoder config | `videoDecoderConfigFromTrack(track)` | — |
+
+"Player", as for audio, because it decodes and presents. A video track has one decoder, so there
+are no inputs. `render`, not `sink` or `onFrame`. `onFrame` is the frame reader's callback for
+encoded frames, and `render` names what the callback does with a decoded one. `shown` and `dropped`
+follow the clock's `show` and `drop` decisions, and `lastOffsetUs` is the `offsetUs` of the last
+`show`. `skipped` is its own counter because it needs a different fix from `dropped`. `configure`
+is WebCodecs' word for the same change on a decoder. `VideoCanvas` names the two members
+`canvasRenderer` uses, as `AudioPlayerContext` does for Web Audio, so the package builds against the
+WebWorker library with no DOM types. `VideoPlayerClock` is `Pick<PlayoutClock, …>` rather than its
+own interface, unlike `AudioInputClock`, because the player calls the clock exactly as a
+`PlayoutClock` takes it. Not adopted: a canvas in the options instead of `render` (a sink that is not
+a canvas would still need the callback, and `canvasRenderer` gives the canvas case one line); and a
+worker message bridge (the player runs in a worker as it is, and what crosses to the worker is the
+application's choice).
+
 ## Interrupts: `INTERRUPT_TRACK`, `buildInterrupt`, `parseInterrupt`
 
 The talker's side of a cut ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)): one

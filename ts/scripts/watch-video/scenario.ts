@@ -10,7 +10,12 @@
  * when it is audible, as the player's own clock reports count it.
  */
 import { createBroadcastClock, createPlayoutClock, createRenderClock } from '@caprid/moq-media';
-import { connectRelayPublisher, connectSupervisedSubscriber, type SupervisedSubscriber } from '@caprid/relay';
+import {
+  connectRelayPublisher,
+  connectSupervisedSubscriber,
+  type RelayTransportFactory,
+  type SupervisedSubscriber,
+} from '@caprid/relay';
 import { captureMicrophone, type MicrophoneBlock } from '../../examples/webcodecs/capture-microphone.js';
 import { type AudioListener, listenAudio, whenRunning } from '../../examples/webcodecs/listen-audio.js';
 import { publishCanvas } from '../../examples/webcodecs/publish-canvas.js';
@@ -32,6 +37,8 @@ import { syntheticMicrophone } from '../av-sync/scenario.js';
 export interface ScenarioOptions {
   endpoint: string;
   token: string | undefined;
+  /** Connect through the in-memory relay hub instead of the Relay at `endpoint`. */
+  hub?: { publisher: RelayTransportFactory; subscriber: RelayTransportFactory } | undefined;
   namespace: string[];
   /** Seconds per phase. Default 10. */
   phaseSeconds?: number;
@@ -48,7 +55,6 @@ export interface PhaseResult {
   /** The watcher's counters over the phase. */
   shown: number;
   late: number;
-  overflowed: number;
   discontinuities: number;
   /** The longest pause between two drawn frames, in ms. */
   longestGapMs: number;
@@ -98,9 +104,19 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
   let subscriber: SupervisedSubscriber | undefined;
   try {
     const getToken = () => options.token;
-    const publisher = await connectRelayPublisher({ url: options.endpoint, namespace: options.namespace, getToken });
+    const { hub } = options;
+    const publisher = await connectRelayPublisher({
+      url: options.endpoint,
+      namespace: options.namespace,
+      getToken,
+      ...(hub ? { createTransport: hub.publisher } : {}),
+    });
     closers.push(() => publisher.close());
-    subscriber = await connectSupervisedSubscriber({ url: options.endpoint, getToken });
+    subscriber = await connectSupervisedSubscriber({
+      url: options.endpoint,
+      getToken,
+      ...(hub ? { createTransport: hub.subscriber } : {}),
+    });
 
     // Publish: the test pattern and a synthetic microphone on one broadcast clock.
     const broadcast = createBroadcastClock();
@@ -318,7 +334,6 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
         modes: end.modes,
         shown: next.watcher.shown - mark.watcher.shown,
         late: next.watcher.late - mark.watcher.late,
-        overflowed: next.watcher.overflowed - mark.watcher.overflowed,
         discontinuities: next.watcher.discontinuities - mark.watcher.discontinuities,
         longestGapMs: Math.round(end.longestGapUs / 1000),
         audio: {

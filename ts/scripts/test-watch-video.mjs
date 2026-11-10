@@ -8,18 +8,20 @@ import { startModuleServer } from './module-server.js';
 
 // The live watchVideo test (issue #443): scripts/watch-video/scenario.ts publishes the WebCodecs example's test pattern
 // and a synthetic microphone, and watches them with watchVideo and listenAudio on one clock, in the same page, in
-// headless Chromium, through the Relay (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX). The watcher's AudioContext
-// starts suspended, is resumed, and is then muted. WATCH_VIDEO_PHASE_SECONDS sets each phase's length; WATCH_VIDEO_OUT
-// writes the full result as JSON.
+// headless Chromium, through the Relay (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX), or through the in-memory relay
+// hub inside the page with WATCH_VIDEO_TRANSPORT=hub. The watcher's AudioContext starts suspended, is resumed, and is
+// then muted. WATCH_VIDEO_PHASE_SECONDS sets each phase's length; WATCH_VIDEO_OUT writes the full result as JSON.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? DEFAULT_ENDPOINT;
+const transport = process.env.WATCH_VIDEO_TRANSPORT ?? 'relay';
+assert(['relay', 'hub'].includes(transport), `Unknown WATCH_VIDEO_TRANSPORT: ${transport}`);
+const endpoint = transport === 'hub' ? 'https://hub.invalid/' : (process.env.RELAY_URL ?? DEFAULT_ENDPOINT);
 assert.equal(new URL(endpoint).protocol, 'https:', 'RELAY_URL must be an https URL');
 const token = process.env.RELAY_TOKEN;
-assert(token, 'RELAY_TOKEN is required');
+if (transport === 'relay') assert(token, 'RELAY_TOKEN is required');
 const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('/').filter(Boolean);
 const phaseSeconds = Number(process.env.WATCH_VIDEO_PHASE_SECONDS ?? 10);
-const redact = (value) => String(value).replaceAll(token, '[redacted]');
+const redact = (value) => (token ? String(value).replaceAll(token, '[redacted]') : String(value));
 const report = (value) => console.log(redact(typeof value === 'string' ? value : JSON.stringify(value)));
 
 // The A/V sync test's limits (ITU-R BT.1359, EBU R37): every settled offset within ±45 ms and the mean no more than
@@ -62,6 +64,7 @@ const server = await startModuleServer({
     '/packages/': resolve(root, 'packages'),
     '/examples/': resolve(root, 'examples'),
     '/scripts/': resolve(root, 'scripts'),
+    '/tests/helpers/': resolve(root, 'tests/helpers'),
   },
   importMap: {
     '@caprid/relay': '/sdk/index.js',
@@ -91,10 +94,23 @@ try {
     watchdog = setTimeout(() => reject(new Error(`No result within ${budgetMs / 1000} s`)), budgetMs);
   });
   const evaluation = page.evaluate(
-    async ({ endpoint, token, namespace, phaseSeconds }) => {
+    async ({ transport, endpoint, token, namespace, phaseSeconds }) => {
       const { runWatchVideoScenario } = await import('/scripts/watch-video/scenario.js');
+      let hub;
+      if (transport === 'hub') {
+        const { createRelayHub } = await import('/tests/helpers/relay-hub.js');
+        const created = createRelayHub();
+        hub = { publisher: created.connectPublisher, subscriber: created.connectSubscriber };
+      }
       try {
-        return await runWatchVideoScenario({ endpoint, token, namespace, phaseSeconds, report: window.reportPhase });
+        return await runWatchVideoScenario({
+          endpoint,
+          token,
+          hub,
+          namespace,
+          phaseSeconds,
+          report: window.reportPhase,
+        });
       } catch (error) {
         // Only the message crosses page.evaluate; keep the name, the code and the cause in it.
         const describe = (value) =>
@@ -104,7 +120,7 @@ try {
         throw new Error(describe(error));
       }
     },
-    { endpoint, token, namespace, phaseSeconds },
+    { transport, endpoint, token, namespace, phaseSeconds },
   );
   evaluation.catch(() => {});
   const result = await Promise.race([evaluation, expired]).finally(() => clearTimeout(watchdog));
@@ -112,7 +128,7 @@ try {
   for (const phase of phases) report(phase);
   failed = phases.some((phase) => phase.result === 'FAIL');
   const { phases: _, ...summary } = result;
-  report({ result: failed ? 'FAIL' : 'PASS', ...summary });
+  report({ transport, result: failed ? 'FAIL' : 'PASS', ...summary });
   if (process.env.WATCH_VIDEO_OUT)
     await writeFile(process.env.WATCH_VIDEO_OUT, redact(JSON.stringify(result, null, 2)));
 } catch (error) {

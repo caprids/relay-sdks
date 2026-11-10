@@ -75,7 +75,7 @@ above that line is rebuilt inside the example:
 | Catalog track | Registers a track named `catalog` and re-sends the document on every relay subscription, retrying transient failures while demand remains | Video.js `parse-source.ts`; the demand semantics in `behavior.md` |
 | Group mapping | Opens a video group on each keyframe and appends deltas; sends audio as one group per frame; after any failure or loss of demand, discards deltas until the next keyframe | MSF group mapping; Video.js `track-publisher.ts` |
 | Source URL | Composes `moqt://host/path#msf:<ns>--catalog&c4m=<token>`, escaping every byte outside `[A-Za-z0-9_]` in each namespace field as `.xx` | msf-01 §11.1; Video.js `parse-source.ts` |
-| Relay reality | Carries the avcC in the catalog even though LOC puts it on keyframes, because the relay drops odd-typed object properties | Issue #23, observed against relay 0.14.17 |
+| Relay reality | Carries the avcC in the catalog even though LOC puts it on keyframes, because the relay drops odd-typed object properties | Issue #23, observed against relay 0.14.17, and again on relay.mux.global on 2026-11-09 (Video Config on none of 10 keyframes) |
 
 That is 347 lines in `moq_media.py`, none of it encoder or network code, plus about 250 lines of
 catalog serving and group mapping in `stream.py`, before a single frame is encoded. None of it is
@@ -648,7 +648,8 @@ consistently, the audio path needs a deeper buffer, and the clock cannot add one
 | Target latency | `targetLatencyUs` | `target_latency_us` | 2 × the longest of the last four reported keyframe intervals; 2,000,000 before any | Two GOPs: room to wait for a late group and still decode up to the next keyframe; see [Frame reader](#frame-reader). For a broadcast with no video, pass `AUDIO_ONLY_TARGET_LATENCY_US` (500,000); see [Audio player](#audio-player) |
 | Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
 
-The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
+The clock does not buffer, decode, or render frames. The [video player](#video-player) does that on top of
+it. The clock never changes how much audio is buffered.
 The target it is built for is the broadcast guidance of ITU-R BT.1359 and EBU R37: audio within
 about ±45 ms of video, and not audibly early.
 
@@ -1158,6 +1159,181 @@ and the clock's position never stepped back between 20 ms ticks:
 The steady phases in the same runs: hub 399 frames, buffer 46 [56] ms, delay 101 ms, output
 latency 42 ms; Relay 400 frames, buffer 43 [53] ms, delay 142 ms. The hub's steady phase concealed
 25 ms of frames that came late, which no rate phase did.
+
+### Video player
+
+[Issue #478](https://github.com/muxinc/relay-sdks/issues/478). TypeScript only, in
+`@caprid/moq-media`. `createVideoPlayer({ clock, decoderConfig, render })` decodes one video track
+with WebCodecs and hands each decoded frame to `render` when the broadcast's playout clock says it
+is due. It takes frames in decode order from a frame reader (`onFrame: player.push`). It has no UI
+and no transport. The motivating consumer is a Video.js playback adapter. The application opens the
+connection with the SDK and hands it to Video.js, which keeps the media element API, the UI and the
+choice of rendition. The SDK keeps the protocol, the timing and the decode.
+
+```ts
+const clock = createPlayoutClock();
+const player = createVideoPlayer({
+  clock,
+  decoderConfig: videoDecoderConfigFromTrack(videoTrack),
+  render: canvasRenderer(canvas),
+});
+const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
+```
+
+Share the clock with the broadcast's audio input and with every frame reader's sequencer. Audio
+then drives the video. Without audio, the clock paces it by the wall clock.
+
+The WebCodecs example's `watchVideo` is built on the player. It subscribes to the video track with
+the catalog, holds the frames until the catalog gives the decoder config, and draws with
+`canvasRenderer`. Before the player existed it kept its own decoder, keyframe wait and paced queue.
+
+**Presenting.** Decoded frames wait in a queue in the order the decoder outputs them, which is
+presentation order. The player asks the clock about the earliest, `clock.due(frame.timestamp)`. A
+decoded frame's timestamp is its chunk's, the LOC timestamp on the broadcast timeline. On `show` the
+player hands the frame to `render`. On `drop` it closes the frame. On `wait` it sets one timer and
+asks again when it fires. The timer is at most 50 ms, because the audio input or another track's
+sequencer can move or reset the shared clock meanwhile. The frame reader polls at the same bound
+for the same reason. Waits are rounded up to whole milliseconds. Browsers truncate a timeout to whole
+milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The 0.3 ms wait after that was
+clamped to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up took the wall-paced
+p95 sync error from 3.8–4.0 ms to 1.0 ms on a hub run.
+
+The player also asks the clock each time the decoder outputs a frame, not only when its timer
+fires. A frame that is due or late then leaves the queue as soon as the next frame is decoded, and
+only frames ahead of the clock wait. That matters in a hidden tab. Chromium runs a hidden page's
+timers at most once a second, and once a minute after five minutes without sound (its throttling
+policy, not measured here). A player paced by its timer alone would hold every frame decoded
+meanwhile.
+
+The queue has no bound in frames. The clock bounds it in time: it shows the head within
+`maxVideoDelayUs` (1 s by default), or at once as a re-sync. A hardware decoder whose pool of frames
+is full therefore outputs again as frames are shown. The WebCodecs example's `watchVideo` kept at
+most 16 decoded frames and drew the oldest early past that, for three reasons. The player covers
+each without a frame count:
+
+- Throttled timers let decoded frames pile up. Asking the clock at each decoded frame keeps only
+  the frames ahead of it.
+- A hardware decoder stops outputting while its pool of frames is held. The head is due within
+  `maxVideoDelayUs`, so the decoder resumes. A bound larger than the pool never trips, because the
+  check runs on output and no output comes.
+- Audio may lag video by more than the bound. The bound counts frames, but the wait is time. The
+  audio player's 400 ms jitter ceiling plus its output delay, about 450 ms, is 14 frames at 30 fps
+  and 27 at 60 fps. A bound of 16 would draw 60 fps video about 180 ms early in normal playback. The
+  clock's limit holds at any frame rate.
+
+Before `watchVideo` moved onto the player, its live test drew no frame early past the bound in any
+phase (`overflowed` 0 through the in-memory hub, 2026-11-06). The move changed one number. Over
+four runs of each through the hub (`WATCH_VIDEO_TRANSPORT=hub mise run ts:test:watch-video`), the
+old `watchVideo` drew frames 3.2 to 4.1 ms after the clock said they were due in 10 of 12 samples
+taken at the phase boundaries. Its timers took fractional milliseconds, so the truncation and 4 ms
+clamp above applied. The player drew them 0.1 to 1.0 ms after in all 12. The resumed phase's mean A/V offset moved by about the
+same amount, from 0 to 3.7 ms to 5.5 to 7.1 ms (positive is audio late), well inside the test's
+±45 ms. The player's frames are within 1 ms of the clock, so the rest of that offset lies between
+the clock and the audible audio.
+
+**Borrowed frames.** `render(frame)` borrows the frame. The player closes it when `render` returns,
+and a sink that keeps a frame keeps `frame.clone()`. A hardware decoder has a fixed pool of output
+frames and stops outputting while all of them are held. Headless Chromium 153 has no GPU and decodes
+in software, so a prototype that held 120 output frames unclosed did not stall. All 120 came out in
+66 ms. That run says nothing about a hardware decoder's pool. Closing every frame in one place means a sink cannot stall the
+decoder by forgetting to close one. An exception from `render` goes to `onError`, or to
+`console.error` without one. The player still closes the frame and plays on.
+
+The issue asked whether the output should be a callback that closes the frame or a canvas. It is
+a callback that borrows the frame, so the player stays headless and a Video.js adapter or a WebGL
+renderer passes its own. `canvasRenderer(canvas)` is the quick start. It draws each frame onto an
+`HTMLCanvasElement` or an `OffscreenCanvas` and sizes the canvas to the frame's display size when
+that changes. `videoDecoderConfigFromTrack(track)` reads the decoder config from the catalog: the
+codec, the init data as the description, the width and height as the coded size when both are
+present, and `optimizeForLatency`.
+
+**Decoding.** The decoder needs a keyframe to start from, and a discontinuity says what the frames
+before it are worth:
+
+| When | The player |
+| --- | --- |
+| It starts | Skips frames until a keyframe, which configures a new decoder |
+| `gap` | Flushes the decoder and keeps the frames waiting, which are still on the timeline. The flush outputs what the decoder holds, including frames held for reordering, and the decoder then takes only a keyframe. The sequencer delivers a keyframe after a gap. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
+| `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
+| The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
+| `reset()` | Does now what a `resync` or `restart` does. For a restart the app learns of before the next frame arrives, such as a supervised want's `onRestarted`: on the clock the restart moved, the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
+| A frame marked `key` is not a keyframe | WebCodecs inspects a chunk marked `key` and throws a `DataError` when it is not one, leaving the decoder configured. The player reports it, keeps the decoder, and skips frames until the next keyframe. It does not count as the decoder failing for good |
+| `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
+
+The issue's sketch reset the decoder at every discontinuity. A gap flushes it instead, because the
+frames decoded before the gap are still due on the same timeline. A reset would drop the ones the
+decoder still holds. Keeping the decoder as it is would leave it holding references from before the
+gap. After an open-GOP keyframe, such as an HEVC CRA, the leading pictures would decode against
+them. In headless Chromium 153, `flush()` followed at once by the next keyframe's `decode()` output
+every frame in order with no error (2026-11-09). That the flush also drops the references comes
+from how Chromium's decoders flush, not from a measurement: headless Chromium has no HEVC decoder.
+
+The player relies on these stream conventions. The drafts leave each one open, and the SDK's
+publishers follow them all:
+
+- **A keyframe opens each group.** The frame sequencer marks object 0 of a group as `key`. MOQT-22
+  lets a subgroup start at any Object ID, and MSF-01 §4.1 keeps a GOP within one group without
+  saying the group starts at a keyframe. LOC-04's "Object 0 is the IDR frame" is in an example. A
+  frame marked `key` that is not one is skipped, as above. Reading LOC Video Frame Marking (0x09)
+  where present would let the sequencer mark keyframes from the stream itself.
+- **The LOC timestamp is the presentation time.** LOC-04 §2.3.1.1 says only "the timestamp of the
+  encoded media frame", and there is no decode-time property. The player paces each decoded frame
+  by its timestamp, which is right for B-frames only when publishers stamp presentation time.
+- **The decoder config is the catalog's or `configure()`'s.** The player ignores Video Config
+  (0x0D). It is odd-typed, and relay.mux.global still drops it: in the video player's live test on
+  2026-11-09, none of 10 keyframes arrived with it, against 10 of 10 through the in-memory hub. Neither
+  draft says whether 0x0D or the catalog's init data wins. An adapter that sees a new config calls
+  `configure()`.
+- **Catalog `width` and `height` are a hint.** MSF-01 §5.2.26 makes them the maximum encoded size.
+  `videoDecoderConfigFromTrack` passes them as `codedWidth` and `codedHeight`, which WebCodecs also
+  treats as a hint.
+- **The payload format follows the codec string.** An `avc1` track with init data decodes as
+  length-prefixed NAL units with the avcC as `description`. A track with no init data decodes as
+  Annex B.
+- **Alternates share a timeline.** MSF-01 §4.2 requires altGroup tracks to be time-aligned, but not
+  to share an origin or a timescale. Switching renditions on one player by comparing timestamps
+  relies on the SDK's publishers stamping every rendition on one broadcast clock.
+
+`player.stats` (`VideoPlayerStats`) counts frames `decoded`, `shown` (handed to `render`),
+`dropped` (by the clock), `skipped` (while waiting for a keyframe, or after the decoder failed for
+good), `decoderResets` and `errors`,
+and holds the frames `queued` now and `lastOffsetUs`, the clock's offset for the last frame shown.
+`dropped` and `skipped` call for different fixes. Frames dropped mean video arrives too late for
+the clock. Frames skipped mean frames came before a keyframe, or the decoder cannot decode the track. `player.joinPhases`
+(`VideoPlayerJoinPhases`) holds `createdUs`, `firstPushUs`, `firstDecodedUs` and `firstShownUs`, on
+the clock's local time source.
+
+**Workers.** The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it runs in a
+dedicated worker as it is. A prototype in headless Chromium 153 found `VideoDecoder`,
+`EncodedVideoChunk`, `requestAnimationFrame` and `WebTransport` in a dedicated worker, and drew
+decoded frames onto an `OffscreenCanvas` transferred to it. For video alone, a worker can run the
+connection, the frame reader and the player on a wall-paced clock of its own. `AudioContext` does
+not exist in workers, so the audio-driven playout clock lives on the main thread. A/V sync with the
+player in a worker would need the main thread's audio reports posted across, their times converted
+between the two realms' `performance.now()` through `performance.timeOrigin`. That is not built.
+
+Measured on 2026-11-06 with `mise run ts:test:video-player`. Headless Chromium 153.0.8010.12 publishes
+the WebCodecs example's canvas (320×180 AVC at 30 fps, a keyframe every second) and a synthetic
+microphone through the in-memory hub. Three players play the video back. `wall` has a clock of its
+own and draws onto a canvas element. `audio` shares the audio-only listener's clock. `worker` plays
+the `wall` player's frames in a dedicated module worker onto a transferred `OffscreenCanvas`. The
+window starts once all three show video and audio drives the `audio` player's clock, which in
+headless Chromium was about 2 s after the first video frame. Over 8 s of the broadcast timeline the
+publisher encoded 241 frames:
+
+| Player | Shown | Dropped | Errors | Sync error p50 / p95 / max, ms | First frame shown, ms after creation |
+| --- | --- | --- | --- | --- | --- |
+| `wall` | 241 | 0 | 0 | 0.2 / 0.5 / 0.8 | 26 |
+| `audio` | 241 | 0 | 0 | 0.62 / 8.6 / 10.3 | 27 |
+| `worker` | 241 | 0 | 0 | 0.9 / 1.0 / 1.0 | 11 |
+
+The sync error is the clock's `|offsetUs|` for each frame shown. The `audio` player's is larger
+because each audio report moves the clock a little between the player's timers. Its clock ran on
+audio for every 20 ms sample in the window. Every canvas showed the publisher's two colors within
+one level per channel. The page's decoders output 724 frames and the worker's 362. The players
+closed every one exactly once. This run is after the player began asking the clock at each decoded
+frame.
 
 ## Interrupt track
 

@@ -5,6 +5,21 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a
+  frame reader's frames with WebCodecs and calls `render(frame)` when the playout clock says each is due. Video then
+  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame: the player
+  closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
+  an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
+  the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player
+  reports it once and decodes nothing until `configure()`. `reset()` drops the frames waiting and what the decoder holds
+  at once, as at a restart the app learns of before the next frame. A gap flushes the decoder, so the frames before it
+  still come out, and a frame marked key that the decoder finds is not one is reported and skipped to the next keyframe.
+  The player runs in a dedicated worker as it is. The WebCodecs example's `watchVideo` is built on it. Through the
+  in-memory hub in headless Chromium, players paced by the wall clock, by audio, and in a worker each showed all 241
+  frames published over 8 s (`mise run ts:test:video-player`).
+
 ## 0.4.0
 
 - Voice bot and WebCodecs examples: `listenAudio`, `watchVideo` and `talkToBot` take a supervised subscriber

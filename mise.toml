@@ -79,10 +79,16 @@ dir = "ts"
 run = "pnpm test:audio-player"
 
 [tasks."ts:test:watch-video"]
-description = "Opt-in live test of the WebCodecs example's watchVideo with listenAudio: Chromium through the Relay, audio suspended, resumed and muted (RELAY_TOKEN)"
+description = "Opt-in live test of the WebCodecs example's watchVideo with listenAudio: Chromium through the Relay (RELAY_TOKEN), or an in-memory hub with WATCH_VIDEO_TRANSPORT=hub, audio suspended, resumed and muted"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:watch-video"
+
+[tasks."ts:test:video-player"]
+description = "Opt-in live test of the video player: Chromium plays the WebCodecs example's canvas on a wall-paced clock, on the audio listener's clock, and in a worker, through an in-memory hub, or the Relay with VIDEO_PLAYER_RUNS=relay (RELAY_TOKEN)"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm test:video-player"
 
 [tasks."ts:test:conformance"]
 description = "Run the transport adapter conformance suite in headless Chromium against the Python accepting end"

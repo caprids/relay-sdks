@@ -64,6 +64,23 @@ export function audioDecoderConfigFromTrack(track: MsfCatalogTrack): AudioDecode
   };
 }
 
+/**
+ * The decoder config for a catalog's video track: its codec, its init data as the description (an AVC track's avcC),
+ * and its width and height as the coded size when it declares both. `optimizeForLatency` is set, since a live player
+ * wants each frame as soon as it decodes.
+ */
+export function videoDecoderConfigFromTrack(track: MsfCatalogTrack): VideoDecoderConfig {
+  if (!track.codec) throw new Error(`Track ${track.name} declares no codec`);
+  return {
+    codec: track.codec,
+    ...(track.initData ? { description: track.initData } : {}),
+    ...(track.width !== undefined && track.height !== undefined
+      ? { codedWidth: track.width, codedHeight: track.height }
+      : {}),
+    optimizeForLatency: true,
+  };
+}
+
 /** One encoded frame ready to publish as a LOC object: `write(payload, { properties })`. */
 export interface LocFrame {
   /** Chunk helpers copy these bytes; packet adapters may borrow them. Keep stable until the write completes. */

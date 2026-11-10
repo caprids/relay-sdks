@@ -43,6 +43,7 @@
     "test:av-sync": "pnpm build && node scripts/test-av-sync.mjs",
     "test:audio-player": "pnpm build && node scripts/test-audio-player.mjs",
     "test:watch-video": "pnpm build && node scripts/test-watch-video.mjs",
+    "test:video-player": "pnpm build && node scripts/test-video-player.mjs",
     "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
     "example:voice-bot": "pnpm build && node examples/voice-bot/serve.mjs",
     "example:webcodecs": "pnpm build && node examples/webcodecs/serve.mjs",
