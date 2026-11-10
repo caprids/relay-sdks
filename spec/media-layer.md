@@ -1194,10 +1194,10 @@ decoded frame's timestamp is its chunk's, the LOC timestamp on the broadcast tim
 player hands the frame to `render`. On `drop` it closes the frame. On `wait` it sets one timer and
 asks again when it fires. The timer is at most 50 ms, because the audio input or another track's
 sequencer can move or reset the shared clock meanwhile. The frame reader polls at the same bound
-for the same reason. Waits are rounded up to whole milliseconds. Browsers truncate a timeout to whole
-milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The 0.3 ms wait after that was
-clamped to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up took the wall-paced
-p95 sync error from 3.8–4.0 ms to 1.0 ms on a hub run.
+for the same reason. The player rounds waits up to whole milliseconds. Browsers truncate a timeout to
+whole milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The browser then clamped
+the remaining 0.3 ms wait to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up
+took the wall-paced p95 sync error from 3.8 to 4.0 ms down to 1.0 ms on a hub run.
 
 The player also asks the clock each time the decoder outputs a frame, not only when its timer
 fires. A frame that is due or late then leaves the queue as soon as the next frame is decoded, and
@@ -1206,7 +1206,7 @@ timers at most once a second, and once a minute after five minutes without sound
 policy, not measured here). A player paced by its timer alone would hold every frame decoded
 meanwhile.
 
-The queue has no bound in frames. The clock bounds it in time: it shows the head within
+The queue has no bound in frames. The clock bounds it in time. It shows the head within
 `maxVideoDelayUs` (1 s by default), or at once as a re-sync. A hardware decoder whose pool of frames
 is full therefore outputs again as frames are shown. The WebCodecs example's `watchVideo` kept at
 most 16 decoded frames and drew the oldest early past that, for three reasons. The player covers
@@ -1227,17 +1227,17 @@ phase (`overflowed` 0 through the in-memory hub, 2026-11-06). The move changed o
 four runs of each through the hub (`WATCH_VIDEO_TRANSPORT=hub mise run ts:test:watch-video`), the
 old `watchVideo` drew frames 3.2 to 4.1 ms after the clock said they were due in 10 of 12 samples
 taken at the phase boundaries. Its timers took fractional milliseconds, so the truncation and 4 ms
-clamp above applied. The player drew them 0.1 to 1.0 ms after in all 12. The resumed phase's mean A/V offset moved by about the
-same amount, from 0 to 3.7 ms to 5.5 to 7.1 ms (positive is audio late), well inside the test's
-±45 ms. The player's frames are within 1 ms of the clock, so the rest of that offset lies between
+clamp above applied. The player drew them 0.1 to 1.0 ms after in all 12. The resumed phase's mean
+A/V offset moved by about the same amount, from a range of 0 to 3.7 ms to a range of 5.5 to 7.1 ms
+(positive is audio late), inside the test's ±45 ms. The player's frames are within 1 ms of the clock, so the rest of that offset lies between
 the clock and the audible audio.
 
 **Borrowed frames.** `render(frame)` borrows the frame. The player closes it when `render` returns,
 and a sink that keeps a frame keeps `frame.clone()`. A hardware decoder has a fixed pool of output
 frames and stops outputting while all of them are held. Headless Chromium 153 has no GPU and decodes
 in software, so a prototype that held 120 output frames unclosed did not stall. All 120 came out in
-66 ms. That run says nothing about a hardware decoder's pool. Closing every frame in one place means a sink cannot stall the
-decoder by forgetting to close one. An exception from `render` goes to `onError`, or to
+66 ms. That run says nothing about a hardware decoder's pool. Because the player closes every frame
+in one place, a sink cannot stall the decoder by forgetting to close one. An exception from `render` goes to `onError`, or to
 `console.error` without one. The player still closes the frame and plays on.
 
 The issue asked whether the output should be a callback that closes the frame or a canvas. It is
@@ -1248,8 +1248,8 @@ that changes. `videoDecoderConfigFromTrack(track)` reads the decoder config from
 codec, the init data as the description, the width and height as the coded size when both are
 present, and `optimizeForLatency`.
 
-**Decoding.** The decoder needs a keyframe to start from, and a discontinuity says what the frames
-before it are worth:
+**Decoding.** The decoder needs a keyframe to start from. At each discontinuity the player decides
+what to do with the frames before it:
 
 | When | The player |
 | --- | --- |
@@ -1257,7 +1257,7 @@ before it are worth:
 | `gap` | Flushes the decoder and keeps the frames waiting, which are still on the timeline. The flush outputs what the decoder holds, including frames held for reordering, and the decoder then takes only a keyframe. The sequencer delivers a keyframe after a gap. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
 | `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
 | The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
-| `reset()` | Does now what a `resync` or `restart` does. For a restart the app learns of before the next frame arrives, such as a supervised want's `onRestarted`: on the clock the restart moved, the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
+| `reset()` | Does now what a `resync` or `restart` does. Call it when the app learns of a restart before the next frame arrives, such as from a supervised want's `onRestarted`. The restart has already moved the clock, so the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
 | A frame marked `key` is not a keyframe | WebCodecs inspects a chunk marked `key` and throws a `DataError` when it is not one, leaving the decoder configured. The player reports it, keeps the decoder, and skips frames until the next keyframe. It does not count as the decoder failing for good |
 | `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
 
@@ -1267,7 +1267,7 @@ decoder still holds. Keeping the decoder as it is would leave it holding referen
 gap. After an open-GOP keyframe, such as an HEVC CRA, the leading pictures would decode against
 them. In headless Chromium 153, `flush()` followed at once by the next keyframe's `decode()` output
 every frame in order with no error (2026-11-09). That the flush also drops the references comes
-from how Chromium's decoders flush, not from a measurement: headless Chromium has no HEVC decoder.
+from how Chromium's decoders flush, not from a measurement. Headless Chromium has no HEVC decoder.
 
 The player relies on these stream conventions. The drafts leave each one open, and the SDK's
 publishers follow them all:
@@ -1281,7 +1281,7 @@ publishers follow them all:
   encoded media frame", and there is no decode-time property. The player paces each decoded frame
   by its timestamp, which is right for B-frames only when publishers stamp presentation time.
 - **The decoder config is the catalog's or `configure()`'s.** The player ignores Video Config
-  (0x0D). It is odd-typed, and relay.mux.global still drops it: in the video player's live test on
+  (0x0D). It is odd-typed, and relay.mux.global still drops it. In the video player's live test on
   2026-11-09, none of 10 keyframes arrived with it, against 10 of 10 through the in-memory hub. Neither
   draft says whether 0x0D or the catalog's init data wins. An adapter that sees a new config calls
   `configure()`.
@@ -1332,8 +1332,8 @@ The sync error is the clock's `|offsetUs|` for each frame shown. The `audio` pla
 because each audio report moves the clock a little between the player's timers. Its clock ran on
 audio for every 20 ms sample in the window. Every canvas showed the publisher's two colors within
 one level per channel. The page's decoders output 724 frames and the worker's 362. The players
-closed every one exactly once. This run is after the player began asking the clock at each decoded
-frame.
+closed every one exactly once. The run used the player after it began asking the clock at each
+decoded frame.
 
 ## Interrupt track
 

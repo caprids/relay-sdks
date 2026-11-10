@@ -746,7 +746,7 @@ to read. `dryAtUs` and `heldUntilUs` are timeline timestamps, so they end in `Us
 
 ## Video playout: `createVideoPlayer`
 
-A headless player for one video track: WebCodecs decoding, and each decoded frame handed to a
+A headless player for one video track. It decodes with WebCodecs and hands each decoded frame to a
 render callback when the playout clock says it is due
 ([issue #478](https://github.com/muxinc/relay-sdks/issues/478)). Its design is in
 [media-layer.md](media-layer.md#video-player). TypeScript only, in `@caprid/moq-media`, as the audio
@@ -767,8 +767,8 @@ reader's `onFrame` feeds it.
 | Draw frames onto a canvas | `canvasRenderer(canvas)` (`VideoCanvas`, which an `HTMLCanvasElement` or an `OffscreenCanvas` is) | — |
 | A catalog video track's decoder config | `videoDecoderConfigFromTrack(track)` | — |
 
-"Player", as for audio, because it decodes and presents. A video track has one decoder, so there
-are no inputs. `render`, not `sink` or `onFrame`. `onFrame` is the frame reader's callback for
+It is a "player", as for audio, because it decodes and presents. A video track has one decoder, so
+there are no inputs. The callback is `render`, not `sink` or `onFrame`. `onFrame` is the frame reader's callback for
 encoded frames, and `render` names what the callback does with a decoded one. `shown` and `dropped`
 follow the clock's `show` and `drop` decisions, and `lastOffsetUs` is the `offsetUs` of the last
 `show`. `skipped` is its own counter because it needs a different fix from `dropped`. `configure`

@@ -9,7 +9,7 @@ each section says what changed and what to do about it. How to cut a release is 
 
 - `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a
   frame reader's frames with WebCodecs and calls `render(frame)` when the playout clock says each is due. Video then
-  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame: the player
+  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame. The player
   closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
   an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
   the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player

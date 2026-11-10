@@ -1255,12 +1255,12 @@ subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribePara
 
 `render` borrows the frame. The player closes it when `render` returns, because a hardware decoder stops when all of
 its frames are held. To keep a frame, keep `frame.clone()` and close the clone yourself. An exception from `render`
-goes to `onError`, or to `console.error`. A decoder that fails before its first frame, or with `NotSupportedError`,
-is reported once, and the player decodes nothing more until `player.configure(decoderConfig)`. For a rendition switch,
+goes to `onError`, or to `console.error` when there is no `onError`. The player reports a decoder that fails before
+its first frame, or with `NotSupportedError`, once, and then decodes nothing more until `player.configure(decoderConfig)`. For a rendition switch,
 call `player.configure(decoderConfig)` before the new track's first keyframe arrives. Frames before that keyframe still
 decode with the old config. The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a
-dedicated worker, drawing onto an `OffscreenCanvas` the page transferred to it. Video there follows a clock of the worker's own, since the audio clock
-lives on the main thread. See [spec/media-layer.md](../spec/media-layer.md#video-player) for the rules.
+dedicated worker, drawing onto an `OffscreenCanvas` the page transferred to it. Video there follows a clock of the
+worker's own, since the audio clock lives on the main thread. See [spec/media-layer.md](../spec/media-layer.md#video-player) for the rules.
 
 The [WebCodecs example](examples/webcodecs/README.md#watch-the-video)'s `watchVideo` is a complete player built on it.
 It subscribes to the video track with the catalog, holds the frames until the catalog gives the decoder config, and
