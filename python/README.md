@@ -996,14 +996,16 @@ So the viewer does the dropping:
 - `caprid_relay.media.LatestValueReader` drops any value older than the newest one it has seen, as
   in the example above. Group IDs rise within one subscription and start over when a want restarts
   or moves to a new generation, so the reader starts over there too. Pass its `want_handlers(...)`,
-  with your own callbacks as keyword arguments, and keep the want's `drain` at 0.
+  with your own callbacks as keyword arguments, and keep the want's `drain` at 0. For a plain
+  subscription, pass `subscription_handlers(...)` instead.
 - To know when a value is too old to act on, put the time it was taken in the payload and pass a
   `late` predicate. Comparing that time with the viewer's clock assumes the two machines' clocks
   agree. The reader drops a late value. On the first late value after a value it delivered, it calls
-  `on_catch_up`. Set the limit above the lateness the viewer's link can reach. Below it, the values after a
-  catch-up are late too, and the reader delivers nothing until the link speeds up. There, call the supervised subscriber's `catch_up(key)`. It replaces the
+  `on_catch_up`. There, call the supervised subscriber's `catch_up(key)`. It replaces the
   subscription at the live edge, which drops the relay's backlog, and runs `on_restarted` with reason
-  `"catch-up"`. `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
+  `"catch-up"`. A restart does not re-arm `on_catch_up`: it runs again only after a value is
+  delivered. Set the limit above the lateness the viewer's link can reach. Below it, the values after
+  a catch-up are late too, and the reader delivers nothing until the link speeds up. `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
   `stale_after` does not help here, because a backlog is not silence.
 - Give control and telemetry a subscriber priority ahead of the video on the same connection. The
   relay orders what it sends you by your subscriber priority alone, where a lower number is more
@@ -1014,8 +1016,8 @@ A message that must arrive, such as a command, is not latest-wins. Await a `trac
 `write_json()` for each one. A concurrent write raises `WRITE_PENDING`, so queue commands in your own
 code. A write waits for relay demand and sends once the relay subscribes. `write_timeout` (10 s by
 default) covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the
-command was never delivered. Check its `phase`: only `"waiting-for-demand"` means no bytes went out. Commands can also arrive out of order, so number
-them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
+command was never delivered. Check its `phase`: only `"waiting-for-demand"` means no bytes went
+out. Commands can also arrive out of order, so number them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
 that, have the viewer reply on its own track.
 
 ### Latency and staleness: where each is set
@@ -1057,7 +1059,7 @@ Branch on `code` and `phase`, not on message wording. SDK errors use these stabl
 | `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and the connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | No transport is available in this runtime. In TypeScript, supply a transport where browser WebTransport is missing. In Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed. |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR`. |
 
 Each error also has a `phase`:
 
@@ -1090,7 +1092,7 @@ session with MOQT session termination code `UNAUTHORIZED` (0x2). `MALFORMED_AUTH
 `EXPIRED_AUTH_TOKEN` (0x18) map to it too. It can come in any phase. In phase `connection` it means
 the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)).
 TypeScript reports it too, though in a browser only against moq-relay 0.17.0 or later. Older relays'
-close never reached the page, so a refusal arrived as `TRANSPORT_ERROR` (#14). No other connection
+close never reached the page, so a refusal arrived as `TRANSPORT_ERROR`. No other connection
 failure, and no uncovered namespace, proves that authentication was denied. A subscription outside
 the token's grant is refused per request through `onError` or `on_error` (MOQT `UNAUTHORIZED`, 0x1),
 and the connection stays open.
@@ -1166,7 +1168,7 @@ rate, not the network. On an idle host, a connection receiving 1 MiB objects fro
 `sjc.relay.mux.global` spends about 25 ms of CPU per MB, a ceiling of roughly **40 MB/s** (measured
 2026-09-30, aioquic 1.3). A host whose CPU is contended, or an application that does its own work on
 the same loop, gets much less. The adapter reads every datagram already waiting on the socket before
-it transmits (#162). Most of the remaining cost is aioquic's per-packet receive work.
+it transmits. Most of the remaining cost is aioquic's per-packet receive work.
 
 Media bitrates are far below this ceiling, but bulk data transfers may not be. A subscriber that
 falls behind gets no signal. The relay keeps queueing toward it, and the only symptoms are growing
@@ -1192,7 +1194,8 @@ Follow that example's setup after you finish the data quickstart.
 user's microphone with `moq_media.opus.OpusDecoder`, waits for a pause, answers with `OpusEncoder`,
 and sends an interrupt when the user talks over it. Speech-to-text, a language model, and
 text-to-speech plug in through one async function, and the text of each reply goes on the transcript
-track. Its browser side is `ts/examples/voice-bot`.
+track. The bot publishes through a supervised publisher, so a dropped connection comes back as a new
+generation and the page follows it. Its browser side is `ts/examples/voice-bot`.
 
 ## Package boundaries
 

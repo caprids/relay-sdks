@@ -4,6 +4,12 @@
 (`draft-ietf-moq-msf-01`) catalogs, plus the clocks, frame sequencer, and audio and video players that sit on top of them. It
 depends only on `@caprid/moq-core`. It needs no encoder, transport library, or Relay connection.
 
+```sh
+npm install @caprid/moq-media
+```
+
+The frame writer, frame reader, and catalog service that send and receive these formats are in `@caprid/relay/media`.
+
 ```ts
 import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@caprid/moq-media';
 

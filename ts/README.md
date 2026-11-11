@@ -169,7 +169,8 @@ install matching versions. A release supports:
 ## Documentation
 
 - [TypeScript guide](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md): the quickstart, subscription and publishing lifecycles, async
-  consumption, and publishing and playing media.
+  consumption, supervised connections, publishing media, the audio and video players, and control
+  and telemetry tracks.
 - API reference: run `mise run ts:docs` from a checkout to build it from the source into
   `ts/docs-api/`.
 - [Errors and recovery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#errors-and-recovery): stable `RelayError` codes and phases, and

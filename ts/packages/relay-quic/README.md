@@ -77,9 +77,8 @@ declared lost, and the RTT, congestion window and bytes in flight as they change
 token. A file that cannot be created is skipped, and the dial goes on. `@caprid/relay/node` takes no such option, but
 reads the environment variable, so `RELAY_QUIC_QLOG_DIR=/tmp/qlog node script.mjs` traces a script without changing it.
 
-The feature has a cost in size. The linux-x64-gnu release addon grew from 2,766,896 to 2,912,848 bytes (+145,952 B,
-+5.3%), and gzip -9 of it from 1,306,675 to 1,372,739 bytes (+66,064 B), built locally with Rust 1.97.1 from `main`
-and from this change. The sizes in the table under "Prebuilt binaries" are from before it.
+qlog support costs size: it added 145,952 bytes (5.3%) to the linux-x64-gnu release addon, 66,064 bytes after
+gzip -9, built with Rust 1.97.1. The sizes in the table under "Prebuilt binaries" predate it.
 
 ## Process lifetime
 
