@@ -92,7 +92,7 @@ another relay to put the subscribers there. Namespace fields are relative to the
 path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
-each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
+each other's tracks and discovery.
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
 on `status`, with the second status object delivered after the events track closed.
@@ -136,7 +136,7 @@ another relay to put the subscribers there. Namespace fields are relative to the
 path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
-each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
+each other's tracks and discovery.
 
 The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC
 transport: three objects on `events` and two on `status`, with the second status object delivered

@@ -5,7 +5,7 @@
 | As of | 2026-11-03 |
 | Our code | relay-sdks `main` at `cbca1c1` (2026-11-02). Every relay-sdks `file:line` below is at that commit, from the repository root |
 | NetEQ | as read in [neteq.md](neteq.md), at webrtc `3bdd69e14b22` (2026-11-03); "neteq.md §n" points into it |
-| Evidence | relay-dev's voice benchmark findings register (`moq-netbench/results/voice/FINDINGS.md`, dataset `ds-20261030-120627-c7c45d5c`; findings cited by id), relay-dev `moq-netbench/docs/moq-optimisation.md`, and the Huddle soak calls of 2026-11-03 as reported in relay-sdks [#433](https://github.com/muxinc/relay-sdks/pull/433) |
+| Evidence | relay-dev's voice benchmark findings register (`moq-netbench/results/voice/FINDINGS.md`, dataset `ds-20261030-120627-c7c45d5c`; findings cited by id), relay-dev `moq-netbench/docs/moq-optimisation.md`, and the Huddle soak calls of 2026-11-03 as reported in relay-sdks #433 |
 | Written for | relay-3cnp.504 (Adam, 2026-11-03) |
 
 The player in question is the TypeScript one in `@caprid/moq-media`: `audio-player.ts`,

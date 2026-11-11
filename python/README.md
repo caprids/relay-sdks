@@ -629,7 +629,7 @@ after `rotate()`, and no viewer went more than one frame without a picture. An e
 the request switches at its next scheduled keyframe, up to one keyframe interval later. The move
 also reports `True` from `demand_changes()` while demand carries over. Force a keyframe on it, but
 don't restart the encoder. moq-relay can't give a live connection a new token today, so every
-rotation opens a new connection and generation ([#261](https://github.com/muxinc/relay-sdks/issues/261)).
+rotation opens a new connection and generation.
 
 ### Test recovery by dropping the transport
 
@@ -867,8 +867,7 @@ in call order. When more than `max_backlog` frames wait behind the one being wri
 drops frames instead of queueing them. Under keyframe grouping it drops the waiting frames and the
 group in progress. Under `grouping="frame"` it drops the oldest waiting frame. `max_backlog` defaults
 to 8 under keyframe grouping; under frame grouping there is no default bound, so no frame is dropped
-for the backlog, and memory is unbounded while delivery is blocked
-([#412](https://github.com/muxinc/relay-sdks/issues/412)).
+for the backlog, and memory is unbounded while delivery is blocked.
 `writer.keyframe_needed` and `on_keyframe_needed=` say when the next frame must be a keyframe: after a
 demand change, a failure, a stale frame, or a drop. An encoder can then force one. A frame is any
 object with `payload`, `key`, `properties`, and `discontinuity` attributes, so your own encoded-sample

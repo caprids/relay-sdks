@@ -66,8 +66,7 @@ each section says what changed and what to do about it. How to cut a release is 
   reported `late` as one number adds `behind` to keep the old total.
 - `@caprid/relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
   no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
-  Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8. The memory bound is tracked in
-  [#412](https://github.com/muxinc/relay-sdks/issues/412).
+  Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8.
 - `@caprid/relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
   track (`connectSupervisedSubscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
   - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and

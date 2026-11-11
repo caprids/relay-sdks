@@ -5,7 +5,7 @@ date: 2026-10-01
 
 # The Node transport adapter speaks native QUIC through our own quinn addon
 
-> The package names below predate the rename in [#222](https://github.com/muxinc/relay-sdks/issues/222): `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
+> The package names below predate the rename in #222: `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
 
 The TypeScript SDK needs a transport adapter for runtimes with no usable `WebTransport`, Node above
 all. We decided that `@mux/relay-quic` carries MOQT over native QUIC (ALPN `moqt-20`, path and

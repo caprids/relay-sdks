@@ -53,8 +53,7 @@ export interface FrameWriterOptions<F extends Frame = Frame> {
   stale?: (frame: F) => boolean;
   /**
    * How many frames may wait behind the one being written before the writer drops. A positive integer; default 8
-   * under keyframe grouping; no bound under frame grouping, where memory is then unbounded while delivery is blocked
-   * (see https://github.com/muxinc/relay-sdks/issues/412).
+   * under keyframe grouping; no bound under frame grouping, where memory is then unbounded while delivery is blocked.
    */
   maxBacklog?: number;
   /**

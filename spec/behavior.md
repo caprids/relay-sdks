@@ -91,8 +91,7 @@ against that file.
   connection's closure, and operations still pending fail with it. On moq-relay 0.17.0 the close
   arrives about 80 ms after `exp`. One exception: a TypeScript publisher in Chromium sees the relay
   abort its control stream before WebTransport reports the close code, and reports
-  `TRANSPORT_ERROR` in phase `connection` instead
-  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)). A Chromium subscriber reports
+  `TRANSPORT_ERROR` in phase `connection` instead. A Chromium subscriber reports
   `UNAUTHORIZED`.
 - [Supervised connections](#supervised-connections) replace their connection make-before-break
   before the credential expires. See [rotation](#rotation).
@@ -225,12 +224,10 @@ Messages are not a compatibility contract. The class and the point of rejection 
   so a subscribe reaches only a publisher that announced that longer namespace, and is refused as
   unroutable when there is none. A `..` field is an ordinary field. An endpoint path the token
   does not grant fails the connection with `UNAUTHORIZED`, where on the bare host a namespace
-  outside the grant fails only its own subscribe, and its publish never announces
-  ([issue #119](https://github.com/muxinc/relay-sdks/issues/119)). The token remains the access
+  outside the grant fails only its own subscribe, and its publish never announces. The token remains the access
   boundary: the path confines a connection, not its token, which can dial any path it grants. Measured on `*.relay.mux.global` (moq-relay 0.17.0) on one relay and across
   regions, on 2026-10-05 and again on 2026-10-20 in both SDKs over every transport, which the
-  [live smoke test](#live-smoke-test) now repeats
-  ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)). Namespaces and track names
+  [live smoke test](#live-smoke-test) now repeats. Namespaces and track names
   follow the [Arguments](#arguments) table in both roles: an invalid one is rejected locally,
   before connecting a publisher or sending a subscription.
 - `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` builds the room-rooted endpoint,
@@ -293,8 +290,7 @@ Messages are not a compatibility contract. The class and the point of rejection 
   that ends before acceptance discards its queue, and its ending is what the application observes.
   An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID. A
   relay that acknowledges an update with REQUEST_OK reaches `onUpdateOk` / `on_update_ok`. One that
-  refuses it with REQUEST_ERROR ends the subscription
-  ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+  refuses it with REQUEST_ERROR ends the subscription.
   Implemented in both SDKs. moq-relay, however, never answers a REQUEST_UPDATE: any byte on the
   request stream after SUBSCRIBE_OK ends the subscription with PUBLISH_DONE `TRACK_ENDED`, so
   against it an update ends delivery ([relay interop deviation 4](#relay-interop-deviations)).
@@ -313,8 +309,7 @@ Messages are not a compatibility contract. The class and the point of rejection 
   race by subscribing once its [discovery](#discovery) reports the namespace `announced`, or else
   retries the rejection within its own budget rather than treating it as fatal. A
   [supervised subscriber](#supervised-subscriber)'s want retries it: 16 `unroutable` and the older
-  404 without reporting them, never treating 16 `not found` as the race
-  ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
+  404 without reporting them, never treating 16 `not found` as the race.
 - The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It surfaces
   a reset when the relay forwards it, which may be well after the publisher's abort: moq-relay 0.15.8
   forwarded each one only when the publisher's next group began, about 0.5 s later, or 3 s after a
@@ -375,7 +370,7 @@ and the `error`. Implemented in both SDKs.
 | pending | `cancel(reason)` | rejects with `reason`, or a `CLOSED` Relay error when none was given | resolves `kind: cancelled`, with the reason as `error` | nothing |
 | accepted | objects, subgroup end or reset, state notify, update acknowledged (moq-relay never acknowledges one, see [deviation 4](#relay-interop-deviations)), GOAWAY on the request stream | settled | stays pending | the matching callback |
 | accepted | PUBLISH_DONE | settled | stays pending: publisher completion is not an ending, trailing objects can still arrive | `onPublisherDone` |
-| accepted | REQUEST_ERROR, which is how a relay refuses an `update()` ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)); moq-relay sends none and ends the subscription with PUBLISH_DONE instead ([deviation 4](#relay-interop-deviations)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
+| accepted | REQUEST_ERROR, which is how a relay refuses an `update()`; moq-relay sends none and ends the subscription with PUBLISH_DONE instead ([deviation 4](#relay-interop-deviations)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
 | accepted | connection ends | settled | resolves `kind: terminated`, `cause: connection-closed`, `accepted: true` | nothing on the subscription; the connection's `closed` carries the reason |
 | accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
 | ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
@@ -390,8 +385,7 @@ A REQUEST_ERROR after acceptance is recorded at once.
 
 Python asks the transport whether it has already ended. A browser's WebTransport reports its end
 only through the `closed` promise, and Chromium settles it a task or more after it aborts the
-request stream of a connection lost while that stream opens
-([issue #102](https://github.com/muxinc/relay-sdks/issues/102)). So TypeScript holds a
+request stream of a connection lost while that stream opens. So TypeScript holds a
 pre-acceptance failure the core synthesized from a stream event (FIN before a response, a stream
 reset or a failed stream open, but not the response timeout) until the transport's `closed` settles, and
 records it as a rejection only if the connection is still up 250 ms later. A REQUEST_ERROR message
@@ -404,8 +398,7 @@ it. Awaiting it later still observes the same result.
 ### Room-rooted endpoints
 
 `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` returns the room-rooted endpoint
-for a room, the namespace prefix its path names
-([issue #348](https://github.com/muxinc/relay-sdks/issues/348)). Given only the room,
+for a room, the namespace prefix its path names. Given only the room,
 `roomEndpoint(room)` / `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the
 `relay.defaultEndpoint` pinned in `protocol.json`. It is a pure function: it reads no
 token, opens no connection and changes nothing about `connect*`. The cases live in
@@ -436,7 +429,7 @@ token, opens no connection and changes nothing about `connect*`. The cases live 
 ### Token-rooted endpoint
 
 A connect call given no endpoint (`url` left out in TypeScript, `None` in Python) dials the hosted
-Relay rooted at its token's root ([issue #374](https://github.com/muxinc/relay-sdks/issues/374)).
+Relay rooted at its token's root.
 This holds for `connectRelaySubscriber`, `connectRelayPublisher`, `connectSupervisedSubscriber` and
 `connectSupervisedPublisher`, and their Python spellings. The cases live in
 `vectors/token-rooted-endpoint.json` and run in every SDK's suite.
@@ -567,8 +560,7 @@ new SUBSCRIBE: draft-22 REQUEST_UPDATE names no track, and moq-relay ends a subs
 update. The draft recommends subscribing to the alternate track before cancelling the old one
 ([draft-22 Section 3.7.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.7.2)).
 `subscriber.subscribeSwitchable(options, handlers)` / `subscriber.subscribe_switchable(namespace,
-track, handlers, parameters=...)` does that for the application
-([issue #264](https://github.com/muxinc/relay-sdks/issues/264)). Implemented in both SDKs, on the
+track, handlers, parameters=...)` does that for the application. Implemented in both SDKs, on the
 primitive subscriber. A supervised want moves the same way when it follows a newer generation or
 is wanted again with another track or parameters ([moves](#supervised-subscriber)).
 
@@ -587,7 +579,7 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
   one exception. Its objects, subgroup ends and resets are held (the latest 256), and those that come
   after the accepted object in its own subscription follow it. Those are its later groups, and
   its group's later objects, subgroup ends and resets. Across relays a later group can arrive before the object that cuts
-  over, and the predicate refuses it as too far ahead ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)).
+  over, and the predicate refuses it as too far ahead.
   On the first accepted object:
   1. The old subscription is cancelled.
   2. `onSwitched` / `on_switched` runs with the old track, the new track and the new
@@ -602,8 +594,7 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
   a frame number) with what the active subscription delivered, and accepts an object within a few
   frames of it. The same check refuses a stale first object. The relay starts a subscription at its
   cached latest group, and that group is old if the publisher skipped the track while nobody watched
-  it. A subscriber on another relay can also lose the first object altogether
-  ([issue #243](https://github.com/muxinc/relay-sdks/issues/243)).
+  it. A subscriber on another relay can also lose the first object altogether.
 - **Drain.** Groups arrive out of order across streams, especially through another relay, so an
   older group of the old track can still be in flight at the cutover. `drainMs` / `drain` (default
   0) keeps the old subscription open for that long. It takes 0 up to the bound every SDK deadline
@@ -706,8 +697,7 @@ The iterator owns the request, never the connection.
 The primitives above never reconnect or retry. Applications can opt into a supervision layer
 built only on them: `connectSupervisedPublisher` / `connect_supervised_publisher` and
 `connectSupervisedSubscriber` / `connect_supervised_subscriber`. It owns the recovery policy in
-[publisher recovery](publisher-recovery.md), so live applications don't each write it again
-([issue #260](https://github.com/muxinc/relay-sdks/issues/260)). Neither supervisor changes what
+[publisher recovery](publisher-recovery.md), so live applications don't each write it again. Neither supervisor changes what
 the primitives do. Python gives the backoff bounds and `stale_after` in seconds, and its want
 handlers take the namespace as a second argument.
 
@@ -763,7 +753,7 @@ taken over.
   application writes on demand (a catalog) reaches the new generation. A frame writer on the track
   needs a keyframe on the move. Its open group keeps finishing on the old generation, and the
   keyframe lets the encoder start the new generation's first group at once rather than at its next
-  scheduled keyframe ([#444](https://github.com/muxinc/relay-sdks/issues/444)). When the
+  scheduled keyframe. When the
   overlap runs out, every track moves regardless of demand, and the old generation closes as
   `close()` closes it.
 - **Subscriber.** The replacement is a new connection, and every want **moves** its subscription to
@@ -830,8 +820,7 @@ taken over.
     payload from a later group than the subscription's first resets the backoff. Cached objects
     followed by a done are not progress, and neither is a status object such as the end-of-track
     marker a relay sends one group after the cached last group, so a finished track still
-    announced is replayed no faster than the backoff allows
-    ([issue #21](https://github.com/muxinc/relay-sdks/issues/21)).
+    announced is replayed no faster than the backoff allows.
   - **Woken by the namespace being announced again.** A want on a fixed namespace (not following
     generations) that waits out a backoff watches its namespace with SUBSCRIBE_NAMESPACE on the
     namespace itself, and subscribes at once when the namespace is announced after its latest
@@ -862,7 +851,7 @@ taken over.
   generation is announced, even while the old one is still announced, as a crashed publisher's is
   until the relay's idle timeout. It also moves when the current generation is withdrawn and an
   older one is still announced. With none announced, it waits. No application channel is needed.
-- **Moves are made before the break** ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)),
+- **Moves are made before the break**,
   as on a [switchable subscription](#switching-tracks). A move is a newer generation, or a re-want
   with another track or parameters. Once the current subscription has been accepted, the want opens
   the replacement as **pending** while the current one keeps delivering:
@@ -960,8 +949,7 @@ taken over.
   do not move. New subscribers then go to the remaining one. After a crash, new subscribers may be
   routed to the dead publisher and served its cached last object until the relay's idle timeout.
   moq-relay 0.15.8 instead gave every new subscriber to the newest announcer. Neither SDK can detect
-  which publisher serves a viewer
-  ([issue #37](https://github.com/muxinc/relay-sdks/issues/37)). Keep one publisher per namespace.
+  which publisher serves a viewer. Keep one publisher per namespace.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout, cancellation, transport write failure, or relay subscription change resets the
@@ -1094,8 +1082,7 @@ properties it already passes.
   demand, settling room and the stream. Opening a group with its first object (`payload`, with
   optional `properties`) puts that wait on the object's clock, and its `0x02` property is known
   before the stream opens. The call returns once the transport takes the object, with
-  `objectCount` / `object_count` at 1, or fails like a `write()` and returns no group
-  ([#306](https://github.com/muxinc/relay-sdks/issues/306)). Properties without a payload are a
+  `objectCount` / `object_count` at 1, or fails like a `write()` and returns no group. Properties without a payload are a
   TypeError. The age is checked again
   just before the object is handed over, as Section 5.2 requires. Until the group's value is fixed
   only the publisher's value times the wait. An object already older than the fixed value fails
@@ -1127,8 +1114,7 @@ properties it already passes.
   apply, and a track property is the safer way to set the subgroup timeout. The reverse also holds:
   a publisher that still sends timestamps as `0x06` (the draft-ietf-moq-loc-03 id) now gives each
   group a subgroup timeout equal to its first object's timestamp. Applications must not send a
-  timestamp as `0x06`. LOC Timestamp is `0x10`. Evidence:
-  [issue #167](https://github.com/muxinc/relay-sdks/issues/167).
+  timestamp as `0x06`. LOC Timestamp is `0x10`.
 - **Defaults** belong to the media tier, not the write slot: `registerTrack` sets none, and
   [media publishing](#media-publishing) gives media tracks a subgroup timeout.
 
@@ -1138,8 +1124,7 @@ Implemented in both SDKs.
 
 The TypeScript publisher opens every data stream of a track that declares a Default Publisher
 Priority (`0x0E`) with a send order of `-1 - p`, for the first integer `p` among its track
-properties: from -1 for priority 0 down to -256 for 255
-([#336](https://github.com/muxinc/relay-sdks/issues/336)). A transport adapter takes it as
+properties: from -1 for priority 0 down to -256 for 255. A transport adapter takes it as
 `createUnidirectionalStream({ sendOrder })` ([TA-28](transport-adapter.md#streams)), where a
 higher value goes first and every other stream has 0.
 
@@ -1163,7 +1148,7 @@ higher value goes first and every other stream has 0.
   Python SDK sets none: aioquic has no stream priorities.
 - It orders only what the publisher still holds. A backlog already in the network, in a deep
   bottleneck queue, delays audio and video alike. What the relay sends each viewer is ordered by the
-  viewer's subscriber priority ([#154](https://github.com/muxinc/relay-sdks/issues/154)).
+  viewer's subscriber priority.
 - Measured on 2026-10-20 with `ts/scripts/probe-send-order.mjs`: a Firefox 155 page published
   50 fps audio (160-byte frames, one group per frame) and about 1 Mbit/s of 30 fps video (a 40 kB
   keyframe each second) to sjc through an uplink capped at 800 kbit/s, and a subscriber on a clean
@@ -1228,8 +1213,7 @@ same matrix was identical on production 0.17.0 on 2026-10-05. moq-relay 0.17.5 a
 object properties: the relay stores each object as its size and a timestamp only, so no other
 object property can survive it (a cluster interop run through 0.17.5 also delivered only `0x10`). This
 is fixed upstream in [moq-dev/moq#5494](https://github.com/moq-dev/moq/pull/5494), which keeps
-object properties through the relay, but no release has it yet
-([issue #262](https://github.com/muxinc/relay-sdks/issues/262)).
+object properties through the relay, but no release has it yet.
 
 - Of the object properties, only Timestamp (`0x10`) reaches a subscriber. The relay also reads
   `0x06`, the Timestamp id of draft-ietf-moq-loc-03, as a Timestamp and forwards it as `0x10`.
@@ -1250,17 +1234,15 @@ object properties through the relay, but no release has it yet
 - A track registered with a Default Publisher Priority (`0x0E`) above 255 or a Default Publisher
   Group Order (`0x22`) other than 1 or 2 makes the relay refuse **every** subscribe to it with
   REQUEST_ERROR 18 `invalid value`. The publisher gets no error. Its writes time out waiting for
-  demand. Draft-22 rules both values out (§10.4, §10.5), so the SDKs refuse them at registration
-  ([issue #252](https://github.com/muxinc/relay-sdks/issues/252)).
+  demand. Draft-22 rules both values out (§10.4, §10.5), so the SDKs refuse them at registration.
 - **On 0.17.0**, a track registered with more than 64 track properties makes the relay refuse
   **every** subscribe to it with REQUEST_ERROR 18 `too many` (`MAX_PROPERTIES`, an implementation
   limit), again with no error to the publisher. The relay accepts 64 pairs, or one byte value filling the
   rest of a maximal `SUBSCRIBE_OK`. The SDKs refuse such a track at registration
-  (`relay.limits.maxTrackProperties`, [issue #252](https://github.com/muxinc/relay-sdks/issues/252)).
+  (`relay.limits.maxTrackProperties`).
 - **From 0.17.0**, an object whose property block is larger than 64 KiB (65,536 bytes) is dropped
   by the relay: it stops that stream, and the subscriber sees a gap with no reset, while the
-  publisher's write succeeds. The SDKs refuse such a write (`relay.limits.maxObjectPropertiesBytes`,
-  [issue #247](https://github.com/muxinc/relay-sdks/issues/247); upstream `434ab81f5`, an
+  publisher's write succeeds. The SDKs refuse such a write (`relay.limits.maxObjectPropertiesBytes`; upstream `434ab81f5`, an
   implementation limit rather than a draft one).
 - **On 0.17.0**, a subscription with `INCLUDE_PROPERTIES` = 0 gets an empty track property list in
   `SUBSCRIBE_OK` and objects with no properties at all, Timestamp included
@@ -1280,7 +1262,7 @@ arrive intact in the payload (or a separate metadata track's payload). For the V
 example, codec configuration is also carried in the catalog's `initDataList`, so decoding does not
 depend on Video Config object-property forwarding.
 
-Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/issues/23) and, at
+Evidence and protocol naming: at
 moq-relay 0.15.8, the relay's
 [track property implementation](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/ietf/properties.rs),
 [SUBSCRIBE_OK track properties](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/ietf/publisher.rs#L575-L587)
@@ -1507,7 +1489,7 @@ Implemented in both SDKs.
   joining while one relay subscription lasts triggers no re-send and is served the relay's cached
   copy. Its document is fixed. Not adopted: MSF's
   publish-on-change with a Joining FETCH from the relay cache. A plain SUBSCRIBE against the tested
-  relay is live-edge only ([#26](https://github.com/muxinc/relay-sdks/issues/26)), re-sending is
+  relay is live-edge only, re-sending is
   what the Video.js player relies on, and MSF-01 §6's one-object-per-stream sentence is treated as
   a draft defect because it contradicts LOC-04 §4.2 and MSF-01 §5.
 - A catalog write that fails while the track stays open is retried after a configurable delay
@@ -1530,7 +1512,7 @@ Implemented in both SDKs.
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
   positive integer, default 8 under keyframe grouping). Under frame grouping there is no bound unless
   one is given, so no frame is dropped for the backlog, and memory is then unbounded while delivery is
-  blocked ([#412](https://github.com/muxinc/relay-sdks/issues/412), open). A caller that awaits every
+  blocked (open). A caller that awaits every
   write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
   promise cannot be cancelled) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
   treated as following a discontinuity, and a keyframe is needed.
@@ -1585,17 +1567,16 @@ Implemented in both SDKs.
   reads an object's `0x06` as a Timestamp, and because the relay ignores both sides' values only the
   publisher's own enforcement applies.
   - No object timeout is set. The frame writer opens each group with its first frame, so an object
-    timeout would count the wait for settling room
-    ([#306](https://github.com/muxinc/relay-sdks/issues/306)), but once the group's stream is open
+    timeout would count the wait for settling room, but once the group's stream is open
     Chromium's WebTransport takes each object at once even during a stall (every write resolved in
-    under 1 ms through a 2 s blackout; [#309](https://github.com/muxinc/relay-sdks/issues/309)).
-    Whether the defaults should add one is [#310](https://github.com/muxinc/relay-sdks/issues/310).
+    under 1 ms through a 2 s blackout).
+    Whether the defaults should add one is undecided.
   - Audio's value is measured, not derived from the target latency, which would let a whole stall's
     audio through late. Through a 2 s uplink blackout to sjc, with the subscriber on a clean path,
     it brought the player's audio lag after the stall from 2.44 s to 0.43 s (0.27 s before it),
     and under a 4 s 80 kbit/s uplink cap from 4.6 s to 1.6–1.7 s. Without it, audio's 50 groups a
     second fill the 64-group settling limit during a stall, so both tracks' groups wait up to about
-    1 s to open ([#302](https://github.com/muxinc/relay-sdks/issues/302)).
+    1 s to open.
     The timer starts when a frame's FIN is handed over, so the audio from a stall's last 500 ms
     survives and arrives late: after an uplink stall the player's lag can rise by up to about the
     audio timeout. With the WebCodecs example's defaults, three 2 s uplink blackouts raised it by
@@ -1618,7 +1599,7 @@ Implemented in both SDKs.
   - On moq-relay 0.17 the default changes no delivery from the relay. The relay passes a publisher's `0x0E` to
     viewers in SUBSCRIBE_OK, but orders what it sends a viewer by subscriber priority alone and
     ignores the publisher's when subscriber priorities tie
-    ([#154](https://github.com/muxinc/relay-sdks/issues/154), [relay interop](relay-interop.md#subscription-parameters)).
+    ([relay interop](relay-interop.md#subscription-parameters)).
     A viewer that wants audio first under congestion asks for it with its own SUBSCRIBER_PRIORITY,
     which `mediaSubscribeParameters` / `media_subscribe_parameters` gives it with the same values
     ([media subscribing](#media-subscribing)).
@@ -1648,7 +1629,7 @@ Implemented in both SDKs.
 ## Media subscribing
 
 A track's objects arrive in any order across group streams: after a stall, an older group's stream
-can finish after newer groups have started ([issue #303](https://github.com/muxinc/relay-sdks/issues/303)).
+can finish after newer groups have started.
 The raw subscription delivers them as they arrive. A frame sequencer (`createFrameSequencer` /
 `FrameSequencer`, in the format packages) turns one track's objects into frames in decode order and
 drops what is too late against the broadcast's playout clock. A frame reader (`createFrameReader` /
@@ -1657,7 +1638,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
 
 - A viewer subscribes to a media track with the parameters from
   `mediaSubscribeParameters(kind, overrides)` / `media_subscribe_parameters(kind, overrides)`, in
-  `@caprid/relay/media` and `caprid_relay.media` ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
+  `@caprid/relay/media` and `caprid_relay.media`.
   They hold a SUBSCRIBER_PRIORITY that puts audio ahead of video, lower being more urgent: 16 for
   audio and 96 for video, the same values as the [publisher priorities](#media-publishing), pinned
   in `spec/protocol.json` as `mediaSubscribeParameters.subscriberPriority`. The overrides are copied
@@ -1666,7 +1647,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   like the media track timing [arguments](#arguments).
   - This is the priority that decides delivery on moq-relay 0.17. The relay orders what it sends a
     viewer by subscriber priority alone and ignores the publisher's `0x0E` even when subscriber
-    priorities tie ([#154](https://github.com/muxinc/relay-sdks/issues/154): 2.1 s against 26.9 s
+    priorities tie (2.1 s against 26.9 s
     of lag with different subscriber priorities on a congested link, no difference with publisher
     priorities alone; [relay interop](relay-interop.md#subscription-parameters)). Without it, a
     viewer whose downlink is congested gets no audio preference, whatever the publisher declared.
@@ -1690,8 +1671,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
     every mode, so a group header does not show what the viewer asked for. A track without `0x0E`
     gets 128 in its headers, and delivery still follows SUBSCRIBER_PRIORITY: the same runs without
     `mediaTrackProperties` gave the same latencies, and inverted audio starved again
-    ([#344](https://github.com/muxinc/relay-sdks/issues/344),
-    [relay interop](relay-interop.md#group-stream-priority-in-source)).
+    ([relay interop](relay-interop.md#group-stream-priority-in-source)).
   - It has to be chosen before SUBSCRIBE: on that relay any `update()` ends the subscription
     ([deviation 4](#relay-interop-deviations)), so a viewer that wants another priority switches or
     subscribes again. SUBSCRIBE_OK carries the publisher's `0x0E` only after the choice is made.
@@ -1832,8 +1812,7 @@ newer value makes every older one useless. The relay does not drop the older one
 (moq-relay 0.17, [measured on 2026-11-04](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)),
 and group streams can arrive out of order, so the viewer drops them. A latest-value reader
 (`createLatestValueReader` / `LatestValueReader`, in `@caprid/relay/media` and `caprid_relay.media`)
-is a subscription's or a want's handlers that deliver only values newer than the last one judged
-([issue #447](https://github.com/muxinc/relay-sdks/issues/447)). It is the viewer's counterpart of the
+is a subscription's or a want's handlers that deliver only values newer than the last one judged. It is the viewer's counterpart of the
 [document service](#media-publishing) and knows no format.
 
 - An object is judged when its location (group ID, then object ID) comes after every location
@@ -2094,8 +2073,7 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    is not an alternative: moq-relay 0.17.0 refuses a SUBSCRIBE with `FORWARD` = 0 with request
    error 3 (`NOT_SUPPORTED`) `FORWARD=0 not supported` and keeps the session open, where 0.15.8
    closed the session. The SDK sends the
-   update anyway and does not warn, as decided in
-   [issue #94](https://github.com/muxinc/relay-sdks/issues/94). REQUEST_UPDATE support would be an
+   update anyway and does not warn. REQUEST_UPDATE support would be an
    upstream relay feature.
 
 Both cores pin the second choice for each role: after an orderly close, the control stream of a

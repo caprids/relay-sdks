@@ -365,7 +365,7 @@ The protocol allows updates only after acceptance. The SDK queues an update issu
 `onSubscribed`, in order, and sends it as soon as the relay accepts. At most eight can wait, and a
 further one throws a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended subscription
 throws `CLOSED`. A relay that refuses an update with REQUEST_ERROR reaches `onError`, which ends the
-subscription ([#94](https://github.com/muxinc/relay-sdks/issues/94)).
+subscription.
 
 Re-subscribing after `onPublisherDone` creates a new request, and it cannot bring back a finished
 track. Once the publisher has gone, the relay answers request error 16 `unroutable`. While its
@@ -457,7 +457,7 @@ await switchable.switchTo('video-hi', {
   does not inherit parameters.
 - `until` defaults to `'first-object'`. That works where delivery is in order, but it can skip media.
   The relay starts a subscription at its cached latest group, which can be stale, and a subscriber on
-  another relay can lose the first object ([#243](https://github.com/muxinc/relay-sdks/issues/243)).
+  another relay can lose the first object.
   Compare your own timeline, not group IDs, because each track numbers its own groups.
 - If the new subscription fails, a newer `switchTo` supersedes it, or the signal aborts, `switchTo`
   rejects and the old track keeps playing. `ended` settles when the active subscription ends.
@@ -489,7 +489,7 @@ On a network that blocks UDP, none of this applies because nothing connects. See
 A browser publisher that must survive outages longer than about 5 s, or heavy burst loss, has to
 open a new connection and register its tracks again
 ([publisher recovery](../spec/publisher-recovery.md)). The new connection does not take over
-subscriptions from the old one ([#34](https://github.com/muxinc/relay-sdks/issues/34)). A plain
+subscriptions from the old one. A plain
 connection does not reconnect for you, but the
 [supervised connections](#stay-connected-supervised-connections) do.
 
@@ -720,8 +720,7 @@ went more than one frame interval without a picture, and video switched 46 to 20
 keyframe interval later. An encoder that makes keyframes only on request and ignores it switches
 only when the 10 s overlap runs out. The move also reports `true` from `demandChanges()` while
 demand carries over. Force a keyframe on it, but don't restart the encoder. moq-relay can't give a
-live connection a new token today, so every rotation opens a new connection and generation
-([#261](https://github.com/muxinc/relay-sdks/issues/261)).
+live connection a new token today, so every rotation opens a new connection and generation.
 
 ### Test recovery by dropping the transport
 
@@ -824,8 +823,7 @@ with the core's own encoder, so an oversized property never opens a stream. The 
 timescale, timestamp, or LOC media packaging. An object's payload is limited to 16 MiB.
 
 The SDK encodes properties as supplied, but subscribers see the relay's output. moq-relay 0.17.5 and
-earlier strip object properties (fixed upstream in moq #5494, not yet released,
-[#262](https://github.com/muxinc/relay-sdks/issues/262)). Only the object Timestamp (`0x10`, or the
+earlier strip object properties (fixed upstream in moq #5494, not yet released). Only the object Timestamp (`0x10`, or the
 older `0x06`) survives, rescaled to microseconds by the declared Timescale (`0x08`). The relay drops
 every other object property, Video Config included. Tracks without a declared Timescale, and objects
 without a Timestamp, get relay-clock timestamps. Declaring
@@ -834,7 +832,7 @@ without a Timestamp, get relay-clock timestamps. Declaring
 Every `SUBSCRIBE_OK` carries the relay's track properties, not the publisher's: `0x08` = 1,000,000,
 `0x0E` = 128 unless the publisher set it, and `0x22` = 2. The relay would refuse every subscriber to a
 track whose `0x0E` or `0x22` is out of range, or that has more than 64 track properties. That is why
-`registerTrack()` refuses those ([#252](https://github.com/muxinc/relay-sdks/issues/252)). A
+`registerTrack()` refuses those. A
 subscription with `parameters: { includeProperties: 0 }` gets no track properties, and objects with
 no properties at all, not even a Timestamp. Keep application metadata that must arrive intact in
 payloads, and read the received track timescale when you interpret timestamps. See
@@ -966,8 +964,7 @@ and with `CLOSED` after your own `close()`. You may call it from a
 WebCodecs output callback without awaiting it. The writer serves frames in call order. When more
 than `maxBacklog` frames wait behind the one being written, it drops frames rather than queueing
 them. `maxBacklog` defaults to 8 under keyframe grouping; under frame grouping there is no default
-bound, so no frame is dropped for the backlog, and memory is unbounded while delivery is blocked
-([#412](https://github.com/muxinc/relay-sdks/issues/412)). `writer.keyframeNeeded` and
+bound, so no frame is dropped for the backlog, and memory is unbounded while delivery is blocked. `writer.keyframeNeeded` and
 `onKeyframeNeeded` say when the next frame must be a keyframe, so an encoder can force one. That happens after a demand change, a failure, a stale frame, or a drop.
 `@caprid/moq-media`'s `LocFrame` is a frame in the shape the writer takes.
 
