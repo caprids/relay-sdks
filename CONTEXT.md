@@ -1,6 +1,6 @@
 # Relay SDKs
 
-The Relay SDKs (TypeScript `@caprid/relay`, Python `caprid_relay`) publish to and subscribe from the Mux
+The Relay SDKs (TypeScript `@caprid/relay`, Python `caprid_relay`) publish to and subscribe from the Caprid
 MoQ Relay under one shared behaviour contract. Public names live in
 [spec/vocabulary.md](spec/vocabulary.md) and are not repeated here. This glossary holds the
 internal, relay-side and test vocabulary that the code, its tests and its reviews use.

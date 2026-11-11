@@ -1,6 +1,6 @@
 # Relay SDKs
 
-Client SDKs for Relay, Mux's Media over QUIC (MoQ) relay service, in every language we support.
+Client SDKs for Relay, Caprid's Media over QUIC (MoQ) relay service, in every language we support.
 Each SDK connects to a Relay endpoint, subscribes to tracks, and publishes data, with the same
 protocol pin and the same observable behavior. The SDKs share no code. They share a specification.
 
@@ -10,8 +10,8 @@ can break the API.
 | Directory | Contents | Status |
 | --- | --- | --- |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
-| `ts/` | TypeScript SDK `@caprid/relay`, the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, the optional `@caprid/moq-mediabunny` file-input adapter, and the `@caprid/relay-quic` and `@caprid/relay-websocket` transport adapters, as a pnpm workspace | Working. Live-tested against Mux's relays |
-| `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Live-tested against Mux's relays. What it does not have yet is marked "TypeScript only" in [spec/vocabulary.md](spec/vocabulary.md) |
+| `ts/` | TypeScript SDK `@caprid/relay`, the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, the optional `@caprid/moq-mediabunny` file-input adapter, and the `@caprid/relay-quic` and `@caprid/relay-websocket` transport adapters, as a pnpm workspace | Working. Live-tested against Caprid's relays |
+| `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Live-tested against Caprid's relays. What it does not have yet is marked "TypeScript only" in [spec/vocabulary.md](spec/vocabulary.md) |
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (Node; browsers use WebTransport) or

@@ -47,7 +47,7 @@ it, and the relay verifies the token. Name namespaces relative to the root: `["p
 not a JWT, or has no `root` claim, raises `TypeError` before anything connects and tells you to pass
 `url` ([token-rooted endpoint](../spec/behavior.md#token-rooted-endpoint)).
 
-The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
+The Caprid relays carry announcements between regions, so a publisher and a subscriber can each use
 their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
 Pass `url` to choose the endpoint yourself: a nearby region, a room below the token's root, or
 another deployment. A path the token does not grant fails at connect with `UNAUTHORIZED`. A client
