@@ -1,7 +1,7 @@
 # caprid-relay
 
 The Relay Python SDK. `connect_relay_subscriber` subscribes to track objects and
-`connect_relay_publisher` publishes them, through Relay, Mux's Media over QUIC (MoQ) relay service.
+`connect_relay_publisher` publishes them, through Relay, Caprid's Media over QUIC (MoQ) relay service.
 Payloads are bytes the SDK does not interpret. You need no browser, player, or media catalog.
 
 ## Requirements

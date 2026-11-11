@@ -5,7 +5,7 @@ Both SDKs offer `moqt-22`, then `moqt-20`, and speak whichever the relay selects
 Their `LARGEST_OBJECT` message parameter is two bare
 varints (Group, Object), matching draft-22 §9.20 and moq-relay from **0.14.17** through
 **0.17.0** (`SubscribeOk` in `rs/moq-net/src/ietf/subscribe.rs` at tag `moq-relay-v0.17.0`).
-Production moved to 0.17.0 on 2026-10-05. As of 2026-10-28, every Mux relay is in the OCI fleet
+Production moved to 0.17.0 on 2026-10-05. As of 2026-10-28, every Caprid relay is in the OCI fleet
 (`phx`, `ord`, `iad`, and `fra`), which runs 0.17.7. The Fly relays, `sjc` among them, retired on
 2026-10-23.
 [Upstream fix](https://github.com/moq-dev/moq/pull/3561).
@@ -36,7 +36,7 @@ LOCATION_FILTER the draft-20 way on every draft from 20 on (`Filter::is_draft20`
 `Param for Filter` in `rs/moq-net/src/ietf/filter.rs` at tag `moq-relay-v0.17.0`). moq-relay
 0.17.3 fixed this: it frames the filter by the draft-22 rules on `moqt-22`
 ([moq-dev/moq#5080](https://github.com/moq-dev/moq/pull/5080), for
-[moq-dev/moq#4847](https://github.com/moq-dev/moq/issues/4847)). Every Mux relay runs 0.17.7
+[moq-dev/moq#4847](https://github.com/moq-dev/moq/issues/4847)). Every Caprid relay runs 0.17.7
 and has the fix. The Fly r1 fleet ran 0.17.0 without it until it retired on 2026-10-23
 ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)). On 0.17.0 the two spellings are
 the same bytes when the field count equals the type and every field is under 128
@@ -54,7 +54,7 @@ delivered on `moqt-22`; Next Object closed the session as above. The relay's own
 to an SDK publisher carries `21 02 00 00` (Next Object, in the draft-20 framing) and a fill of
 `21 01 01`, which read under draft-22 as an absolute start at `{0,0}` and a relative start of 1. No
 SDK publisher acts on a subscription's filter, so that changes nothing. On `moqt-20` every shape
-works, Next Object included. Every Mux relay now runs 0.17.3 or later. Against an older
+works, Next Object included. Every Caprid relay now runs 0.17.3 or later. Against an older
 relay, a live-edge subscriber uses a relative start of 0 (the next group) rather than Next Object, as the live smoke tests do, or leaves
 the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
 

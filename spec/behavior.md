@@ -72,7 +72,7 @@ against that file.
 
 - A session lasts until its credential expires, and no longer. moq-relay ends a session at its
   grant's deadline: the JWT's `exp` with the reference auth server (`moq auth serve`), and no
-  later with Mux's. A live session cannot take a new token: the relay ignores
+  later with Caprid's. A live session cannot take a new token: the relay ignores
   AUTHORIZATION_TOKEN on later requests, and revalidation re-checks the credential the session
   connected with ([token expiry](relay-interop.md#token-expiry)). Plan to replace a connection
   before its credential expires.
@@ -252,7 +252,7 @@ Messages are not a compatibility contract. The class and the point of rejection 
   upstream subscriptions
   ([draft-22 Section 3.3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.3.1)).
   Whether that reaches back into what a relay cached before the subscription is the relay's
-  choice. The Mux relay (moq-relay 0.17.0) starts it at the beginning of its latest group, and
+  choice. The Caprid relay (moq-relay 0.17.0) starts it at the beginning of its latest group, and
   starts a Next Object filter after its largest object, skipping the rest of that group
   ([late subscribers](relay-interop.md#late-subscribers-and-location-filters)). A subscriber that
   needs earlier groups asks for them with a relative-group or absolute filter. An absolute start is

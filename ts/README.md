@@ -1,7 +1,7 @@
 # @caprid/relay
 
 The Relay TypeScript SDK. `connectRelaySubscriber` subscribes to track objects and
-`connectRelayPublisher` publishes them, through Relay, Mux's Media over QUIC (MoQ) relay service.
+`connectRelayPublisher` publishes them, through Relay, Caprid's Media over QUIC (MoQ) relay service.
 The SDK does not interpret payloads, so you need no player, media catalog, or Video.js.
 
 ## Requirements
@@ -74,7 +74,7 @@ across connections and publisher restarts ([stay connected](https://github.com/c
 
 `@caprid/relay/node` exports everything `@caprid/relay` does. Its `connectRelayPublisher`,
 `connectRelaySubscriber`, and both `connectSupervised*` functions connect over native QUIC through
-[`@caprid/relay-quic`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-quic/README.md), Mux's transport adapter for Node. Native QUIC
+[`@caprid/relay-quic`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-quic/README.md), Caprid's transport adapter for Node. Native QUIC
 means MOQT directly on QUIC, with ALPN `moqt-22` and a fallback to `moqt-20`. Pass the same
 `https://` endpoint you pass in a browser.
 
