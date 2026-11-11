@@ -1814,7 +1814,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
 - Playback is TypeScript only, in `@caprid/moq-media`: the headless audio player
   (`createAudioPlayer`, with `warmAudioPlayer` and `createFrameHold` for joining sooner) and video
   player (`createVideoPlayer`, with `canvasRenderer`) take frames from a frame reader, decode them
-  with WebCodecs and present them on the broadcast's playout clock. Their contract is in
+  (Opus with bundled WebAssembly libopus by default, otherwise WebCodecs) and present them on the broadcast's playout clock. Their contract is in
   media-layer.md, [Audio player](media-layer.md#audio-player) and
   [Video player](media-layer.md#video-player).
   Python has no player.

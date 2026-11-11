@@ -143,8 +143,8 @@ application composes the pieces: it registers each media track with `locTrackPro
 catalog changes. No one call does all of this ([Not built](#not-built)).
 
 `mediaTrackProperties` / `media_track_properties` gives a media track its default subgroup delivery
-timeout (audio 500 ms; video the target latency less the keyframe interval, so one interval by
-default) and Default Publisher Priority (audio 16, video 96). A viewer subscribes with
+timeout (audio 500 ms; video the target latency less the keyframe interval, but never less than one
+interval, so one interval by default) and Default Publisher Priority (audio 16, video 96). A viewer subscribes with
 `mediaSubscribeParameters` / `media_subscribe_parameters` for the matching SUBSCRIBER_PRIORITY,
 the only priority moq-relay 0.17 orders delivery by.
 
@@ -157,7 +157,8 @@ The catalog service is the loop the example's `serve_catalog()` ran on 2026-09-1
 - Its document is fixed. A catalog that changes is served by the document service instead (see
   [Keeping the catalog current](#keeping-the-catalog-current)), whose `update()` sends the new
   document as a new group at once while the relay is subscribed, and on the next subscription
-  otherwise. It sends every update, including one with the same bytes as the last.
+  otherwise. It sends the latest document, not every update: updates made while a write is in flight
+replace one another, and only the last goes out. It never skips one with the same bytes as the last.
 - A transient write failure is retried after a pause (default 1 s) while demand remains, keeping
   only the latest document. A track that ends ends the service.
 - The application registers a track before listing it in a catalog. Removing a track from the
@@ -200,8 +201,9 @@ A viewer that joins mid-GOP needs no replay from the publisher. A plain SUBSCRIB
 starts at the beginning of the relay's latest group, so a viewer joining while the relay is
 subscribed gets the group from its keyframe out of the relay's cache
 ([relay interop](relay-interop.md#late-subscribers-and-location-filters)). Only a new relay
-subscription reaches the publisher. The writer then skips deltas until the next keyframe and raises
-`onKeyframeNeeded`. It does not replay the open group.
+subscription reaches the publisher. The writer then skips deltas until the next keyframe. It raises
+`onKeyframeNeeded` unless a keyframe is already due, as before the first one, or already covers the
+new demand ([behavior.md](behavior.md#media-publishing)), so an encoder must also start on a keyframe. It does not replay the open group.
 
 ### Reading side
 
@@ -287,8 +289,8 @@ A publisher's encoder configuration can change mid-broadcast: a camera switch, a
 window, a codec fallback from H.264 to VP8. Each change is a new catalog. Serve the catalog with
 `createDocumentService` / `DocumentService` instead of the fixed catalog service, and `update()` it
 with the rebuilt bytes when the configuration changes. The new document goes out as a new group at
-once while the relay is subscribed. The service sends every update, so skip one whose bytes have
-not changed. Register a new track before the catalog that lists it. A track removed from the
+once while the relay is subscribed. The service does not compare bytes, so skip an update whose
+bytes have not changed. Register a new track before the catalog that lists it. A track removed from the
 catalog keeps its name on the connection.
 
 msf-01 §5.3 fixes a track's attributes to its namespace and name: "To modify any attribute, a new
