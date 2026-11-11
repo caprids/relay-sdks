@@ -104,14 +104,12 @@ When there is not enough bandwidth for everything, audio should go first.
 - **Viewer downlink.** The relay orders what it sends each viewer by that viewer's subscriber
   priority. `mediaSubscribeParameters('audio' | 'video')` sets 16 for audio and 96 for video. In a
   live test on a capped downlink, audio's p99 latency fell from 255 ms to 74 ms
-  ([#337](https://github.com/muxinc/relay-sdks/issues/337),
-  [subscribing to media](../ts/GUIDE.md#subscribing-to-media)).
+  ([subscribing to media](../ts/GUIDE.md#subscribing-to-media)).
 - **Publisher uplink.** `mediaTrackProperties` gives tracks the same publisher priorities, and the
   TypeScript publisher turns them into stream send order. Firefox 155 and later, Node
   (`@caprid/relay-quic`), and the WebSocket transport follow it. Chromium's WebTransport and the
   Python SDK do not yet ([send order](../spec/behavior.md#send-order)). In Firefox at 800 kbit/s,
-  audio p99 latency was 108 ms with send order and 264 to 302 ms without it
-  ([#336](https://github.com/muxinc/relay-sdks/issues/336)).
+  audio p99 latency was 108 ms with send order and 264 to 302 ms without it.
 - Priority decides only what goes out next. It does not reorder data already in the network.
 
 ## Forward error correction

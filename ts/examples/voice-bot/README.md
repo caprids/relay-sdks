@@ -52,8 +52,7 @@ await talkToBot(publisher, subscriber, {
   such as a catalog with no audio track, goes to `onError` and is tried again a second later.
 - One window remains, inside the supervised subscriber: when the relay ends namespace discovery or
   the subscriber reconnects while a crashed generation is still announced, the want can play that
-  older generation until the newer one's announcement arrives
-  ([#482](https://github.com/muxinc/relay-sdks/issues/482)).
+  older generation until the newer one's announcement arrives.
 
 ## Run it
 

@@ -178,8 +178,7 @@ class FrameWriter(Generic[F]):
     :meth:`write` may be called again before the previous call returned, from any task: calls are
     served one at a time in call order, and the frames waiting meanwhile are the writer's backlog,
     at most ``max_backlog`` of them (default 8 under keyframe grouping; no bound under frame
-    grouping, where memory is then unbounded while delivery is blocked, see
-    https://github.com/muxinc/relay-sdks/issues/412). A frame arriving at a full backlog means the
+    grouping, where memory is then unbounded while delivery is blocked). A frame arriving at a full backlog means the
     transport fell behind, and frames are ``dropped`` rather than queued: under keyframe grouping
     the backlog and the open group (with the frame being written into it) go, and deltas are dropped
     until the next keyframe; under frame grouping, when ``max_backlog`` is set, the oldest waiting
