@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "notes": [
+    "Read by hermoq's merge-policy check from main, never from the pull request (relay-dev: hermoq/sprite-gateway/policy.mjs has the full rule).",
+    "Advisory in this repo: merge-policy posts in shadow mode, neutral unless it would merge, and never blocks. A person merges.",
+    "No quick_checks: every workflow here runs only for the paths it covers (ts.yml, python.yml, relay-quic-binaries.yml, the release dry runs), so none reports on every pull request, and one named here would hold every other pull request at Not yet. A failed run still shows on its pull request.",
+    "spec/ is the contract every SDK implements (protocol pins, the behavior contract, the public vocabulary, the vectors), so it is high risk.",
+    "Always high risk regardless of this file: anything under .github/, dependency and build files (package.json, pnpm-lock.yaml, pyproject.toml, uv.lock, mise.toml), large changes. Shrinking or deleted tests are medium risk."
+  ],
+  "review_checks": [
+    "Cursor Bugbot"
+  ],
+  "high_risk": [
+    "spec/**"
+  ]
+}
