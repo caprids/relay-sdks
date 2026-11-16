@@ -52,11 +52,11 @@ without a row here is a bug.
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
 | The default transport factory, to wrap: the runtime's WebTransport, `framing: 'webtransport'`, `TRANSPORT_UNAVAILABLE` where there is none or it cannot negotiate protocols | `webTransport()` returns `RelayTransportFactory` | `caprid_relay.quic.connect_quic` is the default and is already public; the Python SDK dials no WebTransport |
-| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
+| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` (`NativeQuicTransportOptions`: `ca`, `serverCertificateHashes`, each hash a `CertificateHash`) returns `NativeQuicTransportFactory`; each call returns `NativeQuicConnection` (`transport`, a `NativeQuicMoqtTransport` with the selected `protocol`; `ready`; `framing: 'native-quic'`) | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
 | How many unidirectional streams the relay may keep open to a native QUIC connection at once (the MAX_STREAMS credit granted) | `nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams })` from `@caprid/relay-quic`: 1000 by default, an integer from 1 to 65535 | not applicable: aioquic raises the limit itself as streams are used (128, doubled whenever more than half is used) |
 | Write a qlog trace per native QUIC connection | `nativeQuicTransport({ qlogDir })` from `@caprid/relay-quic`, or `RELAY_QUIC_QLOG_DIR` | not yet (TypeScript only) |
-| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
-| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`) | not applicable |
+| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` returns `WebSocketTransportFactory`; each call returns `WebSocketConnection` (`transport`, a `WebSocketMoqtTransport` with the selected `protocol`; `ready`; `framing: 'websocket'`) | not applicable: the Python SDK ships no WebSocket adapter (#321) |
+| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`); returns `FallbackTransportFactory`, each call returning `FallbackConnection` (`transport`, a `FallbackTransport`; `ready`; `framing`, a `FallbackCarrier`: `'webtransport'` until WebSocket wins) | not applicable |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options, buffer?)` (`buffer`: `SubscriptionEventOptions`) returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
@@ -487,7 +487,7 @@ factories, it could not take options later). Python needs no counterpart:
   callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
-- Everything in `@caprid/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
+- Everything in `@caprid/moq-core` (its `/wire` entry included) and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
   `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
   product packages re-export the same short list of core names (the "Protocol types borrowed from
   the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
@@ -548,7 +548,7 @@ types rather than the builder's `VideoTrackInfo` / `AudioTrackInfo` / `DataTrack
 read track may be any role and any packaging (moq-rs `cmaf`, `legacy`) and carries the namespace,
 packaging, and live status the builder fixes. The TypeScript parser was internal as
 `parseIndependentCatalog` (with `MoqCatalog` / `MoqCatalogTrack` from Video.js); those names are gone,
-with no alias. Media publishing-handle and object-to-frame reader names remain provisional.
+with no alias. The one-call media publishing handle was never built, so it has no name.
 
 The TypeScript-only WebCodecs helpers in `@caprid/moq-media` are `videoTrackFromDecoderConfig`,
 `audioTrackFromDecoderConfig`, `chunkToLocFrame`, `LocFrame`, and `ChunkToLocFrameOptions`.

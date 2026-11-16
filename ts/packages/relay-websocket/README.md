@@ -14,7 +14,8 @@ the deviations recorded there, and passes its conformance suite in Node, Chromiu
 
 ## Use
 
-Pass one of its factories as the SDK's `createTransport`. Build it once and reuse it for every connection.
+Install it next to `@caprid/relay` (`npm install @caprid/relay @caprid/relay-websocket`), and pass one of its
+factories as the SDK's `createTransport`. Build it once and reuse it for every connection.
 
 ```ts
 import { connectRelaySubscriber } from '@caprid/relay';

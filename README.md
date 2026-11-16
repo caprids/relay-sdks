@@ -169,8 +169,8 @@ versions speak which draft:
 
 | SDK | Version | MOQT draft |
 | --- | --- | --- |
-| `@caprid/relay` (`ts/`) | 0.1.0, 0.1.1 | `moqt-22`, falling back to `moqt-20` |
-| `caprid-relay` (`python/`) | 0.1.0 | `moqt-22`, falling back to `moqt-20` |
+| `@caprid/relay` (`ts/`) | 0.1.0 to 0.4.1 | `moqt-22`, falling back to `moqt-20` |
+| `caprid-relay` (`python/`) | 0.1.0 to 0.4.0 | `moqt-22`, falling back to `moqt-20` |
 
 Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later. On 0.15.1 to
 0.15.3, every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and

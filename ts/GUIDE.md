@@ -956,6 +956,11 @@ so do not rely on the first objects after demand begins. See
   deltas append to it. `grouping: 'frame'` gives one group per frame. The writer skips frames the
   relay has no subscription for instead of waiting on the deadline, and resumes at the next keyframe
   after any failure.
+- `createReplaceableTrack(publisher, { track, catalog: { service, build } })` publishes frames on a
+  track that `replace()` swaps for a new one (`audio-2`, `audio-3`, ...), listed in the catalog in the
+  old one's place, as a voice agent does when it is talked over. What the old track has not sent is
+  dropped. A listener finds the new track with `@caprid/moq-media`'s `findReplacementTrack`
+  ([track replacement](../spec/media-layer.md#track-replacement)).
 
 A frame writer's `write(frame)` resolves to what became of the frame (`'sent'`, `'skipped'`,
 `'stale'`, `'dropped'`, `'interrupted'`, or `'ended'`) rather than rejecting. It rejects only for a
@@ -1107,8 +1112,8 @@ subscriber.subscribe({ namespace, track: 'audio' }, { ...reader, onError });
 The buffer starts at 60 ms. It grows by 40 ms after each underrun, and shrinks by 10 ms after each
 2 s of smooth playback, never below 20 ms. It trims audio it held but never needed. Decoded audio
 reaches the worklet from the main thread, so a page whose main thread stalls for tens of
-milliseconds can underrun at that floor. Such a page can pass `minJitterTargetUs: 40_000`, the floor
-in earlier releases. The buffer stays under 400 ms, and under the clock's target latency less the
+milliseconds can underrun at that floor. Such a page can pass `minJitterTargetUs: 40_000` to
+`addInput`, the floor in earlier releases. The buffer stays under 400 ms, and under the clock's target latency less the
 output delay and 40 ms. `input.stats` holds the underruns, the buffer depth and target, the frames
 dropped as late, and the audio that was trimmed, concealed with silence, or cut.
 
@@ -1255,7 +1260,9 @@ its frames are held. To keep a frame, keep `frame.clone()` and close the clone y
 goes to `onError`, or to `console.error` when there is no `onError`. The player reports a decoder that fails before
 its first frame, or with `NotSupportedError`, once, and then decodes nothing more until `player.configure(decoderConfig)`. For a rendition switch,
 call `player.configure(decoderConfig)` before the new track's first keyframe arrives. Frames before that keyframe still
-decode with the old config. The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a
+decode with the old config. A frame marked `restart` or `resync` resets the decoder and drops the decoded frames still
+waiting. When you learn of a restart before the next frame, as in a want's `onRestarted`, call `player.reset()` to do
+that at once. `player.stats` counts the frames decoded, shown, dropped as late, and skipped. The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it also runs in a
 dedicated worker, drawing onto an `OffscreenCanvas` the page transferred to it. Video there follows a clock of the
 worker's own, since the audio clock lives on the main thread. See [spec/media-layer.md](../spec/media-layer.md#video-player) for the rules.
 
@@ -1286,7 +1293,8 @@ own delivery timeout goes on the SUBSCRIBE as well, for a relay that honours it.
 extension's subscriber max age, in milliseconds). The SDK sends `maxAge` only to a relay whose SETUP
 declared it (`maxAgeSupported` on a `connectRelaySubscriber` connection), so it is safe to set against any relay. It bounds what the
 relay still holds for this subscriber (a group it has not sent or not yet had acknowledged once a newer
-group is that old), not a queue further down the path: see spec/relay-interop.md, "Subscriber max age".
+group is that old), not a queue further down the path
+([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)).
 
 ```ts
 // subscriber is a supervised subscriber (connectSupervisedSubscriber).
@@ -1415,7 +1423,8 @@ latest-wins publisher. `update(value)` replaces the value it holds. While a writ
 later updates replace one another, so only the newest is sent next. The service also sends the
 current value again on every relay subscription. That matters because an update made while the relay
 has no subscription is only held, not sent. After a failed write, it waits `retryDelayMs` (1 s by default)
-before it sends again, so pass a smaller value for a value that changes quickly.
+before it sends again. For a value that changes quickly, pass a smaller one:
+`createDocumentService(track, undefined, { retryDelayMs: 100 })`.
 
 Make each value complete, not a change to the previous one. A viewer that joins late starts at the
 relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
@@ -1496,7 +1505,7 @@ Branch on `code` and `phase`, not on message wording. SDK lifecycle errors use t
 | `GOAWAY` | The relay requested migration. Open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and the connection state before you decide whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport. In Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed. |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before you connect again. In phase `connection`, the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)). Browsers and native QUIC (`@caprid/relay/node`) report it. Against relays before moq-relay 0.17.0, a browser does not see the refusal, so it arrives as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before you connect again. In phase `connection`, the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)). Browsers and native QUIC (`@caprid/relay/node`) report it. Against relays before moq-relay 0.17.0, a browser does not see the refusal, so it arrives as `TRANSPORT_ERROR`. |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure, and makes no claim about individual writes that were in flight. `subscription` marks an
@@ -1525,7 +1534,7 @@ session with MOQT session termination code `UNAUTHORIZED` (0x2). `MALFORMED_AUTH
 phase `connection` it ended a live session whose credential expired or whose grant was revoked
 ([token expiry](#token-expiry)). The SDK reports it in browsers and over native QUIC. Against relays
 older than moq-relay 0.17.0, a browser does not see the relay's close, so a refusal there arrives as
-`TRANSPORT_ERROR` (#14). No other connection failure, and no uncovered namespace, proves that the
+`TRANSPORT_ERROR`. No other connection failure, and no uncovered namespace, proves that the
 relay denied authentication. The relay refuses a subscription outside the token's grant per request,
 through `onError` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 
@@ -1560,6 +1569,10 @@ try {
 - `@caprid/moq-core` (`packages/moq-core`) is a generic protocol package under Apache-2.0 that builds
   on its own. It uses standard streams, has no runtime dependencies, and imports no player, UI, or
   media engine.
+- `@caprid/moq-media` holds the format side of media: LOC, MSF catalogs, WebCodecs mapping, the
+  frame sequencer and playout clock, and the audio and video players. It depends only on
+  `@caprid/moq-core`, never on `@caprid/relay`. `@caprid/moq-mediabunny` adds Mediabunny packets,
+  with `mediabunny` as a peer dependency.
 - `@caprid/relay-quic` and `@caprid/relay-websocket` are transport adapters that the application
   passes as `createTransport`. `@caprid/relay` has neither as a dependency. `@caprid/relay-quic` is
   an optional peer, which `@caprid/relay/node` loads when no `createTransport` is given. The

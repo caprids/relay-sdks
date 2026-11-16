@@ -41,7 +41,10 @@ against that file.
 
 - The connection's transport is the application's choice, through the transport factory. The
   default stays the browser's WebTransport (TypeScript) or native QUIC (Python, and `@caprid/relay/node`):
-  the SDK never falls back to another transport by itself.
+  the SDK never falls back to another transport by itself. The defaults are public so an
+  application can wrap one: TypeScript's `webTransport()` returns the factory the connect calls use
+  when `createTransport` is left out, and fails `TRANSPORT_UNAVAILABLE` where the runtime has no
+  WebTransport that can negotiate protocols. Python's default is `caprid_relay.quic.connect_quic`.
 - The TypeScript SDK's opt-in `@caprid/relay-websocket` package carries MOQT on QMux over a WebSocket,
   TCP to the same host and port as the endpoint (`https:` becomes `wss:`), for networks that block
   UDP and browsers without a usable WebTransport. `createWebSocketTransport()` always dials it.
@@ -117,8 +120,8 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `RECONNECTING` | A [supervised publisher](#supervised-publisher) had no live generation for the operation, or the connection under it ended (phase `connection`). Nothing is replayed: write the next object once the publisher is live again. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../ts/GUIDE.md#browser-transport-limits)). |
-| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without a WebTransport that can negotiate protocols; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR`. |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure. It makes no claim about individual writes that were in flight. `subscription` marks an
@@ -143,11 +146,11 @@ says the relay refused the credentials: the relay closed the session with MOQT s
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
 Draft-22 §12.2 defines it as refusing to establish a session, but moq-relay also closes a live
 session with it when the session's grant expires or is revoked, so both SDKs map it in any phase:
-`connecting` before the relay's SETUP, `connection` after it (#227, #261). A close in the turn SETUP
+`connecting` before the relay's SETUP, `connection` after it. A close in the turn SETUP
 arrives stays `TRANSPORT_ERROR`. From moq-relay 0.17.0 a
 browser sees the relay's close (CLOSE_WEBTRANSPORT_SESSION with code 2 and reason `unauthorized`), so
 TypeScript reports it in browsers as well as over native QUIC. Against older relays the browser lost
-the close, and a refusal arrived as `TRANSPORT_ERROR` (#14). Neither another connection failure nor
+the close, and a refusal arrived as `TRANSPORT_ERROR`. Neither another connection failure nor
 an uncovered namespace proves authentication was denied. A subscription outside the token's grant
 is refused per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 
@@ -464,7 +467,7 @@ and own a new subscription immediately. They yield typed data and lifecycle even
 payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
 available and retain their synchronous delivery model. The handle's `subscribed` and `ended`
 awaitables (see the subscription lifecycle table above) are the readiness and termination signals.
-The iterator's raise or EOF is its own. It follows the product vocabulary from #63. Its explicit
+The iterator's raise or EOF is its own. It follows the product vocabulary in `vocabulary.md`. Its explicit
 `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
 
 - `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
@@ -937,9 +940,11 @@ taken over.
 - `publisher.announced` settles once the namespace has been handed to the transport on a
   solicitation that covers it, no earlier than the first registered track. It is the strongest fact
   the publisher has: the relay acknowledges an announce with nothing and routes subscribes about a
-  round trip later. It stays pending while no solicitation covers the namespace (the first write
-  reports `NAMESPACE_NOT_SOLICITED`), and the connection's closure terminates it if that comes
-  first, with the closure's error or `CLOSED` after a clean shutdown.
+  round trip later. It stays pending while no solicitation covers the namespace, and the
+  connection's closure terminates it if that comes first, with the closure's error or `CLOSED`
+  after a clean shutdown. What a write waiting for demand reports at its deadline meanwhile depends
+  on whether any solicitation arrived: `NAMESPACE_NOT_SOLICITED` when some did and none covers the
+  namespace, `WRITE_TIMEOUT` when none arrived at all, as with a token that grants no publishing.
 - Two publishers may announce the same namespace, and nothing warns either one or any subscriber.
   On moq-relay 0.17.0 the relay picks one of the two announcing connections for new subscribers,
   effectively at random (a hash of the namespace and each connection's random hop id ranks the
@@ -1152,7 +1157,7 @@ higher value goes first and every other stream has 0.
 - Measured on 2026-10-20 with `ts/scripts/probe-send-order.mjs`: a Firefox 155 page published
   50 fps audio (160-byte frames, one group per frame) and about 1 Mbit/s of 30 fps video (a 40 kB
   keyframe each second) to sjc through an uplink capped at 800 kbit/s, and a subscriber on a clean
-  path timed the audio from capture to arrival. "Off" is the publisher before #336, with the send
+  path timed the audio from capture to arrival. "Off" is the same publisher with the send
   order stripped from every stream:
 
   | uplink queue | send order | runs | audio p50 | p95 | p99 | max |
@@ -1297,7 +1302,7 @@ to both languages.
   Callers supply configs only on keyframes. Timestamps arrive in microseconds. Other timescales
   round to the nearest integer tick, ties upward. Inputs and the resulting tick count must be
   nonnegative safe integers (at most 2^53−1). The timescale must be positive.
-- The LOC timestamp reader (`locTimestampUs` / `loc_timestamp_us`, issue #290) returns an object's
+- The LOC timestamp reader (`locTimestampUs` / `loc_timestamp_us`) returns an object's
   Timestamp (0x10) in microseconds, or nothing when the object has no Timestamp that is a
   nonnegative safe integer. It scales by the first Timescale that is a positive safe integer,
   looking at the object's Timescale (0x08), then the track properties' (as `SUBSCRIBE_OK` carries
@@ -1325,8 +1330,7 @@ to both languages.
 - Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Video and audio
   entries carry `renderGroup` (msf-01 §5.2.11), 1 unless the caller names another, and `altGroup`
   (§5.2.12) when the caller names one. Both must be non-negative safe integers, and the members of
-  an alternate group must share a role and a render group ([media-layer.md](media-layer.md#several-media-tracks),
-  issue #351). No target latency or buffer is set. Data entries have only name and optional role beyond the
+  an alternate group must share a role and a render group ([media-layer.md](media-layer.md#several-media-tracks)). No target latency or buffer is set. Data entries have only name and optional role beyond the
   common fields, and reject the media roles `video`,
   `signlanguage`, `audio`, `audiodescription`, `caption`, and `subtitle`. Track names must be
   non-empty and unique, including tracks temporarily withheld pending init data.
@@ -1377,7 +1381,7 @@ to both languages.
   into the sets a viewer picks one track from: tracks sharing a render group and an alternate group
   form one set, every other track is a set of its own, and sets are ordered by their first track.
 - One timeline, and the playout clock
-  ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock), issues #285 and #290): every
+  ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock)): every
   LOC media track one catalog lists is stamped in microseconds since the Unix epoch, its capture
   time on the publisher's system clock, with Timescale 1,000,000 declared on the track. The
   broadcast clock (`createBroadcastClock` / `BroadcastClock`) pins an integer-microsecond origin
@@ -1402,8 +1406,8 @@ to both languages.
   and 2 s before any is. `reset()` keeps the reported intervals and counts itself in `resets`. Both clocks read an injected
   monotonic microsecond source and need no DOM or transport. The decisions are pinned by
   `vectors/clock.json`. Implemented in both SDKs.
-- The Media Timeline track (msf-01 §7; [media-layer.md](media-layer.md#media-timeline-track),
-  issue #291). The broadcast clock's `originEpochUs` / `origin_epoch_us` is the origin as integer
+- The Media Timeline track (msf-01 §7; [media-layer.md](media-layer.md#media-timeline-track)).
+  The broadcast clock's `originEpochUs` / `origin_epoch_us` is the origin as integer
   Unix-epoch microseconds: as given, or else read once at creation as the system clock
   (`Date.now()`, `time.time_ns()`) less the source time elapsed since the origin. An entry for a
   timeline timestamp `t`, location `(g, o)` (object defaults to 0) and wall-clock time `w`
@@ -1432,8 +1436,8 @@ to both languages.
   20 ms, CELT 2.5, 5, 10 or 20 ms), times one frame for code 0, two for codes 1 and 2, and for code 3
   the low six bits of the next byte. An empty packet, or a code 3 packet without that byte, reads as
   nothing. Pinned by `vectors/media.json` `opusPacketDurations`.
-- The interrupt track (`INTERRUPT_TRACK`, `interrupt`; [media-layer.md](media-layer.md#interrupt-track),
-  issue #320) carries one interrupt per group as compact UTF-8 JSON: `track` (default `audio`), the
+- The interrupt track (`INTERRUPT_TRACK`, `interrupt`; [media-layer.md](media-layer.md#interrupt-track))
+  carries one interrupt per group as compact UTF-8 JSON: `track` (default `audio`), the
   optional `fromUs`, then `untilUs`, with no `fromUs` key when it is absent. The builder
   (`buildInterrupt` / `build_interrupt`) and the reader (`parseInterrupt` / `parse_interrupt`)
   refuse an empty or non-string track, a track that is not valid Unicode, a timestamp that is not a
@@ -1442,8 +1446,8 @@ to both languages.
   and ignores unknown fields. A listener applies an interrupt for an audio track it plays as a cut
   of that range. Pinned by `vectors/media.json` `interrupts`, `interruptErrors`, `interruptReads`
   and `interruptReadErrors`. The track name by `protocol.json`.
-- The transcript track (`TRANSCRIPT_TRACK`, `transcript`; [media-layer.md](media-layer.md#transcript-track),
-  issue #320) carries one version of one segment per group as compact UTF-8 JSON: `seq`, `track`
+- The transcript track (`TRANSCRIPT_TRACK`, `transcript`; [media-layer.md](media-layer.md#transcript-track))
+  carries one version of one segment per group as compact UTF-8 JSON: `seq`, `track`
   (default `audio`), `fromUs`, the optional `untilUs`, `text` and `final`, in that order, with no
   `untilUs` key when it is absent. The builder and the reader (`buildTranscriptSegment` /
   `build_transcript_segment`, `parseTranscriptSegment` / `parse_transcript_segment`) refuse a `seq`
@@ -1463,7 +1467,7 @@ to both languages.
   `transcriptSegments`, `transcriptSegmentErrors`, `transcriptSegmentReads`,
   `transcriptSegmentReadErrors`, `transcripts` and `transcriptCutErrors`. The track name by
   `protocol.json`.
-- Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; issue #320, ADR 0006) are
+- Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; ADR 0006) are
   PyAV's libopus. The encoder takes signed 16-bit PCM, or a PyAV frame, in runs: the first call of a
   run gives the timeline timestamp of its first sample and later calls refuse one, packet *k* of a
   run is stamped at that timestamp plus *k* × 20 ms, and ending the run pads its partial frame with
@@ -1530,8 +1534,11 @@ Implemented in both SDKs.
 - Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
   `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change,
   interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe
-  arrives when `write` is called with it, whether or not it is later sent. A supervised track's
-  [move](#rotation) to a new generation counts as a demand change, though it ends no group. The
+  arrives when `write` is called with it, whether or not it is later sent. A demand change that a
+  keyframe already covers enters no such state: one waiting in the backlog or opening its group, or
+  a group still open after the change, which only a keyframe can have opened. A supervised track's
+  [move](#rotation) to a new generation counts as a demand change, though it ends no group, so the
+  group still open on the old generation does not cover it. The
   optional `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that
   state after the start, so an encoder can force a keyframe instead of waiting out its interval. An
   exception from it is reported (to `console.error`, or to the asyncio loop's exception handler) and does not
@@ -1656,7 +1663,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
     about 1 Mbit/s of 30 fps video (a 40 kB keyframe each second), both registered with
     `mediaTrackProperties`, and a Node subscriber behind a downlink capped at 800 kbit/s (100 ms
     queue) timed the audio from capture to arrival, after a 5 s warm-up of a 25 s run. "Off"
-    subscribes with no parameters, as before #337. "Inverted" sends audio 96 and video 16. The
+    subscribes with no parameters, as the SDK did before the helper. "Inverted" sends audio 96 and video 16. The
     probe read each SUBSCRIBE off the subscriber's request streams: SUBSCRIBER_PRIORITY 16 and 96
     with the helper, none without. On a clean path every mode delivered audio in 1 to 2 ms.
 
@@ -1804,6 +1811,13 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
   namespace and name), and otherwise the first track listed with that track's namespace, role and
   render group, or nothing when there is none (a removal, not a replacement).
+- Playback is TypeScript only, in `@caprid/moq-media`: the headless audio player
+  (`createAudioPlayer`, with `warmAudioPlayer` and `createFrameHold` for joining sooner) and video
+  player (`createVideoPlayer`, with `canvasRenderer`) take frames from a frame reader, decode them
+  (Opus with bundled WebAssembly libopus by default, otherwise WebCodecs) and present them on the broadcast's playout clock. Their contract is in
+  media-layer.md, [Audio player](media-layer.md#audio-player) and
+  [Video player](media-layer.md#video-player).
+  Python has no player.
 
 ### Latest-value reading
 
@@ -1928,7 +1942,8 @@ See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) f
 ## Not yet specified
 
 Datagram reception, discovery of tracks within a namespace (namespace discovery is [specified](#discovery)),
-and player adapters are not implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
+and player adapters (such as a Video.js playback adapter over the headless players in
+[Media subscribing](#media-subscribing)) are not implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
 
 ## Draft-22 protocol boundaries
 
