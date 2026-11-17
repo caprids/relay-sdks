@@ -32,6 +32,7 @@ describe('public vocabulary', () => {
       'readJSON',
       'readText',
       'roomEndpoint',
+      'webTransport',
     ]);
     expect(relay).not.toHaveProperty('connectRelay');
   });
@@ -108,7 +109,7 @@ describe('public vocabulary', () => {
 
 /** `@caprid/relay/media`: the media policy, which the root does not export (spec/vocabulary.md). */
 describe('media vocabulary', () => {
-  it('exports factories for the frame writer, the frame reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
+  it('exports factories for the frame writer, the frame reader, the latest-value reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
     const media = await import('../src/media.js');
     expect(Object.keys(media).sort()).toEqual([
       'PRESENCE_HEARTBEAT_MS',
@@ -117,6 +118,7 @@ describe('media vocabulary', () => {
       'createDocumentService',
       'createFrameReader',
       'createFrameWriter',
+      'createLatestValueReader',
       'createPresenceView',
       'createReplaceableTrack',
       'mediaSubscribeParameters',

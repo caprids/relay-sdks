@@ -71,19 +71,19 @@ The listener joins quickly. The audio side builds while the handshake and the ca
 way: `warmAudioPlayer(context)` loads the player's worklet module and libopus at once, so start it in
 the click that connects, right after creating the context (a context created outside a gesture stays
 suspended, and `listenAudio` also warms it, which costs nothing when the page already has). The
-audio track is subscribed together with the catalog, by its conventional name, and the frames are held
+audio track is wanted together with the catalog, by its conventional name, and the frames are held
 until the player exists, then passed on in order. On relay-dev's benchmark this took the first audio
 from 627 to 249 ms after the connect started ([spec](../../../spec/media-layer.md), "Joining sooner").
 
 ```ts
 import { warmAudioPlayer } from '@caprid/moq-media';
-import { connectRelaySubscriber } from '@caprid/relay';
+import { connectSupervisedSubscriber } from '@caprid/relay';
 import { listenAudio } from './listen-audio.js';
 
 // In the user's click: create the context there, and start the player's parts loading before the connect.
 const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
 warmAudioPlayer(context).catch(() => {});
-const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
+const subscriber = await connectSupervisedSubscriber({ url, getToken: () => subscriberToken });
 const listener = await listenAudio(subscriber, ['demo', 'live'], { context, onError: console.error });
 console.log(listener.input.stats); // underruns, buffer depth and target, frames dropped as late
 await listener.stop();
@@ -92,6 +92,90 @@ await listener.stop();
 `mise run ts:test:audio-player` publishes this example's microphone and plays it back through
 `listen-audio.ts` in headless Chromium, through an in-memory relay hub, or the Relay with
 `AUDIO_PLAYER_RUNS=relay`, then interrupts it over the interrupt track.
+
+## Watch the video
+
+[`watch-video.ts`](watch-video.ts) plays a broadcast's `video` track onto a canvas. It reads the
+decoder config from the catalog with `videoDecoderConfigFromTrack`: the codec, and the avcC in the
+track's `initData`, the only place an H.264 track carries it. A frame reader orders the frames.
+`createVideoPlayer` from `@caprid/moq-media` decodes them, and `canvasRenderer` draws each one when
+the playout clock says it is due. The player starts at a keyframe. At a `resync` or `restart` it
+resets the decoder and waits for the next keyframe. The [GUIDE](../../GUIDE.md#playing-video) and
+[spec/media-layer.md](../../../spec/media-layer.md#video-player) describe the player. Like
+`listenAudio`, `watchVideo` subscribes to the video track by its conventional name together with
+the catalog and holds the frames until the player exists, which saves the catalog's round trip.
+
+For sound in sync, pass one playout clock to `watchVideo` and `listenAudio`. Audio is the master.
+Until the audio player reports to the clock, the clock paces video by the wall clock, so video plays
+before the user's first click. Start `listenAudio` once the `AudioContext` runs (`whenRunning`). A
+listener started on a suspended context holds every frame that arrives. When the context resumes,
+the player trims that backlog for seconds, and the video on the same clock freezes while it does.
+To mute, set the listener's `input.gain` to 0. The player keeps reporting, so audio stays the
+master and video stays in sync.
+
+```ts
+import { createPlayoutClock } from '@caprid/moq-media';
+import { connectSupervisedSubscriber } from '@caprid/relay';
+import { listenAudio, whenRunning } from './listen-audio.js';
+import { watchVideo } from './watch-video.js';
+
+const canvas = document.querySelector('canvas');
+if (!canvas) throw new Error('Missing canvas');
+const namespace = ['demo', 'live'];
+// Without a user gesture the context starts suspended; resume it in your Unmute button's click.
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+const clock = createPlayoutClock(); // one per broadcast: video and audio share it
+const subscriber = await connectSupervisedSubscriber({ url, getToken: () => subscriberToken });
+const watcher = await watchVideo(subscriber, namespace, canvas, { clock, onError: console.error });
+await whenRunning(context);
+const listener = await listenAudio(subscriber, namespace, { context, clock, onError: console.error });
+console.log(watcher.stats); // shown, late, discontinuities, lastOffsetUs (the A/V offset)
+listener.input.gain = 0; // mute
+await Promise.all([watcher.stop(), listener.stop()]);
+```
+
+Both take a supervised subscriber (`connectSupervisedSubscriber`) and want each track through it, so
+they outlive the publisher. A start before the publisher has announced waits for it rather than
+failing on the [announce race](../../GUIDE.md#discover-namespaces). When the publisher restarts, the
+want subscribes again within a round trip of the new announcement, and the new subscription plays
+live, with the gap unfilled. `listenAudio` drops the audio it held and calls `onRestarted`. `watchVideo`
+resets its decoder and waits for the next keyframe. Pass `generations: true` when the namespace is a
+supervised publisher's root, as the [voice bot](../voice-bot/README.md) does, to follow its newest
+generation. This page's publisher is a plain one on a fixed namespace, so the page leaves it off. A
+publisher stopped with Stop publishing ends its tracks at once. One that crashes holds its
+subscriptions until the relay's idle timeout, about 11 s, and the watcher resumes then.
+
+Across a restart, audio and video restart separately, each with its own want, and each restart
+resets the shared playout clock. Video plays on wall pacing from its first keyframe until audio
+plays again and takes the clock back, then follows audio as before. Sync is back once both have
+resumed, with no state carried over from before the restart.
+
+### Run the example page
+
+[`page.ts`](page.ts) publishes a test pattern (a sweeping bar that flashes white once a second) with
+the microphone, and watches the broadcast with `watchVideo` and `listenAudio`, in the same tab or
+another one. [`serve.mjs`](serve.mjs) serves it on http://127.0.0.1:8321, a secure context as
+WebTransport needs:
+
+```sh
+RELAY_TOKEN=... mise run ts:example:webcodecs -- --namespace acme/webcodecs
+```
+
+Without `--namespace`, the broadcast is `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`) plus
+`webcodecs`. `--port` picks another port, and `--room` roots `RELAY_URL` with `roomEndpoint`. With
+`RELAY_TOKEN` set, the page holds the token. The server listens on the loopback interface only and
+never prints the token. Without `RELAY_TOKEN`, paste a token into the page.
+
+Click Publish in one tab. Open the page with `?watch` in another tab, and it starts watching without
+a click. The video plays, and the audio waits for Unmute. The status line shows the clock's mode,
+the last video frame's offset from the audio, and the audio buffer.
+
+`mise run ts:test:watch-video` checks this end to end in headless Chromium against the Relay
+(`RELAY_TOKEN`), or through an in-memory relay hub in the page with `WATCH_VIDEO_TRANSPORT=hub`.
+One page publishes a flash and a beep every 600 ms and watches them through
+`watchVideo` and `listenAudio`. The test passes when video keeps moving while the context is
+suspended, when every flash is within 45 ms of its beep once audio plays, and when video keeps
+moving while muted.
 
 ## Audio and the shared timeline
 
@@ -140,7 +224,10 @@ the catalog. A changed decoder configuration stops the example. To change it, st
 publisher. Encoded output order and presentation timestamps are preserved.
 
 The example encodes enough to obtain the initial configuration, then skips capture while the video
-track has no demand. It also skips capture while two frames wait in the encoder or any encoded chunk
+track has no demand. The order matters. Viewers subscribe to the video track only after reading the
+catalog, and the catalog needs that first configuration. A publisher that encodes only with demand
+from the start never serves a catalog, so no viewer ever creates demand for video. That is why the
+capture loop checks `!video || track.hasDemand`. It also skips capture while two frames wait in the encoder or any encoded chunk
 waits in the frame writer's backlog. It requests a keyframe at least every second of active capture.
 Demand loss resets the group, and new or replacement demand requests a keyframe.
 

@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
-from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, until
+from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, FakeSubscription, until
 
 from caprid_relay import (
     CancellationToken,
@@ -31,9 +33,10 @@ from caprid_relay import (
     supervised_publisher,
 )
 from caprid_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
+from caprid_relay.media import FrameWriter
 from caprid_relay.supervised_publisher import _supervise_relay_publisher
 from caprid_relay.supervised_subscriber import _supervise_relay_subscriber
-from moq_core import KeyValuePair, MessageParameters, MoqtObject, SubgroupEnd
+from moq_core import KeyValuePair, MessageParameters, MoqtObject, PublishDone, SubgroupEnd
 from moq_core.errors import MoqtProtocolError
 
 FAST = SupervisionBackoff(initial_delay=0, max_delay=0)
@@ -909,6 +912,208 @@ async def test_cached_groups_replayed_newest_first_are_not_progress(cleanup: lis
     assert started[3] - started[2] >= 0.08
 
 
+async def test_counts_no_status_object_as_progress(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.04, max_delay=1))
+    loop = asyncio.get_running_loop()
+    started: list[float] = []
+    for count in range(1, 5):
+        await until(lambda count=count: len(s.first.subscriptions) == count, f"subscription {count}")
+        started.append(loop.time())
+        # A finished track while its publisher stays connected: the cached last group, the end-of-track status
+        # object one group later, then TRACK_ENDED.
+        subscription = s.first.latest
+        subscription.accept()
+        subscription.send_object(10)
+        assert subscription.handlers.on_object is not None
+        subscription.handlers.on_object(
+            MoqtObject(group_id=11, subgroup_id=0, object_id=0, status="end-of-track", payload=b"")
+        )
+        subscription.done()
+    assert started[3] - started[2] >= 0.08
+
+
+# Waking on the namespace announced again
+
+WAKE_SLOW = SupervisionBackoff(initial_delay=10, max_delay=10)
+
+
+def done_with(subscription: FakeSubscription, status_code: int) -> None:
+    assert subscription.handlers.on_publisher_done is not None
+    subscription.handlers.on_publisher_done(PublishDone(status_code=status_code, stream_count=0, reason="done"))
+
+
+async def test_resubscribes_at_once_when_the_namespace_is_announced_after_a_done(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room", "alice"], "v", r.handlers, retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    assert s.first.discoveries[0].prefix == ("room", "alice")
+    assert len(s.first.subscriptions) == 1
+    # Already announced as the watch starts, after INTERNAL_ERROR: the new publisher.
+    s.first.discoveries[0].push("announced", ["room", "alice"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed on the announcement")
+    assert r.seen.count("restarted publisher-done") == 1
+
+
+async def test_ignores_a_deeper_namespace_under_the_watched_one(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].push("announced", ["room", "bob"])
+    await asyncio.sleep(0.05)
+    assert len(s.first.subscriptions) == 1
+
+
+async def test_after_track_ended_waits_for_the_namespace_to_be_withdrawn_and_announced_again(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].done()  # TRACK_ENDED
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    discovery = s.first.discoveries[0]
+    # Still announced for the publisher that ended the track.
+    discovery.push("announced", ["room"])
+    await asyncio.sleep(0.05)
+    assert len(s.first.subscriptions) == 1
+    discovery.push("unannounced", ["room"])
+    await asyncio.sleep(0.02)
+    assert len(s.first.subscriptions) == 1
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed on the return")
+
+
+async def test_after_track_ended_still_resubscribes_after_the_backoff(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.06, max_delay=0.06))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].done()
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed after the backoff")
+
+
+async def test_holds_one_watch_across_refused_attempts_and_wakes_only_on_a_later_announcement(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    discovery = s.first.discoveries[0]
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 2, "woken")
+    # The announce race: refused, while the namespace stays announced.
+    s.first.subscriptions[1].reject(0x10, "unroutable")
+    await asyncio.sleep(0.05)
+    # The same announcement does not wake the next wait, and no second request was opened.
+    assert len(s.first.subscriptions) == 2
+    assert len(s.first.discoveries) == 1
+    assert not discovery.closed
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(s.first.subscriptions) == 3, "woken again")
+    s.first.subscriptions[2].accept()
+    s.first.subscriptions[2].send_object(1)
+
+
+async def test_does_not_wake_on_what_another_wants_shared_watch_saw_before_its_latest_attempt(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def of(track: str) -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == track]
+
+    subscriber.want("a", ["room"], "a", retry=WAKE_SLOW)
+    await until(lambda: len(of("a")) == 1, "a subscribed")
+    of("a")[0].accept()
+    done_with(of("a")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "a watches the namespace")
+    discovery = s.first.discoveries[0]
+    # Withdrawn and announced again while want a waits: a return the watch saw.
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(of("a")) == 2, "a woken")
+    # Left unanswered, so want a keeps holding the watch.
+    # Want b's first attempt starts after that return; its TRACK_ENDED must wait for a later one.
+    subscriber.want("b", ["room"], "b", retry=WAKE_SLOW)
+    await until(lambda: len(of("b")) == 1, "b subscribed")
+    of("b")[0].accept()
+    of("b")[0].done()
+    await asyncio.sleep(0.05)
+    assert len(of("b")) == 1
+    assert len(s.first.discoveries) == 1
+    discovery.push("unannounced", ["room"])
+    discovery.push("announced", ["room"])
+    await until(lambda: len(of("b")) == 2, "b woken by a later return")
+
+
+async def test_closes_an_unused_overlapping_watch_kept_for_reuse(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def of(track: str) -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == track]
+
+    subscriber.want("x", ["room"], "x", retry=WAKE_SLOW)
+    await until(lambda: len(of("x")) == 1, "x subscribed")
+    of("x")[0].accept()
+    done_with(of("x")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "x watches its namespace")
+    s.first.discoveries[0].push("announced", ["room"])
+    await until(lambda: len(of("x")) == 2, "x woken")
+    # Accepted: want x lets go of the watch, which is kept a moment for reuse.
+    of("x")[1].accept()
+    assert not s.first.discoveries[0].closed
+    subscriber.want("y", ["room", "alice"], "y", retry=WAKE_SLOW)
+    await until(lambda: len(of("y")) == 1, "y subscribed")
+    of("y")[0].accept()
+    done_with(of("y")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 2, "y watches its namespace")
+    assert s.first.discoveries[0].closed
+    assert s.first.discoveries[1].prefix == ("room", "alice")
+
+
+async def test_falls_back_to_the_backoff_when_the_watch_fails(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.06, max_delay=0.06))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    s.first.discoveries[0].fail(RelayError("overlap", code="PREFIX_OVERLAP"))
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed after the backoff")
+
+
+async def test_the_watch_gives_way_to_a_followed_roots_discovery(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room", "alice"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribed")
+    s.first.subscriptions[0].accept()
+    done_with(s.first.subscriptions[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "watching the namespace")
+    subscriber.want("g", ["room"], "g", r.handlers, generations=True, retry=FAST)
+    await until(lambda: len(s.first.discoveries) == 2, "the root discovered")
+    assert s.first.discoveries[0].closed
+    assert s.first.discoveries[1].prefix == ("room",)
+    assert r.errors == []
+
+
 # Make-before-break moves (#282)
 
 
@@ -1419,6 +1624,146 @@ async def test_rotation_moves_a_track_once_it_has_demand_on_the_next_generation(
     p.connections[1].tracks["video"].set_demand(False)
     assert await asyncio.wait_for(anext(changes), 1) is False
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    payload: bytes
+    key: bool = False
+    properties: tuple[KeyValuePair, ...] = ()
+    discontinuity: bool = False
+
+
+async def test_rotation_asks_a_frame_writer_for_a_keyframe_and_finishes_the_open_group_on_the_old_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    assert (await writer.write(_Frame(b"\x01", key=True))).kind == "sent"
+
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    following = p.connections[1].tracks["video"]
+    following.set_demand(True)
+    await until(lambda: len(asked) == 1, "a keyframe asked for on the move")
+    assert writer.keyframe_needed
+    # The old generation's viewers keep their GOP until the keyframe comes.
+    assert (await writer.write(_Frame(b"\x02"))).kind == "sent"
+    assert (await writer.write(_Frame(b"\x03", key=True))).kind == "sent"
+    assert [group.objects for group in old.groups] == [[b"\x02"]]
+    assert len(following.groups) == 1
+    assert not writer.keyframe_needed
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed once its group finished")
+    assert len(asked) == 1
+    await writer.close()
+
+
+async def test_rotation_asks_a_frame_writer_for_a_keyframe_when_the_move_lands_while_one_opens_its_group(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = p.connections[0].tracks["video"].writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        # The viewer reaches the next generation while the keyframe's group is opening here.
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    assert (await writer.write(_Frame(b"\x01", key=True))).kind == "sent"
+    assert len(old.groups) == 1
+    assert len(asked) == 1
+    assert writer.keyframe_needed
+    await writer.close()
+
+
+async def test_rotation_asks_for_no_keyframe_when_one_waits_behind_a_keyframe_opened_on_the_old_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = old.writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    first = asyncio.ensure_future(writer.write(_Frame(b"\x01", key=True)))
+    second = asyncio.ensure_future(writer.write(_Frame(b"\x02", key=True)))
+    assert [(await first).kind, (await second).kind] == ["sent", "sent"]
+    assert len(old.groups) == 1
+    assert len(p.connections[1].tracks["video"].groups) == 1
+    assert asked == []
+    assert not writer.keyframe_needed
+    await writer.close()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="eager tasks came in Python 3.12")
+async def test_rotation_reports_a_keyframe_dropped_when_its_keyframe_request_overflows_the_backlog(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    forced: list[asyncio.Task[Any]] = []
+    writer: FrameWriter[_Frame] = FrameWriter(
+        track,
+        max_backlog=1,
+        on_keyframe_needed=lambda: forced.append(asyncio.create_task(writer.write(_Frame(b"\x03", key=True)))),
+    )
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = old.writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    first = asyncio.ensure_future(writer.write(_Frame(b"\x01", key=True)))
+    queued = asyncio.ensure_future(writer.write(_Frame(b"\x02")))
+    loop = asyncio.get_running_loop()
+    factory = loop.get_task_factory()
+    # An encoder that answers the request with a keyframe at once: an eager task runs up to its first wait.
+    loop.set_task_factory(cast(Any, asyncio).eager_task_factory)
+    try:
+        outcomes = [(await first).kind, (await queued).kind]
+    finally:
+        loop.set_task_factory(factory)
+    assert outcomes == ["dropped", "dropped"]
+    assert len(forced) == 1
+    assert (await forced[0]).kind == "sent"
+    assert len(p.connections[1].tracks["video"].groups) == 1
+    await writer.close()
 
 
 async def test_rotation_moves_a_track_without_demand_at_once(cleanup: list[Callable[[], object]]) -> None:
@@ -2636,3 +2981,190 @@ async def test_does_not_restart_a_followed_rotation_when_a_move_was_waiting_to_b
     replacement.accept()
     replacement.send_object(0)
     assert seen == ["object 5", "switched to b", "object 0"]
+
+
+# ------------------------------------------------------------------ catch-up (#447)
+
+
+async def test_catch_up_replaces_a_subscription_that_moved_past_its_first_group_at_once(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    for group in (3, 4, 5):
+        first.send_object(group)
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe without delay")
+    assert first.cancelled
+    second = s.first.latest
+    assert (second.namespace, second.track) == (("room",), "video")
+    second.accept()
+    second.send_object(9)
+    second.send_object(10)
+    assert r.seen == [
+        "subscribed room",
+        "object 3",
+        "object 4",
+        "object 5",
+        "restarted catch-up",
+        "subscribed room",
+        "object 9",
+        "object 10",
+    ]
+
+
+async def test_catch_up_keeps_replacing_at_once_while_each_subscription_progresses(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SLOW)
+    for round_ in range(3):
+        await until(lambda round_=round_: len(s.first.subscriptions) == round_ + 1, f"subscribe {round_}")
+        current = s.first.subscriptions[round_]
+        current.accept()
+        current.send_object(round_ * 10)
+        current.send_object(round_ * 10 + 1)
+        subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 4, "fourth subscription")
+    assert r.seen.count("restarted catch-up") == 3
+
+
+async def test_catch_up_waits_out_the_backoff_when_the_subscription_never_left_its_first_group(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SupervisionBackoff(initial_delay=0.3, max_delay=0.3))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(3)
+    first.send_object(3, 1)
+    subscriber.catch_up("video")
+    # The backoff draws from its upper half: at least 150 ms.
+    await asyncio.sleep(0.1)
+    assert first.cancelled
+    assert len(s.first.subscriptions) == 1
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe after the backoff", 2.0)
+    s.first.latest.accept()
+    s.first.latest.send_object(8)
+    assert r.seen == ["subscribed room", "object 3", "object 3", "restarted catch-up", "subscribed room", "object 8"]
+
+
+async def test_catch_up_is_ignored_for_a_key_that_is_not_wanted_or_was_forgotten(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(1)
+    first.send_object(2)
+    subscriber.catch_up("audio")
+    await asyncio.sleep(0.03)
+    assert not first.cancelled
+    assert len(s.first.subscriptions) == 1
+    subscriber.unwant("video")
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert len(s.first.subscriptions) == 1
+    assert r.seen == ["subscribed room", "object 1", "object 2"]
+
+
+async def test_catch_up_raises_a_type_error_for_a_key_that_is_not_a_string(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, _s = await start_subscriber(cleanup)
+    for key in (None, 7, b"video"):
+        with pytest.raises(TypeError):
+            subscriber.catch_up(cast(str, key))
+
+
+async def test_catch_up_does_nothing_before_the_subscription_is_accepted(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert not first.cancelled
+    assert len(s.first.subscriptions) == 1
+    first.accept()
+    first.send_object(1)
+    assert r.seen == ["subscribed room", "object 1"]
+
+
+async def test_catch_up_ignores_a_second_call_while_the_want_waits_to_resubscribe(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SupervisionBackoff(initial_delay=0.3, max_delay=0.3))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(1)
+    subscriber.catch_up("video")
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe after the backoff", 2.0)
+    await asyncio.sleep(0.03)
+    assert len(s.first.subscriptions) == 2
+    assert r.seen.count("restarted catch-up") == 1
+    # The replacement is not accepted yet: a call now does nothing to it.
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert not s.first.subscriptions[1].cancelled
+    assert len(s.first.subscriptions) == 2
+
+
+async def test_catch_up_leaves_the_other_wants_alone(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    audio_seen: list[str] = []
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    subscriber.want(
+        "audio",
+        ["room"],
+        "audio",
+        WantHandlers(on_restarted=lambda reason, _namespace: audio_seen.append(reason)),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 2, "both subscribe")
+    video, audio = s.first.subscriptions
+    video.accept()
+    audio.accept()
+    video.send_object(1)
+    video.send_object(2)
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 3, "video resubscribes")
+    assert video.cancelled
+    assert not audio.cancelled
+    assert audio_seen == []
+
+
+async def test_catch_up_during_a_move_ends_both_subscriptions(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room"], "a", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe a")
+    old = s.first.latest
+    old.accept()
+    old.send_object(1)
+    old.send_object(2)
+    subscriber.want("v", ["room"], "b", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 2, "move to b")
+    pending = s.first.latest
+    subscriber.catch_up("v")
+    await until(lambda: len(s.first.subscriptions) == 3, "resubscribe b")
+    assert old.cancelled
+    assert pending.cancelled
+    assert s.first.latest.track == "b"
+    assert r.seen == ["subscribed room", "object 1", "object 2", "restarted catch-up"]

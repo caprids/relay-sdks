@@ -1,91 +1,59 @@
 # Media layer: LOC packaging and MSF catalogs
 
-This document started on 2026-09-18 as a proposal for the media helpers both SDKs would take over
-from the Video.js example. Most of it is now implemented:
+The media layer is what both SDKs add above bytes, groups and demand, so that an encoder's output
+plays in a LOC/MSF player and a player can read it back. This document explains how each piece is
+shaped and why, which drafts it reads and where it departs from them, and what was measured. It
+does not repeat the testable rules: [behavior.md](behavior.md) holds them, in
+[Media helpers](behavior.md#media-helpers), [Media publishing](behavior.md#media-publishing) and
+[Media subscribing](behavior.md#media-subscribing), and [vocabulary.md](vocabulary.md) records the
+public names. Where this document and behavior.md describe the same behavior, behavior.md is the
+contract.
 
-- Stage 1, the format helpers, is implemented: the format packages (`@caprid/moq-media`,
-  `moq-media`), the shared vectors, the protocol pins, and the Python example's migration.
-  [behavior.md](behavior.md#media-helpers) is their contract.
-- Stage 2, [media publishing](#media-publishing), is partly implemented. The catalog service, a
-  document service for replaceable documents, and the frame writer exist in both product packages:
-  `caprid_relay.media`, and `@caprid/relay/media` as `createCatalogService`,
-  `createDocumentService` and `createFrameWriter`. [behavior.md](behavior.md#media-publishing) is
-  their contract, and the Video.js and WebCodecs examples are their first callers. The
-  `register_media` handle that would compose them with the catalog builder is still a proposal.
-- Stage 3, the [readers](#reading-side), is implemented. The catalog reader ships in both format
-  packages as `parseMsfCatalog` and `parse_msf_catalog`
-  ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
-  `--verify` logs its track list. The object-to-frame reader ships as the frame sequencer in both
-  format packages and as the frame reader in both product packages
-  ([issue #303](https://github.com/muxinc/relay-sdks/issues/303), [Frame reader](#frame-reader)).
+It began on 2026-09-18 as a proposal to move the media code out of the Python Video.js example into
+the SDKs. Everything below is built, except what [Not built](#not-built) lists.
 
-Both format packages also ship the [shared timeline and playout
-clock](#shared-timeline-and-playout-clock) ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)),
-the [interrupt track](#interrupt-track)'s format helpers
-([issue #320](https://github.com/muxinc/relay-sdks/issues/320)), and the
-[Media Timeline track](#media-timeline-track)'s format helpers and timeline accumulator
-([issues #291](https://github.com/muxinc/relay-sdks/issues/291) and
-[#292](https://github.com/muxinc/relay-sdks/issues/292)), which both examples publish. The
-[presence track](#presence-track)'s helpers ship in `@caprid/relay/media` only
-([issue #422](https://github.com/muxinc/relay-sdks/issues/422)). The WebCodecs
-example publishes audio on the shared timeline, measured live in browsers
-([issue #288](https://github.com/muxinc/relay-sdks/issues/288)). [vocabulary.md](vocabulary.md)
-records the public names of the implemented stages.
+## What ships
 
-The before and after sketches below describe the eventual API, `register_media` included. They are
-not runnable. See the format packages' READMEs for current usage. Stage 1 keeps `VideoTrackInfo`
-and `AudioTrackInfo`, adds `DataTrackInfo`, and uses `build_msf_catalog` and `buildMsfCatalog` for
-UTF-8 bytes. The TypeScript catalog reader is the Video.js parser's independent-catalog path,
-promoted to `parseMsfCatalog`. Player presentation projection and delta updates are not part of
-this extraction.
-
-## TypeScript input integration
-
-Stage 1 accepts native WebCodecs chunks and decoder configs through `@caprid/moq-media`:
-`chunkToLocFrame`, `videoTrackFromDecoderConfig`, and `audioTrackFromDecoderConfig`. The
-[direct browser example](../ts/examples/webcodecs/README.md) connects `VideoEncoder` output to
-LOC/MSF and Relay without a media engine. The pure helpers copy chunk bytes without converting
-the bitstream. Encoding, callback buffering, and capture remain application concerns.
-
-The optional `@caprid/moq-mediabunny` adapter handles file-input packets, demonstrated by the
-[MP4 example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing. Standard decoder
-config mapping, LOC properties, MSF catalogs, and source URLs belong to `@caprid/moq-media`, with
-no Mediabunny dependency. The adapter retains compatibility re-exports of the config mappers.
-
-TypeScript consumes supplied AVC configuration and four-byte-length packets. Annex B splitting,
-SPS/PPS reconstruction, and conversion are Python-only, for the PyAV example. The config mappers
-support AVC and Opus. Grouping, demand, backlog bounding and catalog serving are SDK
-code in `@caprid/relay/media` (`createFrameWriter`, `createCatalogService`, `createDocumentService`),
-which both TypeScript examples call. Pacing remains example code: the WebCodecs example skips
-capture while the encoder is busy, the frame writer has a backlog, or video has no demand, and the
-Mediabunny example paces file packets in real time. The stage 2 `register_media` handle that would
-compose these is not implemented.
-
-## What a media publisher has to know today
-
-This section records the Python Video.js example as it stood on 2026-09-18, before stage 1 moved
-its helpers into the format packages. The product SDKs stop at bytes, groups, and demand. `behavior.md` says so on purpose: "The SDK adds
-no default timescale, timestamp, or LOC media packaging." Everything a Video.js MoQ player needs
-above that line is rebuilt inside the example:
-
-| Step | What the example does | Where the knowledge comes from |
+| Piece | Package | Section |
 | --- | --- | --- |
-| Timing | Declares Timescale 1,000,000 as a track property on every track and puts Timestamp and Timescale on every object, with Video Config on keyframes | draft-ietf-moq-loc-04 registry; [issue #23](https://github.com/muxinc/relay-sdks/issues/23) for why the track property is mandatory against the relay |
-| Decoder configuration | Opens the encoder with global headers, splits the Annex B extradata into NAL units, keeps SPS and PPS, builds an avcC, and reads `avc1.PPCCLL` out of its bytes 1 to 3 | ISO/IEC 14496-15, RFC 6381 §3.3 |
-| Bitstream contract | Re-frames every access unit from Annex B start codes to 4-byte length prefixes and drops SPS, PPS, and AUD, because `avc1` promises parameter sets out of band | ISO/IEC 14496-15 |
-| Catalog document | Assembles `version`, a slash-joined `namespace` per track, `packaging: "loc"`, `isLive`, `role`, codec and dimensions, and `initDataList` with base64 inline entries and per-track `initRef`; leaves out `isComplete`, which would declare the live broadcast over ([#284](https://github.com/muxinc/relay-sdks/issues/284)) | draft-ietf-moq-msf-01 §5, read against the Video.js parser for the exact dialect |
-| Catalog track | Registers a track named `catalog` and re-sends the document on every relay subscription, retrying transient failures while demand remains | Video.js `parse-source.ts`; the demand semantics in `behavior.md` |
-| Group mapping | Opens a video group on each keyframe and appends deltas; sends audio as one group per frame; after any failure or loss of demand, discards deltas until the next keyframe | MSF group mapping; Video.js `track-publisher.ts` |
-| Source URL | Composes `moqt://host/path#msf:<ns>--catalog&c4m=<token>`, escaping every byte outside `[A-Za-z0-9_]` in each namespace field as `.xx` | msf-01 §11.1; Video.js `parse-source.ts` |
-| Relay reality | Carries the avcC in the catalog even though LOC puts it on keyframes, because the relay drops odd-typed object properties | Issue #23, observed against relay 0.14.17 |
+| LOC properties, MSF catalog builder and reader, source URL, H.264 configuration records (Python), WebCodecs config mappers (TypeScript) | Format packages: `@caprid/moq-media`, `moq-media` (`moq_media`) | [Format helpers](#format-helpers), [Reading side](#reading-side) |
+| Render and alternate groups, `groupMsfTracks` / `group_msf_tracks` | Format packages | [Several media tracks](#several-media-tracks) |
+| Broadcast clock, source and sample timelines, playout clock | Format packages | [Shared timeline and playout clock](#shared-timeline-and-playout-clock) |
+| Frame sequencer; timestamp playout in TypeScript only | Format packages | [Frame reader](#frame-reader) |
+| Frame writer, catalog service, document service, `mediaTrackProperties`, `mediaSubscribeParameters` | Product packages: `@caprid/relay/media`, `caprid_relay.media` | [Media publishing](#media-publishing) |
+| Frame reader, latest-value reader | Product packages | [Frame reader](#frame-reader), [behavior.md](behavior.md#latest-value-reading) |
+| Audio player, video player, frame hold, echo-cancellation loopback, render clock | `@caprid/moq-media` only | [Audio player](#audio-player), [Video player](#video-player) |
+| Interrupt and transcript formats, `Transcript` | Format packages | [Interrupt track](#interrupt-track), [Transcript track](#transcript-track) |
+| Replaceable track; `findReplacementTrack` / `find_replacement_track` | Product packages; format packages | [Track replacement](#track-replacement) |
+| Media Timeline format and accumulator, published with the document service | Format packages | [Media Timeline track](#media-timeline-track) |
+| Presence track: `publishPresence`, `createPresenceView`, `PRESENCE_TRACK` | `@caprid/relay/media` only | [Presence track](#presence-track) |
+| Opus encoder and decoder | Python only, `moq_media.opus`, behind the `opus` extra | [Package placement](#package-placement) |
 
-That is 347 lines in `moq_media.py`, none of it encoder or network code, plus about 250 lines of
-catalog serving and group mapping in `stream.py`, before a single frame is encoded. None of it is
-specific to this example. A GStreamer, ffmpeg, or WebCodecs publisher writes the same code, and the
-Video.js publisher branch has in fact written it again in TypeScript (`build-catalog.ts`,
-`loc-packaging.ts`, `avc-codec.ts`, `composeMoqSource` in `parse-source.ts`).
-[Issue #29](https://github.com/muxinc/relay-sdks/issues/29) is the symptom: the Python README's own
-media snippet calls `loc_properties()`, a function that exists only in the example.
+The callers in this repository are the Python [Video.js streaming
+example](../python/examples/videojs_stream/README.md) and [voice bot](../python/examples/voice_bot/README.md),
+and the TypeScript [WebCodecs](../ts/examples/webcodecs/README.md) and
+[Mediabunny](../ts/examples/mediabunny/README.md) examples. The format packages' READMEs show
+current usage.
+
+## What a media publisher has to know
+
+The product SDKs stop at bytes, groups and demand, on purpose: "The SDK adds no default timescale,
+timestamp, or LOC media packaging" (behavior.md). Everything a LOC/MSF player such as Video.js's
+needs above that line, the Python Video.js example once carried by hand: 347 lines in its
+`moq_media.py` and about 250 lines of catalog serving and group mapping in `stream.py` (2026-09-18),
+none of it encoder or network code, and the Video.js publisher branch had written the same again in
+TypeScript. Each row is now a helper or SDK behavior:
+
+| Step | What it takes | Now | Where the knowledge comes from |
+| --- | --- | --- | --- |
+| Timing | Timescale 1,000,000 declared as a track property on every track; Timestamp and Timescale on every object, Video Config on keyframes | `locTrackProperties`, `locProperties` | draft-ietf-moq-loc-04; [relay property handling](behavior.md#relay-property-handling) for why the track property is mandatory against the relay |
+| Decoder configuration | SPS and PPS from the encoder's Annex B extradata, an avcC built from them, and `avc1.PPCCLL` read from the avcC's bytes 1 to 3 | `H264Config` (Python); in a browser, WebCodecs supplies the avcC (`videoTrackFromDecoderConfig`) | ISO/IEC 14496-15, RFC 6381 §3.3 |
+| Bitstream contract | Every access unit re-framed from Annex B start codes to 4-byte length prefixes, without SPS, PPS and AUD, because `avc1` promises parameter sets out of band | `H264Config.to_avcc` (Python); WebCodecs outputs AVC format | ISO/IEC 14496-15 |
+| Catalog document | `version`, a namespace per track, `packaging: "loc"`, `isLive`, `role`, codec and dimensions, `initDataList` with inline base64 entries and per-track `initRef`; no `isComplete`, which would declare a live broadcast over | `buildMsfCatalog` | draft-ietf-moq-msf-01 §5, read against the Video.js parser |
+| Catalog track | The document re-sent on every relay subscription, transient failures retried while demand remains | Catalog service | Video.js `parse-source.ts`; the demand semantics in behavior.md |
+| Group mapping | A video group opened on each keyframe, deltas appended; audio one group per frame; after a failure or loss of demand, deltas discarded until the next keyframe | Frame writer | MSF group mapping; Video.js `track-publisher.ts` |
+| Source URL | `moqt://host/path#msf:<ns>--catalog&c4m=<token>`, with every byte outside `[A-Za-z0-9_]` in a namespace field escaped as `.xx` | `composeMoqSource` | msf-01 §11.1; Video.js `parse-source.ts` |
+| Relay reality | The avcC carried in the catalog as well as on keyframes, because the relay drops odd-typed object properties | The builder withholds an `avc1` entry without init data | Observed against relay 0.14.17 and on production since (behavior.md); on relay.mux.global on 2026-11-09, Video Config arrived on none of 10 keyframes |
 
 ## Where the line goes
 
@@ -93,100 +61,59 @@ Three tiers. The SDK owns the bottom two.
 
 | Tier | Owner | Contents |
 | --- | --- | --- |
-| Encoding | Application | Capture, encoder configuration, pacing, time-based buffering and drop policy, reconnection. PyAV, GStreamer, ffmpeg, WebCodecs. |
-| Media packaging | SDK, exists except the `register_media` handle | LOC object properties, the MSF catalog and its serving loop, the source URL, decoder configuration records, keyframe-to-group mapping |
-| Transport | SDK, exists | Connections, tracks, groups, demand, deadlines, cancellation |
+| Encoding | Application | Capture, encoder configuration, pacing, time-based drop policy, reconnection. PyAV, GStreamer, ffmpeg, WebCodecs. |
+| Media packaging | SDK | LOC object properties, the MSF catalog and its serving loop, the source URL, decoder configuration records, keyframe-to-group mapping |
+| Transport | SDK | Connections, tracks, groups, demand, deadlines, cancellation |
 
 The boundary is the encoded frame: bytes, a timestamp, and a keyframe flag. That is what a WebCodecs
 `EncodedVideoChunk` carries and what Video.js's `loc-packaging.ts` consumes. The SDK never configures
-an encoder and never decides that a frame is too old to send. The example keeps its `LiveQueue`.
-The SDK does turn an encoder's output into something a LOC/MSF player can play, and the one place
-the tiers touch, decoder configuration, gets helpers in the packaging tier because an `avc1` catalog
-entry is meaningless without an avcC and PyAV hands back Annex B.
+an encoder and never decides that a frame is too old to send: a frame writer's optional `stale`
+predicate is the application's. The one place the tiers touch, decoder configuration, gets helpers
+in the packaging tier, because an `avc1` catalog entry is meaningless without an avcC and PyAV hands
+back Annex B.
 
-## What the example would look like
+## TypeScript input integration
 
-The Python example, with the encoder, test pattern, pacing, and `LiveQueue` unchanged:
+`@caprid/moq-media` accepts native WebCodecs chunks and decoder configs: `chunkToLocFrame`,
+`videoTrackFromDecoderConfig` and `audioTrackFromDecoderConfig`, and in the other direction
+`videoDecoderConfigFromTrack` and `audioDecoderConfigFromTrack`. The [direct browser
+example](../ts/examples/webcodecs/README.md) connects `VideoEncoder` output to LOC/MSF and Relay
+without a media engine. The helpers copy chunk bytes without converting the bitstream. Encoding,
+callback buffering and capture remain application concerns.
 
-```python
-from caprid_relay import connect_relay_publisher
-from caprid_relay.media import AudioTrack, VideoTrack, register_media  # provisional
-from moq_media.h264 import H264Config
+The optional `@caprid/moq-mediabunny` adapter handles file-input packets, demonstrated by the
+[MP4 example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing. Decoder config
+mapping, LOC properties, MSF catalogs and source URLs belong to `@caprid/moq-media`, with no
+Mediabunny dependency. The adapter keeps compatibility re-exports of the config mappers.
 
-publisher = await connect_relay_publisher(url, namespace=namespace, get_token=lambda: token)
-
-# libx264's extradata is Annex B SPS/PPS. This yields the avcC and the codec string it declares.
-h264 = H264Config.from_annexb(encoder.extradata)
-
-media = register_media(
-    publisher,
-    video=VideoTrack(codec=h264.codec, width=640, height=360, framerate=30, bitrate=1_500_000, init_data=h264.avcc),
-    audio=AudioTrack(codec="opus", bitrate=96_000),  # 48 kHz and channel_config "2" are the Opus defaults
-)
-print(media.source_url(url, token=token))
-
-for sample in encoded_samples():  # the application's encoder loop, however it is built
-    if sample.kind == "video":
-        await media.video.write_frame(h264.to_avcc(sample.payload), timestamp_us=sample.pts, key=sample.key)
-    else:
-        await media.audio.write_frame(sample.payload, timestamp_us=sample.pts)
-
-media.close()
-await publisher.close()
-```
-
-Behind those calls:
-
-- three tracks registered with a microsecond timescale
-- a catalog built with `packaging: "loc"`, the `initDataList` entry and `initRef`, and the `avc1`
-  entry withheld until an avcC exists
-- a catalog service that re-sends the document on every relay subscription
-- frame writers that open a group on each keyframe, append deltas, drop frames while the relay has
-  no demand, and resume at the next keyframe after any failure
-- a source URL with the namespace escaped the way the player decodes it
-
-The same in a browser, where WebCodecs reports the avcC with the first encoded chunk rather than up
-front, which is why the catalog has to be updatable:
-
-```ts
-import { connectRelayPublisher } from '@caprid/relay';
-import { registerMedia } from '@caprid/relay/media'; // provisional
-
-const publisher = await connectRelayPublisher({ url, namespace, getToken });
-const video = { codec: 'avc1.42E01F', width: 640, height: 360, framerate: 30, bitrate: 1_500_000 };
-// The video entry is advertised once initData is known; the audio entry is advertised now.
-const media = registerMedia(publisher, { video, audio: { codec: 'opus', bitrate: 96_000 } });
-console.log(media.sourceUrl(url, { token }));
-
-const encoder = new VideoEncoder({
-  output: (chunk, metadata) => {
-    const description = metadata?.decoderConfig?.description;
-    if (description) media.update({ video: { ...video, initData: new Uint8Array(description as ArrayBuffer) } });
-    void media.video.writeChunk(chunk); // key: new group; delta: append; LOC properties attached
-  },
-  error: console.error,
-});
-encoder.configure({ ...video, avc: { format: 'avc' } });
-```
+TypeScript consumes supplied AVC configuration and four-byte-length packets. Annex B splitting,
+SPS/PPS reconstruction and conversion are Python-only, for the PyAV example. The config mappers
+support AVC and Opus only. Grouping, demand, backlog bounding and catalog serving are SDK code in
+`@caprid/relay/media` (`createFrameWriter`, `createCatalogService`, `createDocumentService`), which
+both TypeScript examples call. Pacing remains example code: the WebCodecs example skips capture
+while the encoder is busy, the frame writer has a backlog, or video has no demand, and the
+Mediabunny example paces file packets in real time.
 
 ## The pieces
 
 ### Format helpers
 
-Pure functions and small records. No I/O, no writer types, usable from a test or a script that
-never opens a connection. Each row names what it replaces in the example and the Video.js module it
-mirrors, so the TypeScript side could start as an attributed snapshot, as `@caprid/moq-core` did.
+Pure functions and small records in the format packages. No I/O and no writer types, so a test or
+a script that never opens a connection can use them. The TypeScript package started as an
+attributed snapshot of the Video.js `media/moq` modules (`UPSTREAM.json`), as `@caprid/moq-core`
+did; the last column names the module each helper came from.
 
-| Helper | Replaces in the example | Video.js module |
-| --- | --- | --- |
-| LOC property registry (`0x10` Timestamp, `0x08` Timescale, `0x0D` Video Config, `0x0F` Audio Config) and the microsecond default | The constants block in `moq_media.py` | `loc.ts` |
-| Track properties for a LOC track (declared timescale) and object properties for one frame (timestamp, timescale, config on keyframes) | `TRACK_TIMESCALE_PROPERTIES`, `loc_properties()` | `loc-packaging.ts` |
-| Catalog builder taking video, audio, and data track descriptions and a namespace, returning the MSF `draft-01` JSON bytes; any number of video and audio tracks, in render and alternate groups ([several media tracks](#several-media-tracks)) | `VideoTrackInfo`, `AudioTrackInfo`, `build_msf_catalog()` | `build-catalog.ts` |
-| Source URL composer, and the namespace and track-name escaping it depends on | `compose_player_url()`, `encode_namespace_name()` | `composeMoqSource`, `encodeNamespaceName` in `parse-source.ts` |
-| H.264 configuration: SPS/PPS from Annex B, avcC from SPS/PPS, `avc1.PPCCLL` from an avcC, and Annex B to AVCC re-framing for each access unit | `extract_parameter_sets()`, `build_avcc()`, `avc_codec_string()`, `annexb_to_avcc()` | `avc-codec.ts` (the codec string; the browser does the re-framing) |
+| Helper | TypeScript | Python | Video.js module |
+| --- | --- | --- | --- |
+| LOC property registry (`0x10` Timestamp, `0x08` Timescale, `0x0D` Video Config, `0x0F` Audio Config) and the microsecond default | `LOC_TIMESTAMP`, `LOC_TIMESCALE`, `LOC_VIDEO_CONFIG`, `LOC_AUDIO_CONFIG`, `MICROSECONDS_PER_SECOND` | the same names | `loc.ts` |
+| Track properties for a LOC track (declared timescale), object properties for one frame (timestamp, timescale, config when supplied) | `locTrackProperties`, `locProperties` | `loc_track_properties`, `loc_properties` | `loc-packaging.ts` |
+| Catalog builder: video, audio and data track descriptions, a media list and a media timeline in, MSF `draft-01` JSON bytes out; the end-of-broadcast catalog | `buildMsfCatalog`, `buildMsfEndCatalog` | `build_msf_catalog`, `build_msf_end_catalog` | `build-catalog.ts` |
+| Source URL composer, and the namespace and track-name escaping it depends on | `composeMoqSource`, `encodeNamespaceName`, `encodeNameComponent` | `compose_player_url`, `encode_namespace_name`, `encode_name_component` | `parse-source.ts` |
+| H.264 configuration: SPS/PPS from Annex B, avcC from SPS/PPS, `avc1.PPCCLL` from an avcC, Annex B to AVCC re-framing | `avcCodecString` only; the browser does the rest | `H264Config`, `extract_parameter_sets`, `build_avcc`, `avc_codec_string`, `annexb_to_avcc` | `avc-codec.ts` |
+| Opus packet duration from its TOC byte (RFC 6716 §3.1) | `opusPacketDurationUs` | `opus_packet_duration_us` | none |
 
-The catalog builder is where most of the value is, because it can refuse to build what a player
-cannot play. The rules come straight from what the example and the Video.js publisher learned:
+The catalog builder is where most of the value is, because it refuses to build what a player cannot
+play. Its rules come from what the example and the Video.js publisher learned:
 
 - An `avc1` or `avc3` entry with no init data is not emitted. WebCodecs never puts parameter sets in
   band for `avc` format, and the relay drops the per-keyframe Video Config property, so a track
@@ -198,102 +125,111 @@ cannot play. The rules come straight from what the example and the Video.js publ
   stream decodes at (RFC 7845 §5.1), and `channelConfig` is a string.
 - Members of one alternate group share a role and a render group (see
   [several media tracks](#several-media-tracks)).
-- Data tracks are emitted with name and role only. A media role on an entry with no codec would
-  round-trip into an undecodable renderable track.
+- Data tracks are emitted with name and role only, and a media role on one is refused: an entry
+  with no codec and a media role would round-trip into an undecodable renderable track.
 - Fields the caller left out are omitted, never nulled, and the document is compact JSON, so the
   bytes are stable enough to compare and to put in `spec/vectors/`.
+- A deliberate end of broadcast follows msf-01 §11.3: the application ends its media tracks, then
+  sends `buildMsfEndCatalog`'s document (`isComplete: true`, no tracks) on the catalog track. A
+  failure does not send it. The Python Video.js example and the Mediabunny example do this.
 
 ### Media publishing
 
-The stateful part, which wraps `RelayTrackWriter` and therefore lives beside the product API. One
-call registers the catalog track and every media track with the LOC timescale declared, builds
-the first catalog, and starts serving it. It returns a handle with one frame writer per media
-track, the raw catalog writer for anyone who wants it, and a `close()` that ends the catalog
-service and the tracks. A deliberate `close()` follows msf-01 §11.3: it ends the media tracks,
-then sends the end-of-broadcast catalog (`isComplete: true`, no tracks) before closing the catalog
-track. A failure does not send it.
+The stateful part lives in the product packages, beside `RelayTrackWriter`, and knows no format: a
+frame carries the object properties its caller built (`locProperties`, or `chunkToLocFrame` in a
+browser), and a document is bytes. [behavior.md](behavior.md#media-publishing) is the contract. The
+application composes the pieces: it registers each media track with `locTrackProperties()` and
+`mediaTrackProperties(kind, ...)`, wraps it in a frame writer, builds the catalog with
+`buildMsfCatalog`, and serves that with a catalog service, or with a document service when the
+catalog changes. No one call does all of this ([Not built](#not-built)).
 
-Each media track is registered with its default delivery timeout and publisher priority from
-`mediaTrackProperties` / `media_track_properties` ([issue #302](https://github.com/muxinc/relay-sdks/issues/302),
-[issue #316](https://github.com/muxinc/relay-sdks/issues/316)), which the handle would compute from
-the track's kind and keyframe interval. A viewer subscribes to each media track with
-`mediaSubscribeParameters` / `media_subscribe_parameters` for the matching subscriber priority
-([issue #337](https://github.com/muxinc/relay-sdks/issues/337)), the only one moq-relay 0.17 orders delivery by.
+`mediaTrackProperties` / `media_track_properties` gives a media track its default subgroup delivery
+timeout (audio 500 ms; video the target latency less the keyframe interval, but never less than one
+interval, so one interval by default) and Default Publisher Priority (audio 16, video 96). A viewer subscribes with
+`mediaSubscribeParameters` / `media_subscribe_parameters` for the matching SUBSCRIBER_PRIORITY,
+the only priority moq-relay 0.17 orders delivery by.
 
 The catalog service is the loop the example's `serve_catalog()` ran on 2026-09-18, generalized:
 
-- On every `True` from the catalog track's demand iterator, write the current document as one
-  independent group. The repeated `True` for a replacement relay subscription matters most,
-  because a viewer joining after a relay reconnect needs it.
-- `update()` rebuilds the document from new track descriptions. Identical bytes send nothing.
-  Changed bytes go out as a new group at once if demand is present, and on the next subscription
-  otherwise. Every catalog object is a random-access point, which is what the MSF independent
-  catalog form requires.
-- A transient write failure is retried after a pause while demand remains, keeping only the latest
-  document. A closed track or connection ends the service and is reported once.
-- The catalog advertises only tracks the handle has registered. Adding a track through `update()`
-  registers it first. Removing one from the catalog does not free its name on this connection,
-  which `behavior.md` already forbids, so the handle says so rather than letting a later `update()`
-  fail on the relay.
+- On every `true` from the catalog track's demand, write the document as one independent group. The
+  repeated `true` for a replacement relay subscription matters most, because a viewer joining after
+  a relay reconnect needs it. Every catalog object is a random-access point, which the MSF
+  independent catalog form requires.
+- Its document is fixed. A catalog that changes is served by the document service instead (see
+  [Keeping the catalog current](#keeping-the-catalog-current)), whose `update()` sends the new
+  document as a new group at once while the relay is subscribed, and on the next subscription
+  otherwise. It sends the latest document, not every update: updates made while a write is in flight
+replace one another, and only the last goes out. It never skips one with the same bytes as the last.
+- A transient write failure is retried after a pause (default 1 s) while demand remains, keeping
+  only the latest document. A track that ends ends the service.
+- The application registers a track before listing it in a catalog. Removing a track from the
+  catalog does not free its name on the connection, which behavior.md already forbids reusing.
 
 The frame writer is the mechanism the example's `publish_media()` had on 2026-09-18, without the
 example's time-based staleness policy:
 
-- Video: a keyframe closes the open group and opens a new one. A delta appends to the open group.
-  While the relay has no demand, frames are counted and not sent, without waiting on the write
-  deadline, because an encoder loop cannot block for ten seconds. When demand returns, and after any
-  group failure, deltas are discarded until the next keyframe.
-- Audio, and any track marked as one group per frame: every frame is its own single-object group,
-  the LOC mapping for independently decodable frames.
-- LOC object properties are attached from the frame's timestamp and the track's declared timescale.
-  The track's current init data rides keyframes as Video Config or Audio Config, for consumers
-  that receive odd-typed properties, and the catalog stays the copy players rely on.
-- Calls on one writer are serialized in arrival order, so a callback-driven encoder can call it
-  without tracking a pending write. Backpressure is bounded in frames, not groups: Video.js's three
-  queued groups are seconds of video, too much for live. When the backlog is full, keyframe grouping
-  drops it with the open group and resumes at the next keyframe, and frame grouping drops the oldest
-  frame. The writer says when it needs a keyframe so the encoder can force one
-  ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)). Whether to discard a frame
-  because it is late against a clock stays with the application.
+- Keyframe grouping (video, the default): a keyframe closes the open group and opens a new one, and a
+  delta appends to it. While the relay has no demand, each frame is reported `skipped` at once,
+  without waiting on the write deadline, because an encoder loop cannot block for ten seconds.
+  When demand returns, and after any group failure, deltas are skipped until the next keyframe.
+- Frame grouping (audio, and anything else independently decodable): every frame is its own
+  single-object group, the LOC mapping for independently decodable frames.
+- The writer sends the frame's properties as given. Video Config or Audio Config rides a keyframe
+  only when the caller put it there, for consumers that receive odd-typed properties; the catalog
+  stays the copy players rely on.
+- Calls on one writer are served in arrival order, so a callback-driven encoder can call it without
+  tracking a pending write. The backlog is bounded in frames, not groups: Video.js's three queued
+  groups are seconds of video, too much for live. Under keyframe grouping the bound defaults to 8
+  frames, and a full backlog drops it with the open group and resumes at the next keyframe. Frame
+  grouping has no default bound, so it drops no frame for the backlog unless the application sets
+  one, and then drops the oldest.
+- Under keyframe grouping the writer says when it needs a keyframe (`keyframeNeeded` /
+  `keyframe_needed`), and `onKeyframeNeeded` / `on_keyframe_needed` fires on each entry into that
+  state, so the encoder can force one rather than wait out its interval. A new relay subscription,
+  an interruption, a drop, and a supervised track's move to a new generation all count.
 - Each `write` reports what became of its frame: `sent`, `skipped`, `stale`, `dropped`,
-  `interrupted`, or `ended` (`FrameOutcome.kind` in both SDKs). The writer keeps only
-  `groups`, `objects`, `backlog`, and `keyframeNeeded` / `keyframe_needed`. Video.js's track
-  publisher keeps a fixed set of counters, but the writer does not. An application counts the
+  `interrupted`, or `ended` (`FrameOutcome.kind` in both SDKs). The writer keeps only `groups`,
+  `objects`, `backlog`, `keyframeNeeded` / `keyframe_needed` and `ended`. An application counts the
   outcomes it cares about, grouped the way it wants, and adds `frame.payload`'s length if it wants
-  bytes. The Python example's `finished` line does this
-  ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)).
+  bytes. The Python example's `finished` line does this.
 - An interruption resets the group and leaves the track open. A track that ends on its own is an
   `ended` outcome, for that frame and every later one, and the writer's `ended` holds the error.
   It is not an exception, because the encoder keeps producing frames. Only a `write` after the
   application's own `close()` raises `CLOSED`. An application that wants the example's
   stop-the-run policy stops on the first `ended` outcome.
 
+A viewer that joins mid-GOP needs no replay from the publisher. A plain SUBSCRIBE to moq-relay
+starts at the beginning of the relay's latest group, so a viewer joining while the relay is
+subscribed gets the group from its keyframe out of the relay's cache
+([relay interop](relay-interop.md#late-subscribers-and-location-filters)). Only a new relay
+subscription reaches the publisher. The writer then skips deltas until the next keyframe. It raises
+`onKeyframeNeeded` unless a keyframe is already due, as before the first one, or already covers the
+new demand ([behavior.md](behavior.md#media-publishing)), so an encoder must also start on a keyframe. It does not replay the open group.
+
 ### Reading side
 
-Before stage 3, the example's `--verify` mode and any non-browser consumer did the inverse by
-hand. Three readers, symmetric with `read_text` and `read_json`:
+Three readers, symmetric with `read_text` and `read_json`:
 
-- Parse a catalog object into track descriptions, in the independent catalog form. Delta updates
-  can wait until a publisher in this repository emits them. Shipped as `parseMsfCatalog` /
-  `parse_msf_catalog` (see [behavior.md](behavior.md#media-helpers)).
+- Parse a catalog object into track descriptions, in the independent catalog form:
+  `parseMsfCatalog` / `parse_msf_catalog` ([behavior.md](behavior.md#media-helpers)). Delta updates
+  are not read; no publisher in this repository emits them. The TypeScript reader is the Video.js
+  parser's independent-catalog path. The Python example's `--verify` logs the track list it reads.
 - Turn a track's objects into frames in decode order within a latency budget: the
   [frame reader](#frame-reader) below.
-- Turn an object plus the track's received timescale into a frame: payload, timestamp in
-  microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
-  Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.
-  Its timestamp part ships as `locTimestampUs` / `loc_timestamp_us`
-  ([issue #290](https://github.com/muxinc/relay-sdks/issues/290)): an object's Timestamp in
+- Read an object's timestamp: `locTimestampUs` / `loc_timestamp_us` gives its Timestamp in
   microseconds, scaled by the first Timescale it finds on the object, then in the track properties
   (`SUBSCRIBE_OK`'s, as the relay sends them). It does not read the catalog's `timescale`: msf-01
   §5.2.21 never ties that field to the LOC Timestamp, and a catalog that set it for another purpose
   would silently rescale a Timestamp LOC defines as microseconds. With no Timescale, the Timestamp
-  already is microseconds since the epoch (LOC §2.3.1.1). Reading `0x10` as raw microseconds works against
-  moq-relay only because it rescales every timestamp to microseconds and declares Timescale
-  1,000,000. A relay that passes the publisher's Timescale through needs the scaling.
+  already is microseconds since the epoch (LOC §2.3.1.1). Reading `0x10` as raw microseconds works
+  against moq-relay only because it rescales every timestamp to microseconds and declares Timescale
+  1,000,000. A relay that passes the publisher's Timescale through needs the scaling. Video.js's
+  `toLocFrame` was the reference. Unlike it, `locTimestampUs` reads only `0x10`, not draft-03's
+  Timestamp ID `0x06`.
 
 ## Several media tracks
 
-[Issue #351](https://github.com/muxinc/relay-sdks/issues/351). A broadcast can carry simulcast
+A broadcast can carry simulcast
 layers and more than one source, such as a camera and a screen share. msf-01 describes both with
 two integers on a track entry:
 
@@ -354,8 +290,9 @@ A publisher's encoder configuration can change mid-broadcast: a camera switch, a
 window, a codec fallback from H.264 to VP8. Each change is a new catalog. Serve the catalog with
 `createDocumentService` / `DocumentService` instead of the fixed catalog service, and `update()` it
 with the rebuilt bytes when the configuration changes. The new document goes out as a new group at
-once while the relay is subscribed, and identical bytes send nothing. Adding a track this way
-registers it first. A track removed from the catalog keeps its name on the connection.
+once while the relay is subscribed. The service does not compare bytes, so skip an update whose
+bytes have not changed. Register a new track before the catalog that lists it. A track removed from the
+catalog keeps its name on the connection.
 
 msf-01 §5.3 fixes a track's attributes to its namespace and name: "To modify any attribute, a new
 track with a different Namespace|Name tuple is created". The rule sits among the delta-update
@@ -365,8 +302,7 @@ and let viewers move to it with `want(..., { until })`. Rewriting a listed track
 works only with viewers that reconfigure their decoder on every catalog, and is outside msf-01.
 
 Either way, a viewer can receive a key frame before the catalog that describes it, because the catalog and the
-media are separate tracks. Until relays forward object properties
-([issue #262](https://github.com/muxinc/relay-sdks/issues/262)), the catalog is the only copy of
+media are separate tracks. Until relays forward object properties, the catalog is the only copy of
 the decoder configuration a viewer can rely on, so a viewer that sees a key frame it cannot decode
 with its current configuration waits for the next catalog and drops frames until then. Once relays
 forward them, the LOC Video Config property on each key frame (`0x0D`) is the earlier copy, and a
@@ -378,7 +314,7 @@ scalable-coded track carries) and delta catalog updates.
 
 ## Shared timeline and playout clock
 
-[Issue #285](https://github.com/muxinc/relay-sdks/issues/285). Implemented in both format packages.
+Implemented in both format packages.
 [behavior.md](behavior.md#media-helpers) holds the testable rules.
 
 ### One timeline, anchored at the Unix epoch
@@ -402,7 +338,7 @@ them from one broadcast clock:
   §5.2.8 `targetLatency`, §7 Media Timeline, §8 Event Timeline, all in wall-clock time). How well
   two broadcasts line up is bounded by how far apart their publishers' system clocks are, and by
   each publisher's capture-latency error (see [Capture latency](#capture-latency)).
-- [Issue #290](https://github.com/muxinc/relay-sdks/issues/290) chose this over #285's original
+- This replaced the original
   convention, which zeroed each broadcast at its own monotonic origin. Under that convention a
   player could reach wall-clock time only through the millisecond-resolution Media Timeline, which
   rules out honouring `targetLatency` per frame and leaves syncing between broadcasts undefined.
@@ -549,8 +485,7 @@ the encoded media frame") and no draft has a separate field for it, but it has c
   280–410 ms. Only an application that can tell call mode apart can do better.
 
 Measured with the [device latency lab](../tools/device-latency/README.md) on macOS 26.6 (MacBook
-Air, Chrome and Firefox, 2026-10-13; raw results on
-[issue #290](https://github.com/muxinc/relay-sdks/issues/290)). The figure is how late the capture
+Air, Chrome and Firefox, 2026-10-13). The figure is how late the capture
 recipe stamps a click, net of what the browser reports for the output path:
 
 | Input | Output | Chrome | Firefox |
@@ -648,7 +583,8 @@ consistently, the audio path needs a deeper buffer, and the clock cannot add one
 | Target latency | `targetLatencyUs` | `target_latency_us` | 2 × the longest of the last four reported keyframe intervals; 2,000,000 before any | Two GOPs: room to wait for a late group and still decode up to the next keyframe; see [Frame reader](#frame-reader). For a broadcast with no video, pass `AUDIO_ONLY_TARGET_LATENCY_US` (500,000); see [Audio player](#audio-player) |
 | Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
 
-The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
+The clock does not buffer, decode, or render frames. The [video player](#video-player) does that on top of
+it. The clock never changes how much audio is buffered.
 The target it is built for is the broadcast guidance of ITU-R BT.1359 and EBU R37: audio within
 about ±45 ms of video, and not audibly early.
 
@@ -659,7 +595,7 @@ audio plays that much late.
 
 #### Measured in browsers
 
-[Issue #288](https://github.com/muxinc/relay-sdks/issues/288). `mise run ts:test:av-sync` publishes
+`mise run ts:test:av-sync` publishes
 the WebCodecs example's canvas and microphone and plays them back in the same page, through the
 production Relay in Chromium and through the in-memory relay hub in Firefox (and, since Firefox 155,
 through the Relay too, as described below). Every 600 ms the canvas
@@ -667,7 +603,7 @@ flashes white and a synthetic microphone beeps. The A/V offset is how much later
 the player's output after it was emitted than the white frame was shown after it was captured.
 Frame quantization does not count, because the white frame's own capture time is the video
 reference. The figures are net of the beep's path to the capture worklet. That path stands in for
-a real microphone's input latency, which no browser reports (#290), and it was 0–55 ms here.
+a real microphone's input latency, which no browser reports ([Capture latency](#capture-latency)), and it was 0–55 ms here.
 "Settled" leaves out events emitted or played within 2 s of any switch. Results from 2026-10-07, in
 ms, positive when audio is late:
 
@@ -688,7 +624,7 @@ dropped frame and no pause between frames longer than 44 ms. With the defaults (
 outlier came at startup: the first flash, emitted before any audio had reached the player, was off
 by −246 ms while the clock was still pacing by the wall clock.
 
-A re-run on 2026-10-14, after #290 moved every timestamp onto the Unix epoch, gave the same
+A re-run on 2026-10-14, after every timestamp moved onto the Unix epoch, gave the same
 picture with 8 s phases: settled means between 2.2 and 5.3 ms in Chromium through the Relay and
 between −3.6 and 0.8 ms in Firefox through the hub, with no frame dropped in either.
 
@@ -700,7 +636,7 @@ played audio 33–36 ms late, and Chromium's settled offsets stayed within ±17 
 Firefox reaches the Relay over WebTransport from 155 (stable 2026-09-01), which added the
 `protocols` option and the `protocol` attribute. Firefox 148 has neither, and the SDK refuses a
 session that negotiates no protocol ([transport-adapter.md](transport-adapter.md), TA-7). A run on
-2026-10-19 ([issue #322](https://github.com/muxinc/relay-sdks/issues/322)), with Playwright's
+2026-10-19, with Playwright's
 Chromium 153 and Firefox 155 both through the production Relay (sjc), passed every phase, in ms:
 
 | Phase | Chromium 153, Relay: settled mean [min, max] | Firefox 155, Relay: settled mean [min, max] |
@@ -712,8 +648,9 @@ Chromium 153 and Firefox 155 both through the production Relay (sjc), passed eve
 | Audio resumed after a 3 s gap | 4.8 [−19.3, 29.4] | −2.0 [−5.1, 1.2] |
 
 Each dropped at most one frame in the whole run. The same day's Firefox run through the hub failed,
-in 148 and in 155 alike: its player has judged nearly every video frame late since the frame reader
-landed ([issue #339](https://github.com/muxinc/relay-sdks/issues/339)).
+in 148 and in 155 alike, with nearly every video frame judged late. The cause was the test hubs,
+which put each object on a stream of its own so that frame readers never saw a whole group, not
+lateness. Both hubs were fixed on 2026-10-20.
 
 Over QMux over WebSocket (`@caprid/relay-websocket`), Firefox 148 and Playwright's WebKit both passed
 the live data scenario against a local moq-relay 0.17.5 on 2026-10-17
@@ -731,7 +668,7 @@ WebTransport session to the Relay (it can reach it over WebSocket, above), and i
 
 ### Frame reader
 
-[Issue #303](https://github.com/muxinc/relay-sdks/issues/303). Implemented in both SDKs.
+Implemented in both SDKs.
 [behavior.md](behavior.md#media-subscribing) holds the testable rules.
 
 Each group travels on its own stream, and streams are not ordered relative to each other. After a
@@ -784,7 +721,7 @@ package, so the reader takes the sequencer as an argument.
 Measured live on 2026-10-15: the A/V test (`mise run ts:test:av-sync`) in Chromium 147 against
 `sjc.relay.mux.global`, through a UDP impairment proxy that, 4 s into playback, either blacked out
 both directions for 2 s or capped the uplink at 80 kbit/s (1 s queue) for 4 s. The publisher uses
-[#302](https://github.com/muxinc/relay-sdks/issues/302)'s default delivery timeouts. The player reads
+the default delivery timeouts. The player reads
 both tracks through frame readers, keeps a 150 ms audio jitter buffer, drops audio whose slot has
 passed instead of re-anchoring on it, and re-anchors at a resync, a restart, or a schedule more than
 100 ms beyond its depth. "Ahead" is the audio scheduled ahead of the context's time at each later
@@ -796,7 +733,7 @@ phase boundary, the first about 6 s after the impairment:
 | 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 3 of 3 passed; 120–170 ms ahead |
 | Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 3 of 3 passed; 126–197 ms ahead |
 
-Over the rounds before the final one, after the rebase onto #302: 14 of 15 unimpaired runs, 11 of 12
+Over the rounds before the final one, after the media delivery timeouts landed: 14 of 15 unimpaired runs, 11 of 12
 blackouts and 11 of 11 capped runs passed. Unimpaired, the readers' counters stayed at zero skips and
 resyncs, with at most two audio frames dropped as late. The two failures were an unimpaired video
 stall of 3.2 s, before the player's last fixes and not seen again, and the WebCodecs example's own
@@ -805,7 +742,7 @@ encoder-queue guard ("The audio encoder cannot keep up") tripping after one blac
 Getting here took three rules found in these runs: a resync only on a steady delay, a resync
 forward when the clock is behind what arrives, and the player's bounded jitter buffer.
 
-The publisher side of the same stall is [issue #302](https://github.com/muxinc/relay-sdks/issues/302)'s
+The publisher side of the same stall is the
 delivery timeouts. They derive from the same keyframe interval, about one interval for video, under
 the reader's two, so a publisher stops spending bandwidth on frames the reader would drop. Nothing
 links the two on the wire.
@@ -907,7 +844,7 @@ round trip, as for any frame a live talker sends.
 
 ### Audio player
 
-[Issue #314](https://github.com/muxinc/relay-sdks/issues/314). TypeScript only, in
+TypeScript only, in
 `@caprid/moq-media`: `createAudioPlayer({ context })` plays any number of inputs, usually one per
 speaker, into one `AudioContext`. Each `player.addInput({ clock, decoderConfig })` takes frames in
 decode order from a frame reader (`onFrame: input.push`), decodes them with WebCodecs, holds them in
@@ -1059,8 +996,7 @@ time. While the buffer is dry it reports nothing, so the clock runs on by itself
 missed their slot are dropped as late instead of played late.
 
 The input calls four members of its clock, `targetLatencyUs`, `localNow`, `reportAudio` and
-`stopAudio` (`AudioInputClock`), so a player can pass its own clock instead of a `PlayoutClock`
-([issue #329](https://github.com/muxinc/relay-sdks/issues/329)). The Video.js renderer does: its
+`stopAudio` (`AudioInputClock`), so a player can pass its own clock instead of a `PlayoutClock`. The Video.js renderer does: its
 clock holds where the buffer ran dry rather than handing over to wall pacing, which would step the
 position back when audio resumes. Such a clock needs to know what the worklet has played, which it
 cannot rebuild from the frames pushed and the timing of reports, so each report carries the input's
@@ -1139,7 +1075,7 @@ In both runs the target shrank from 60 to 50 ms during the steady phase, playbac
 cut with no underrun, and the frame sequencer resynced nothing.
 
 Rerun on 2026-10-19 with two phases between the steady phase and the cut: playback rate 0.95 for a
-second, then 1.05 for a second ([issue #329](https://github.com/muxinc/relay-sdks/issues/329)).
+second, then 1.05 for a second.
 "Delay moved" is the playout delay at the end of the phase less at its start. A second at ±5 %
 should move it 50 ms. "Largest step" is the largest difference between two consecutive output
 samples, read through an `AnalyserNode` every 20 ms (a rerun after the fix for running dry at a
@@ -1159,9 +1095,184 @@ The steady phases in the same runs: hub 399 frames, buffer 46 [56] ms, delay 101
 latency 42 ms; Relay 400 frames, buffer 43 [53] ms, delay 142 ms. The hub's steady phase concealed
 25 ms of frames that came late, which no rate phase did.
 
+### Video player
+
+TypeScript only, in
+`@caprid/moq-media`. `createVideoPlayer({ clock, decoderConfig, render })` decodes one video track
+with WebCodecs and hands each decoded frame to `render` when the broadcast's playout clock says it
+is due. It takes frames in decode order from a frame reader (`onFrame: player.push`). It has no UI
+and no transport. The motivating consumer is a Video.js playback adapter. The application opens the
+connection with the SDK and hands it to Video.js, which keeps the media element API, the UI and the
+choice of rendition. The SDK keeps the protocol, the timing and the decode.
+
+```ts
+const clock = createPlayoutClock();
+const player = createVideoPlayer({
+  clock,
+  decoderConfig: videoDecoderConfigFromTrack(videoTrack),
+  render: canvasRenderer(canvas),
+});
+const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
+```
+
+Share the clock with the broadcast's audio input and with every frame reader's sequencer. Audio
+then drives the video. Without audio, the clock paces it by the wall clock.
+
+The WebCodecs example's `watchVideo` is built on the player. It subscribes to the video track with
+the catalog, holds the frames until the catalog gives the decoder config, and draws with
+`canvasRenderer`. Before the player existed it kept its own decoder, keyframe wait and paced queue.
+
+**Presenting.** Decoded frames wait in a queue in the order the decoder outputs them, which is
+presentation order. The player asks the clock about the earliest, `clock.due(frame.timestamp)`. A
+decoded frame's timestamp is its chunk's, the LOC timestamp on the broadcast timeline. On `show` the
+player hands the frame to `render`. On `drop` it closes the frame. On `wait` it sets one timer and
+asks again when it fires. The timer is at most 50 ms, because the audio input or another track's
+sequencer can move or reset the shared clock meanwhile. The frame reader polls at the same bound
+for the same reason. The player rounds waits up to whole milliseconds. Browsers truncate a timeout to
+whole milliseconds, so a frame due in 33.3 ms woke the player after 33 ms. The browser then clamped
+the remaining 0.3 ms wait to 4 ms as a nested timer, and frames showed about 4 ms late. Rounding up
+took the wall-paced p95 sync error from 3.8 to 4.0 ms down to 1.0 ms on a hub run.
+
+The player also asks the clock each time the decoder outputs a frame, not only when its timer
+fires. A frame that is due or late then leaves the queue as soon as the next frame is decoded, and
+only frames ahead of the clock wait. That matters in a hidden tab. Chromium runs a hidden page's
+timers at most once a second, and once a minute after five minutes without sound (its throttling
+policy, not measured here). A player paced by its timer alone would hold every frame decoded
+meanwhile.
+
+The queue has no bound in frames. The clock bounds it in time. It shows the head within
+`maxVideoDelayUs` (1 s by default), or at once as a re-sync. A hardware decoder whose pool of frames
+is full therefore outputs again as frames are shown. The WebCodecs example's `watchVideo` kept at
+most 16 decoded frames and drew the oldest early past that, for three reasons. The player covers
+each without a frame count:
+
+- Throttled timers let decoded frames pile up. Asking the clock at each decoded frame keeps only
+  the frames ahead of it.
+- A hardware decoder stops outputting while its pool of frames is held. The head is due within
+  `maxVideoDelayUs`, so the decoder resumes. A bound larger than the pool never trips, because the
+  check runs on output and no output comes.
+- Audio may lag video by more than the bound. The bound counts frames, but the wait is time. The
+  audio player's 400 ms jitter ceiling plus its output delay, about 450 ms, is 14 frames at 30 fps
+  and 27 at 60 fps. A bound of 16 would draw 60 fps video about 180 ms early in normal playback. The
+  clock's limit holds at any frame rate.
+
+Before `watchVideo` moved onto the player, its live test drew no frame early past the bound in any
+phase (`overflowed` 0 through the in-memory hub, 2026-11-06). The move changed one number. Over
+four runs of each through the hub (`WATCH_VIDEO_TRANSPORT=hub mise run ts:test:watch-video`), the
+old `watchVideo` drew frames 3.2 to 4.1 ms after the clock said they were due in 10 of 12 samples
+taken at the phase boundaries. Its timers took fractional milliseconds, so the truncation and 4 ms
+clamp above applied. The player drew them 0.1 to 1.0 ms after in all 12. The resumed phase's mean
+A/V offset moved by about the same amount, from a range of 0 to 3.7 ms to a range of 5.5 to 7.1 ms
+(positive is audio late), inside the test's ±45 ms. The player's frames are within 1 ms of the clock, so the rest of that offset lies between
+the clock and the audible audio.
+
+**Borrowed frames.** `render(frame)` borrows the frame. The player closes it when `render` returns,
+and a sink that keeps a frame keeps `frame.clone()`. A hardware decoder has a fixed pool of output
+frames and stops outputting while all of them are held. Headless Chromium 153 has no GPU and decodes
+in software, so a prototype that held 120 output frames unclosed did not stall. All 120 came out in
+66 ms. That run says nothing about a hardware decoder's pool. Because the player closes every frame
+in one place, a sink cannot stall the decoder by forgetting to close one. An exception from `render` goes to `onError`, or to
+`console.error` without one. The player still closes the frame and plays on.
+
+The issue asked whether the output should be a callback that closes the frame or a canvas. It is
+a callback that borrows the frame, so the player stays headless and a Video.js adapter or a WebGL
+renderer passes its own. `canvasRenderer(canvas)` is the quick start. It draws each frame onto an
+`HTMLCanvasElement` or an `OffscreenCanvas` and sizes the canvas to the frame's display size when
+that changes. `videoDecoderConfigFromTrack(track)` reads the decoder config from the catalog: the
+codec, the init data as the description, the width and height as the coded size when both are
+present, and `optimizeForLatency`.
+
+**Decoding.** The decoder needs a keyframe to start from. At each discontinuity the player decides
+what to do with the frames before it:
+
+| When | The player |
+| --- | --- |
+| It starts | Skips frames until a keyframe, which configures a new decoder |
+| `gap` | Flushes the decoder and keeps the frames waiting, which are still on the timeline. The flush outputs what the decoder holds, including frames held for reordering, and the decoder then takes only a keyframe. The sequencer delivers a keyframe after a gap. A frame after a gap that is not a keyframe is skipped, as is every frame until one |
+| `resync` or `restart` | Resets the decoder, which drops the output it still holds, closes every frame waiting, and skips frames until a keyframe. All of it belongs to the replaced timeline, and the sequencer has already reset the clock |
+| The decoder fails | Opens a new decoder at the next keyframe and skips frames until it. A decoder that fails before it output any frame, or with a `NotSupportedError`, fails for good. A new decoder with the same config would fail the same way at every keyframe, so the player skips every frame until `configure(config)` |
+| `reset()` | Does now what a `resync` or `restart` does. Call it when the app learns of a restart before the next frame arrives, such as from a supervised want's `onRestarted`. The restart has already moved the clock, so the frames waiting would look due and fill the gap with the old picture. A `restart` frame right after it finds nothing left to reset |
+| A frame marked `key` is not a keyframe | WebCodecs inspects a chunk marked `key` and throws a `DataError` when it is not one, leaving the decoder configured. The player reports it, keeps the decoder, and skips frames until the next keyframe. It does not count as the decoder failing for good |
+| `configure(config)` | Applies the config at the next keyframe pushed. Frames pushed before that keyframe still decode with the config they belong to, as at a rendition switch made before the new track's first keyframe arrives |
+
+The issue's sketch reset the decoder at every discontinuity. A gap flushes it instead, because the
+frames decoded before the gap are still due on the same timeline. A reset would drop the ones the
+decoder still holds. Keeping the decoder as it is would leave it holding references from before the
+gap. After an open-GOP keyframe, such as an HEVC CRA, the leading pictures would decode against
+them. In headless Chromium 153, `flush()` followed at once by the next keyframe's `decode()` output
+every frame in order with no error (2026-11-09). That the flush also drops the references comes
+from how Chromium's decoders flush, not from a measurement. Headless Chromium has no HEVC decoder.
+
+The player relies on these stream conventions. The drafts leave each one open, and the SDK's
+publishers follow them all:
+
+- **A keyframe opens each group.** The frame sequencer marks object 0 of a group as `key`. MOQT-22
+  lets a subgroup start at any Object ID, and MSF-01 §4.1 keeps a GOP within one group without
+  saying the group starts at a keyframe. LOC-04's "Object 0 is the IDR frame" is in an example. A
+  frame marked `key` that is not one is skipped, as above. Reading LOC Video Frame Marking (0x09)
+  where present would let the sequencer mark keyframes from the stream itself.
+- **The LOC timestamp is the presentation time.** LOC-04 §2.3.1.1 says only "the timestamp of the
+  encoded media frame", and there is no decode-time property. The player paces each decoded frame
+  by its timestamp, which is right for B-frames only when publishers stamp presentation time.
+- **The decoder config is the catalog's or `configure()`'s.** The player ignores Video Config
+  (0x0D). It is odd-typed, and relay.mux.global still drops it. In the video player's live test on
+  2026-11-09, none of 10 keyframes arrived with it, against 10 of 10 through the in-memory hub. Neither
+  draft says whether 0x0D or the catalog's init data wins. An adapter that sees a new config calls
+  `configure()`.
+- **Catalog `width` and `height` are a hint.** MSF-01 §5.2.26 makes them the maximum encoded size.
+  `videoDecoderConfigFromTrack` passes them as `codedWidth` and `codedHeight`, which WebCodecs also
+  treats as a hint.
+- **The payload format follows the codec string.** An `avc1` track with init data decodes as
+  length-prefixed NAL units with the avcC as `description`. A track with no init data decodes as
+  Annex B.
+- **Alternates share a timeline.** MSF-01 §4.2 requires altGroup tracks to be time-aligned, but not
+  to share an origin or a timescale. Switching renditions on one player by comparing timestamps
+  relies on the SDK's publishers stamping every rendition on one broadcast clock.
+
+`player.stats` (`VideoPlayerStats`) counts frames `decoded`, `shown` (handed to `render`),
+`dropped` (by the clock), `skipped` (while waiting for a keyframe, or after the decoder failed for
+good), `decoderResets` and `errors`,
+and holds the frames `queued` now and `lastOffsetUs`, the clock's offset for the last frame shown.
+`dropped` and `skipped` call for different fixes. Frames dropped mean video arrives too late for
+the clock. Frames skipped mean frames came before a keyframe, or the decoder cannot decode the track. `player.joinPhases`
+(`VideoPlayerJoinPhases`) holds `createdUs`, `firstPushUs`, `firstDecodedUs` and `firstShownUs`, on
+the clock's local time source.
+
+**Workers.** The player uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it runs in a
+dedicated worker as it is. A prototype in headless Chromium 153 found `VideoDecoder`,
+`EncodedVideoChunk`, `requestAnimationFrame` and `WebTransport` in a dedicated worker, and drew
+decoded frames onto an `OffscreenCanvas` transferred to it. For video alone, a worker can run the
+connection, the frame reader and the player on a wall-paced clock of its own. `AudioContext` does
+not exist in workers, so the audio-driven playout clock lives on the main thread. A/V sync with the
+player in a worker would need the main thread's audio reports posted across, their times converted
+between the two realms' `performance.now()` through `performance.timeOrigin`. That is not built.
+
+Measured on 2026-11-06 with `mise run ts:test:video-player`. Headless Chromium 153.0.8010.12 publishes
+the WebCodecs example's canvas (320×180 AVC at 30 fps, a keyframe every second) and a synthetic
+microphone through the in-memory hub. Three players play the video back. `wall` has a clock of its
+own and draws onto a canvas element. `audio` shares the audio-only listener's clock. `worker` plays
+the `wall` player's frames in a dedicated module worker onto a transferred `OffscreenCanvas`. The
+window starts once all three show video and audio drives the `audio` player's clock, which in
+headless Chromium was about 2 s after the first video frame. Over 8 s of the broadcast timeline the
+publisher encoded 241 frames:
+
+| Player | Shown | Dropped | Errors | Sync error p50 / p95 / max, ms | First frame shown, ms after creation |
+| --- | --- | --- | --- | --- | --- |
+| `wall` | 241 | 0 | 0 | 0.2 / 0.5 / 0.8 | 26 |
+| `audio` | 241 | 0 | 0 | 0.62 / 8.6 / 10.3 | 27 |
+| `worker` | 241 | 0 | 0 | 0.9 / 1.0 / 1.0 | 11 |
+
+The sync error is the clock's `|offsetUs|` for each frame shown. The `audio` player's is larger
+because each audio report moves the clock a little between the player's timers. Its clock ran on
+audio for every 20 ms sample in the window. Every canvas showed the publisher's two colors within
+one level per channel. The page's decoders output 724 frames and the worker's 362. The players
+closed every one exactly once. The run used the player after it began asking the clock at each
+decoded frame.
+
 ## Interrupt track
 
-[Issue #320](https://github.com/muxinc/relay-sdks/issues/320). A talker that stops mid-utterance, a
+A talker that stops mid-utterance, a
 voice bot the user talks over, has already sent audio its listeners hold in their jitter buffers and
 have in flight. Stopping its writes does not stop that audio. The interrupt track tells listeners to
 drop it.
@@ -1272,11 +1383,11 @@ reached the listener.
 Measured locally on 2026-10-29 (relay-3cnp.399): moq-relay 0.17.9 (`30fd9d450`) built from source
 and the talker in one network namespace of relay-dev's moq-netbench rig (`rig local`), the listener
 in the other behind the rig's profile (`rig apply`, the downlink shaped on the peer), both on this
-branch's SDK over native QUIC. The talker is a TTS agent: 20 ms Opus frames handed over at four
+SDK over native QUIC. The talker is a TTS agent: 20 ms Opus frames handed over at four
 times real time, each stamped with its slot. The listener is relay-sdks' own receive chain composed
 as the example listener (frame reader, frame sequencer, audio input, its worklet and the WASM Opus
-decoder), plus timestamp playout in the sequencer (the frame sequencer's `timestampPlayout`, a separate
-opt-in change; it holds a reply that arrives faster than real time), with Web Audio stood in for in real time (558-frame render
+decoder), plus timestamp playout in the sequencer (the frame sequencer's `timestampPlayout`, an opt-in;
+it holds a reply that arrives faster than real time), with Web Audio stood in for in real time (558-frame render
 callbacks, a 20 ms output delay); a frame counts as played when its decoded audio reaches the output, read from markers the
 harness puts in place of the PCM. The harness is not in this repository (relay-3cnp.399's task
 directory).
@@ -1313,11 +1424,11 @@ the replacement stopped the old audio a median 107 ms after the interrupt on the
 on LTE with a download), played at most 60 ms of stale audio, and started the new reply at 107 ms. A
 paced WebRTC agent did the same (96 ms, no stale audio; 560 ms on LTE against MoQ's 329), while WebRTC
 fed bursts through a 2 s jitter buffer played up to 540 ms of stale audio. The benchmark's listener
-also ran timestamp playout (a separate opt-in change), which track replacement does not need.
+also ran timestamp playout, which track replacement does not need.
 
 ## Transcript track
 
-[Issue #320](https://github.com/muxinc/relay-sdks/issues/320). The text of what a talker says, such
+The text of what a talker says, such
 as a voice bot's reply from its TTS, for a listener to show as the audio plays. A data track written
 one group per write has no order across groups and no tie to the audio, and a transcript of audio
 an interrupt cut would still claim the cut words were said. The transcript track places each piece
@@ -1452,14 +1563,13 @@ resume.
 
 ## Media Timeline track
 
-[Issue #291](https://github.com/muxinc/relay-sdks/issues/291). Format helpers implemented in both
-format packages. [behavior.md](behavior.md#media-helpers) holds the testable rules. Both product
-packages publish the track with their document service, and both examples do
-([issue #292](https://github.com/muxinc/relay-sdks/issues/292)).
+The format helpers and the timeline accumulator are in both format packages, and
+[behavior.md](behavior.md#media-helpers) holds the testable rules. A publisher serves the track with
+the product packages' document service, as the WebCodecs and Python Video.js examples do.
 
 msf-01's Media Timeline track (§7) is an optional track, announced in the catalog, whose records
 map media time and an MOQT location to wall-clock time. It is MSF's counterpart of HLS
-`PROGRAM-DATE-TIME`. Since #290 the broadcast timeline is itself wall-clock time, so a player that
+`PROGRAM-DATE-TIME`. Since 2026-10-14 the broadcast timeline is itself wall-clock time, so a player that
 knows this convention does not need the track to learn when a frame was captured. One that does
 not can still read it here. What the track also gives is the map from time to location:
 seeking behind the live edge, and generating HLS or DASH playlists, need to know which group to
@@ -1591,8 +1701,8 @@ payloads are not decompressed.
 
 ## Spec gaps
 
-Questions the drafts leave open, found while settling #290. Each is worth raising on the MSF or LOC
-draft. Until then, this repository's answer is its convention.
+Questions the drafts leave open, found while moving the broadcast timeline onto the Unix epoch. Each
+is worth raising on the MSF or LOC draft. Until then, this repository's answer is its convention.
 
 - **No anchor for a render group.** msf-01 §5.2.11 says tracks in a render group "SHOULD be
   rendered simultaneously", and §4.2 aligns alternates, but nothing says the tracks of a group
@@ -1619,10 +1729,13 @@ draft. Until then, this repository's answer is its convention.
   LOC may read it as LOC does. Neither tells a relay to overwrite the Timestamp. moq-relay's
   restamping (below) is its own.
 - **The relay modifies properties.** MOQT-22 §8.4 says a relay must forward properties unmodified
-  and cache them. moq-relay (read at moq-dev/moq 5152ec74) rescales `0x10`, writes its own `0x08`,
-  restamps tracks without a Timescale, and drops properties it does not know, among them `0x0D`
-  and the publisher's other track properties in `SUBSCRIBE_OK`. That is a relay bug rather than a
-  draft gap, listed here because it is why the readers scale by whatever Timescale arrives.
+  and cache them. moq-relay rescales `0x10`, writes its own `0x08`, restamps tracks without a
+  Timescale, and drops properties it does not know, among them `0x0D` and the publisher's other
+  track properties in `SUBSCRIBE_OK`. This was read in moq-dev/moq at `5152ec74` and
+  observed on production 0.15.8 and 0.17.0; [Relay property
+  handling](behavior.md#relay-property-handling) holds the measurements and the upstream fix that
+  no release had yet. It is a relay bug rather than a draft gap, listed here because it is why the
+  readers scale by whatever Timescale arrives.
 - **Capture latency has no field.** No draft has a place to declare it, so it is folded into the
   Timestamp (see [Capture latency](#capture-latency)).
 
@@ -1631,27 +1744,29 @@ draft. Until then, this repository's answer is its convention.
 The media layer has two homes, matching the existing boundary rules.
 
 - A format package per language, `@caprid/moq-media` and `moq-media` (module `moq_media`), holds
-  the format helpers and the readers. It depends on the core only (for `KeyValuePair` and
-  `MoqtObject`), has no other runtime dependencies, and knows nothing about Relay. The TypeScript
-  package started as an attributed snapshot of the Video.js `media/moq` modules with its own
-  `UPSTREAM.json`, intended to migrate back upstream rather than fork, as the core did. The Python
-  package ports it. The boundary checks hold that the format package imports nothing from the
-  product package and no transport library, and that the core imports nothing from it.
-- Media publishing lives in the product package, as `@caprid/relay/media` (a second package
-  entry point) and `caprid_relay.media`, because it is built from `RelayTrackWriter`, demand, and the
-  write deadline, and because Relay-specific observations such as the dropped Video Config property
-  belong there.
+  the format helpers, the clocks, the frame sequencer and the readers, and in TypeScript the audio
+  and video players. It depends on the core only (for `KeyValuePair` and `MoqtObject`), has no
+  other runtime dependencies, and knows nothing about Relay. The TypeScript package started as an
+  attributed snapshot of the Video.js `media/moq` modules with its own `UPSTREAM.json`, intended to
+  migrate back upstream rather than fork, as the core did. The Python package ports it. The boundary
+  checks hold that the format package imports nothing from the product package and no transport
+  library, and that the core imports nothing from it.
+- Media publishing and the frame reader live in the product package, as `@caprid/relay/media` (a
+  second package entry point) and `caprid_relay.media`, because they are built from
+  `RelayTrackWriter`, subscriptions, demand and the write deadline, and because Relay-specific
+  observations such as the dropped Video Config property belong there. The product package cannot
+  import the format package, so the frame reader takes a sequencer as an argument.
 
 The alternative was one home, everything under `caprid_relay.media` and `@caprid/relay/media`. It
-is one package fewer per language, and the code in the samples above is identical apart from the
-import lines. It gives up the snapshot-and-migrate story, and it puts a catalog builder that any
-MoQ publisher could use behind a Relay dependency.
+is one package fewer per language. It gives up the snapshot-and-migrate story, and it puts a catalog
+builder that any MoQ publisher could use behind a Relay dependency.
 
 Encoders stay out of the product packages, and out of the format packages' roots. An `H264Config`
 record that turns Annex B into an avcC is a format helper. A class that opens libx264 is not. The
-exception is Python's Opus encoder and decoder ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)),
-which a voice bot needs both ways: `moq_media.opus`, on PyAV, behind the `opus` extra, and never
-imported by the package root ([ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
+exception is Python's Opus encoder and decoder, which a voice bot needs both ways: `moq_media.opus`,
+on PyAV, behind the `opus` extra, and never imported by the package root
+([ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)). The TypeScript audio player's libopus
+decoder is WebAssembly committed to the package as base64.
 
 ## Keeping the languages in lockstep
 
@@ -1659,48 +1774,37 @@ The media layer uses the mechanisms the rest of the repository uses:
 
 - `protocol.json` pins the LOC draft (`draft-ietf-moq-loc-04`), the MSF draft and catalog version
   (`draft-ietf-moq-msf-01`, `"draft-01"`), the microsecond default timescale, the LOC property
-  types, and the default track names, each asserted by a test in every SDK.
-- `behavior.md` has [Media helpers](behavior.md#media-helpers),
+  types, the default track names (`catalog`, `video`, `audio`, `timeline`, `interrupt`,
+  `transcript`), and the media priorities, each asserted by a test in every SDK.
+- behavior.md's [Media helpers](behavior.md#media-helpers),
   [Media publishing](behavior.md#media-publishing) and
-  [Media subscribing](behavior.md#media-subscribing) sections: what the catalog builder refuses,
-  how the catalog service treats demand, what the frame writer does without demand and after a
-  failure, and the statement that time-based drop policy is the application's.
-- `vectors/media.json` holds catalog vectors (track descriptions in, exact JSON bytes out), LOC
-  property vectors (timestamp and config in, key-value pairs out), source URL vectors including the
-  `.xx` escaping and a token, and avcC vectors (Annex B in, avcC and codec string out), so both
-  SDKs are held to the same bytes.
-- The TypeScript snapshot brought `parse-catalog.ts` with it, so the acceptance test the Video.js
-  builder names for itself, "every emitted document must round-trip through the parser", runs in
-  this repository too.
-- `vocabulary.md` gets rows before any of these names become public.
+  [Media subscribing](behavior.md#media-subscribing) sections hold the testable rules.
+- `vectors/media.json` holds catalog and end-catalog vectors (track descriptions in, exact JSON
+  bytes out, and read back through the parser), catalog reads, LOC property and timestamp vectors,
+  source URL vectors including the `.xx` escaping and a token, avcC and access-unit vectors, Opus
+  packet durations, and the media timeline, interrupt and transcript formats. `vectors/clock.json`
+  pins the broadcast clock, the timelines and the playout clock, and `vectors/frame-sequencer.json`
+  the frame sequencer, so both SDKs are held to the same bytes and decisions.
+- `vocabulary.md` records the public names.
 
-## Sequencing
+## Not built
 
-Each step leaves the example runnable against the live relay with `--verify`, which is how the
-change is checked without a browser, and each step deletes example code. The status at the top of
-this document says how far each step has gone.
-
-1. Format helpers in both languages, with the vectors, pins, and the `behavior.md` section. Move
-   the example's `moq_media.py` onto them, which removes about 300 lines and fixes #29 for real
-   because the README snippet can then import what it calls.
-2. The media publishing handle. The example's catalog serving and frame writing move into the SDK.
-   Its `LiveQueue`, encoders, pacing, and `finished` accounting stay. The example's tests for
-   catalog serving and track-end handling become the SDK's tests.
-3. The readers, with `--verify` rewritten on them, and the TypeScript example that the browser
-   sample above sketches.
-
-## Open questions
-
-- Names. `register_media` and `MediaTracks` are placeholders. The format tier kept the Video.js
-  names `buildMsfCatalog` and `composeMoqSource`, with Python spelling them `build_msf_catalog`
-  and `compose_player_url`.
-- A subscription that arrives mid-GOP. The example waits for the next keyframe. Video.js retains
-  the open group and replays it from object 0 so the viewer decodes at once. Replay is better for
-  viewers and costs one GOP of memory per track. It can be a later option on the frame writer.
-- Queue semantics on the frame writer: settled by
-  [issue #263](https://github.com/muxinc/relay-sdks/issues/263). `write` resolves with the frame's
-  outcome once the transport accepted it, as `write()` does, and may be called without awaiting.
-  The frames waiting meanwhile are a bounded backlog that drops rather than queues.
-- Codec scope at the start. H.264 is what the example needs and what the relay has been tested
-  with. HEVC (`hvcC`), AV1 (`av1C`), and AAC (AudioSpecificConfig) records are the same shape of
-  helper and can follow demand.
+- **A one-call publishing handle.** The proposal had `register_media` / `registerMedia` returning a
+  `MediaTracks` handle: one call registering the catalog track and every media track with the LOC
+  timescale and `mediaTrackProperties`, building the first catalog (withholding an `avc1` entry
+  until its avcC exists), serving it, and returning a frame writer per track, a `sourceUrl()`, an
+  `update()` that registered added tracks first, and a `close()` that ended the tracks and sent the
+  end-of-broadcast catalog. The pieces it would compose all ship, and the examples compose them in
+  a few dozen lines each. The names were placeholders and none is public.
+- **Replaying the open group** to a new relay subscription, as Video.js's publisher does, so the
+  first viewer decodes at once. It would cost one GOP of memory per track. The relay's cache already
+  serves later viewers from the group's start, and `onKeyframeNeeded` lets an encoder shorten the
+  wait for the first.
+- **Decoder configuration records beyond H.264 and Opus.** HEVC (`hvcC`), AV1 (`av1C`) and AAC
+  (AudioSpecificConfig) are the same shape of helper and can follow demand. The WebCodecs config
+  mappers accept AVC and Opus only.
+- **Delta catalog updates, and `temporalId` / `spatialId`**, on either side (see [several media
+  tracks](#several-media-tracks)).
+- **Timestamp playout and the players in Python.** The audio player, the video player and the
+  frame sequencer's timestamp playout are TypeScript only.
+- **A/V sync with the video player in a worker** (see [Video player](#video-player)).

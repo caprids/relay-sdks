@@ -5,7 +5,7 @@ date: 2026-10-02
 
 # The Python dialing end speaks native QUIC, and replaces the WebTransport session before 0.1.0
 
-> The package names below predate the rename in [#222](https://github.com/muxinc/relay-sdks/issues/222): `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
+> The package names below predate the rename in #222: `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
 
 The Python SDK dials the relay with its own WebTransport session: HTTP/3 and WebTransport layers
 written over aioquic, in `mux_relay.webtransport`. The TypeScript SDK on Node already speaks native

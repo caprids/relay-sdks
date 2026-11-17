@@ -2,7 +2,7 @@
 
 What changed between [draft-ietf-moq-transport-20] and [draft-ietf-moq-transport-22] (1 October 2026,
 the latest revision on 2026-10-06), what that means for the SDKs, and what the relays speak.
-Researched for [#274](https://github.com/muxinc/relay-sdks/issues/274). The draft text is the
+Researched for #274. The draft text is the
 authority. Section numbers are draft-22's unless they say "-20".
 
 ## Method
@@ -144,7 +144,7 @@ sentences above.
     No SDK publisher acts on filters, so that is harmless.
 
   Details are in `spec/relay-interop.md` ("Draft-22 LOCATION_FILTER framing") and
-  [#275](https://github.com/muxinc/relay-sdks/issues/275).
+  #275.
 
 ## Decision
 

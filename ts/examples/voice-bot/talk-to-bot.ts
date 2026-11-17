@@ -1,5 +1,5 @@
 import { createBroadcastClock, type Interrupt, type TranscriptSegment } from '@caprid/moq-media';
-import type { RelayPublisher, RelaySubscriber } from '@caprid/relay';
+import type { RelayPublisher, RestartReason, SupervisedSubscriber } from '@caprid/relay';
 import { captureMicrophone } from '../webcodecs/capture-microphone.js';
 import { type AudioListener, listenAudio } from '../webcodecs/listen-audio.js';
 import { publishMicrophone } from '../webcodecs/publish-microphone.js';
@@ -8,7 +8,11 @@ import { publishMicrophone } from '../webcodecs/publish-microphone.js';
 export interface TalkToBotOptions {
   /** Aborting hangs up. */
   signal: AbortSignal;
-  /** The bot's namespace, where it publishes its catalog, its audio, and its interrupt and transcript tracks. */
+  /**
+   * The bot's root namespace. Its supervised publisher serves each connection one generation field below it, with the
+   * catalog, the audio, and the interrupt and transcript tracks; the newest generation is the bot, and the
+   * subscriber's wants follow it.
+   */
   botNamespace: readonly string[];
   /** The namespace `publisher` was connected with, where the microphone goes. */
   userNamespace: readonly string[];
@@ -16,18 +20,24 @@ export interface TalkToBotOptions {
   context: AudioContext;
   /** The microphone, from `getUserMedia` with echo cancellation on. */
   stream: MediaStream;
-  /** The bot's audio is playing: its catalog arrived, and the listener subscribed. */
+  /**
+   * The bot's audio is playing: its catalog arrived, and the listener started. Called once: the listener follows the
+   * bot's newest generation, and `onRestarted` reports each time the bot comes back.
+   */
   onListening?(listener: AudioListener): void;
+  /**
+   * The listener's audio subscription was replaced: the bot reconnected as a newer generation (`'generation'`), or the
+   * subscriber reconnected (`'connection'`). The player dropped what it held of the old one, and the new one plays
+   * live. `namespace` is the replaced subscription's, the old generation's.
+   */
+  onRestarted?(info: { reason: RestartReason; namespace: string[] }): void;
   /** The bot stopped talking because it was talked over; the player has already cut what it held. */
   onInterrupt?(interrupt: Interrupt): void;
   /** A transcript segment of the bot's audio arrived; `listener.transcript` has it. */
   onTranscript?(segment: TranscriptSegment): void;
-  /** A failure that does not hang up: an attempt to reach the bot, or one of the listener's. */
+  /** A failure that does not hang up: a failed start of the listener, or one of the listener's. */
   onError?(error: unknown): void;
 }
-
-/** How long one attempt to reach the bot waits for its catalog. */
-const CATALOG_TIMEOUT_MS = 5000;
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -48,12 +58,14 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
  * Talk to a voice bot such as python/examples/voice_bot: publish the microphone alone, and play the bot's audio
  * through the audio player, cutting it and its transcript on each interrupt. Playback goes through Chromium's echo
  * canceller, so the bot does not hear itself and take it for being talked over. The bot can start before or after the
- * page: until its catalog arrives, the listener retries every second, waiting at most 5 s for each attempt. Runs until
- * aborted, or until publishing fails.
+ * page. The listener's wants follow the bot's newest generation under `botNamespace` (`generations: true`), so when the
+ * bot reconnects as a newer generation, the same listener moves to it and `onRestarted` says so. A start that fails
+ * (a catalog with no audio track, say) is reported and tried again a second later. Runs until aborted, or until
+ * publishing fails.
  */
 export async function talkToBot(
   publisher: RelayPublisher,
-  subscriber: RelaySubscriber,
+  subscriber: SupervisedSubscriber,
   options: TalkToBotOptions,
 ): Promise<void> {
   const { context } = options;
@@ -64,19 +76,20 @@ export async function talkToBot(
   let listener: AudioListener | undefined;
   const publishing = publishMicrophone(publisher, options.userNamespace, { signal, microphone });
   const listening = (async () => {
-    while (!listener) {
+    for (;;) {
       try {
         listener = await listenAudio(subscriber, options.botNamespace, {
           context,
           echoCancellation: true,
-          // A catalog subscription the relay accepts can still deliver nothing; give up on it and try again.
-          signal: AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]),
+          generations: true,
+          signal,
           ...(options.onError ? { onError: options.onError } : {}),
           ...(options.onInterrupt ? { onInterrupt: options.onInterrupt } : {}),
           ...(options.onTranscript ? { onTranscript: options.onTranscript } : {}),
+          ...(options.onRestarted ? { onRestarted: options.onRestarted } : {}),
         });
+        break;
       } catch (error) {
-        // Not announced yet, or announced but not serving its catalog yet (the announce race).
         signal.throwIfAborted();
         options.onError?.(error);
         await wait(1000, signal);
@@ -84,6 +97,11 @@ export async function talkToBot(
     }
     signal.throwIfAborted();
     options.onListening?.(listener);
+    // The listener carries on by itself until hanging up.
+    await new Promise((_, reject) => {
+      signal.throwIfAborted();
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
   })();
   try {
     await Promise.all([publishing, listening]);

@@ -24,7 +24,10 @@ export interface SequencedFrame {
   objectId: number;
   /** The LOC timestamp in microseconds on the broadcast timeline. */
   timestampUs: number;
-  /** Whether the frame starts its group: a keyframe under keyframe grouping, every frame under frame grouping. */
+  /**
+   * Whether the frame starts its group (object 0): a keyframe under keyframe grouping. Under frame grouping every frame
+   * decodes on its own, and this is `true` for every frame only when each group holds one, as a frame writer sends them.
+   */
   key: boolean;
   /** The object payload. */
   payload: Uint8Array;
@@ -68,7 +71,8 @@ export interface FrameSequencerOptions {
   /**
    * Frame grouping only: how long, in microseconds of the clock's local time, a frame waits for an earlier group that
    * has not arrived, counted from when the frame arrived. Default 0: frames go out at once and an earlier group that
-   * arrives after a later one is dropped as behind. A frame that turns late while it waits is dropped as late. For a
+   * arrives after a later one is dropped as behind (`stats.behind`). A frame that turns late while it waits is dropped
+   * as late (`stats.late`). For a
    * reader that wants every frame of a talker, set it to at least the publisher's delivery timeout: a group the
    * publisher's transport is still resending can arrive that long after the group that follows it. Finite, not
    * negative.
@@ -133,8 +137,16 @@ export interface SequencerPoll {
 export interface FrameSequencerStats {
   /** Frames returned by `poll()`. */
   delivered: number;
-  /** Frames discarded: too late, or behind what was already delivered. */
+  /**
+   * Frames discarded as too late against the clock's position, and frames dropped when more were held than the bound
+   * allows.
+   */
   late: number;
+  /**
+   * Frames discarded on arrival because a later frame was already delivered or their group was already passed over:
+   * out of order by more than the reorder window, if one is set.
+   */
+  behind: number;
   /** Groups abandoned or passed over without being delivered whole. */
   skippedGroups: number;
   /** Resyncs: deliveries after nothing arrived within the target latency. */
@@ -243,7 +255,15 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     }
     return ownAnchor.mediaUs + (clock.localNow() - ownAnchor.atUs) + lead;
   };
-  const stats: FrameSequencerStats = { delivered: 0, late: 0, skippedGroups: 0, resyncs: 0, untimed: 0, early: 0 };
+  const stats: FrameSequencerStats = {
+    delivered: 0,
+    late: 0,
+    behind: 0,
+    skippedGroups: 0,
+    resyncs: 0,
+    untimed: 0,
+    early: 0,
+  };
 
   // Groups above `floor` that have not been delivered or abandoned.
   const groups = new Map<number, Group>();
@@ -746,7 +766,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         return;
       }
       if (behind(object.groupId, object.objectId)) {
-        stats.late++;
+        stats.behind++;
         return;
       }
       const group = groupOf(object.groupId);
