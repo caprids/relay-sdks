@@ -106,6 +106,8 @@ MEDIA_NAMES = [
     "FrameReaderPoll",
     "FrameReaderSequencer",
     "FrameWriter",
+    "LatestValueReader",
+    "LatestValueStats",
     "MediaKind",
     "ReplaceableTrack",
     "TrackReplacement",

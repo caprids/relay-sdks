@@ -16,9 +16,11 @@ each section says what changed and what to do about it. How to cut a release is 
   showed, leaves in a later call once the new discovery has shown it nothing for 100 ms. An application can build a
   room roster with no roster server.
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
-  between every want that follows generations and every member view. A want under another want's or a view's root
-  no longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to
-  change in an application.
+  between every want that follows generations, every want waiting for its namespace to be announced again (0.4.0),
+  and every member view. A want under another want's or a view's root no longer fails with `PREFIX_OVERLAP`, and a
+  view refused on its root leaves the wants under it alone. A want waiting on a fixed namespace is still woken by its
+  announcement when a followed root or a member view covers the namespace; before, a followed root closed its watch
+  and the want waited out the whole backoff. Nothing to change in an application.
 - `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
   relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
   (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported.
@@ -36,6 +38,94 @@ each section says what changed and what to do about it. How to cut a release is 
   activeCount })` and calls the new `onSynced()` after the counted NAMESPACE messages; the session closes with
   PROTOCOL_VIOLATION when the peer breaks the extension's rules. `@caprid/relay`'s subscriber connection declares it.
   No deployed moq-relay does, so nothing changes against them.
+
+## 0.4.1
+
+- `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a
+  frame reader's frames with WebCodecs and calls `render(frame)` when the playout clock says each is due. Video then
+  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame. The player
+  closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
+  an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
+  the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player
+  reports it once and decodes nothing until `configure()`. `reset()` drops the frames waiting and what the decoder holds
+  at once, as at a restart the app learns of before the next frame. A gap flushes the decoder, so the frames before it
+  still come out, and a frame marked key that the decoder finds is not one is reported and skipped to the next keyframe.
+  The player runs in a dedicated worker as it is. The WebCodecs example's `watchVideo` is built on it. Through the
+  in-memory hub in headless Chromium, players paced by the wall clock, by audio, and in a worker each showed all 241
+  frames published over 8 s (`mise run ts:test:video-player`).
+
+## 0.4.0
+
+- Voice bot and WebCodecs examples: `listenAudio`, `watchVideo` and `talkToBot` take a supervised subscriber
+  (`connectSupervisedSubscriber`) instead of a plain one, and keep playing when the talker restarts (#404). Before, a
+  listener built on `connectRelaySubscriber` went silent for good when its talker restarted. Each track is now a want:
+  a start waits for a publisher that has not announced yet instead of failing on the announce race, so the callers'
+  retry loops are gone. A restart cuts what the player held, and the new subscription plays live. `listenAudio`'s new
+  `onRestarted({ reason, namespace })` reports it. The new `generations: true` option follows a supervised publisher's
+  newest generation under the namespace, which `talkToBot` turns on. `talkToBot` replaces #442's own discovery loop
+  with it and calls `onListening` once, then `onRestarted` on each move. The page no longer waits up to 5 s on a
+  crashed generation that is still announced. To update a copy: pass a supervised subscriber, drop the start retries,
+  and handle `onRestarted` where you handled a second `onListening`. One window remains in the supervised subscriber:
+  after discovery ends or a reconnect, it can play an older generation that is still announced until the newer one is
+  announced again (#482).
+- `@caprid/relay/media`: `createLatestValueReader({ onValue, late, onCatchUp })` reads a latest-wins track, such as
+  telemetry or a control, as its newest values (#447). Spread it into `subscribe` or `want` handlers. It drops an
+  object that arrives after a newer one, drops a value the `late` predicate rejects, and calls `onCatchUp` once when
+  values start arriving late, typically to call a supervised subscriber's `catchUp(key)`. A want's restart or move
+  starts it over. `reader.stats` counts what it delivered and dropped. Before, a viewer kept its own "newest group
+  applied" marker and had no trigger to skip past a relay backlog.
+- `@caprid/moq-core`: a FETCH is removed from its session once its data stream has ended (`onEnd`) or reset (`onReset`)
+  and its response has arrived (#419). Before, only a REQUEST_ERROR or `cancel()` removed it, so its handlers, and every
+  payload they had collected, stayed in memory for the session's life: each group a VOD consumer fetched through
+  `trackSource.fetch` stayed. Through relay.mux.global (moq-relay 0.17.9), 30 FETCHes of 2 MiB groups whose results were
+  dropped left 60 MiB of `arrayBuffers` after `gc()` in Node; now 2 MiB. No API change: `cancel()` after the end is
+  still allowed, and code that called it to free the fetch can stop.
+- Voice bot example: `talkToBot` follows the bot's newest generation (#442). The Python bot now publishes through a
+  supervised publisher, one generation below `botNamespace`, so it survives a lost connection. The page finds the
+  newest generation with namespace discovery and moves to each new one, calling `onListening` again. A page copied
+  from an earlier version listens at `botNamespace` itself and does not hear this bot.
+- `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
+  rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
+  so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only
+  when the 10 s overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
+- `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
+  left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
+  ([Test recovery by dropping the transport](GUIDE.md#test-recovery-by-dropping-the-transport)), instead of
+  re-implementing it. The wrapper keeps the default's `TRANSPORT_UNAVAILABLE` checks and needs no casts.
+- `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
+  clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a
+  later target, `behind` a longer `reorderWindowUs`. In a two-browser call with frame-grouped audio and no reorder
+  window, nearly all of the 1.9% counted as late was frames swapped with the next one within 5 ms. A reader that
+  reported `late` as one number adds `behind` to keep the old total.
+- `@caprid/relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8.
+- `@caprid/relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connectSupervisedSubscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`onPublisherDone`) and never subscribes again.
+- Docs only, no code change:
+  - [GUIDE.md](GUIDE.md#content-security-policy) lists the Content Security Policy a page needs (#385): `connect-src`
+    for each relay's `https:` and `wss:` origins, and `blob:` and `'wasm-unsafe-eval'` in `script-src`. Without
+    `'wasm-unsafe-eval'` the audio player loses Opus loss concealment with no error; only
+    `player.joinPhases.opusLoadedUs === null` shows it.
+  - The GUIDE's `openGroup()` example carries on after `SUBSCRIPTION_CHANGED`, which a first viewer on another relay
+    causes, instead of rethrowing it.
+  - The GUIDE points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for Client
+    tokens.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
+  - Corrected: frame grouping no longer drops the oldest frame by default (`spec/media-layer.md`, the WebCodecs
+    example); `SequencedFrame.key` is set on a group's first frame; `@caprid/relay/node` loads `@caprid/relay-quic`
+    when no `createTransport` is given.
 
 ## 0.3.0
 

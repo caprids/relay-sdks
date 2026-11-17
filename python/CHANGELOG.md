@@ -15,9 +15,11 @@ is in [docs/releasing.md](../docs/releasing.md).
   An application can build a room roster with no roster server. `SupervisedSubscriber.close()` also closes every member
   view, without calling its handlers.
 - `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
-  between every want that follows generations and every member view. A want under another want's or a view's root no
-  longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to change
-  in an application.
+  between every want that follows generations, every want waiting for its namespace to be announced again, and every
+  member view. A want under another want's or a view's root no longer fails with `PREFIX_OVERLAP`, and a view refused
+  on its root leaves the wants under it alone. A want waiting on a fixed namespace is still woken by its announcement
+  when a followed root or a member view covers the namespace; before, a followed root closed its watch and the want
+  waited out the whole backoff. Nothing to change in an application.
 - `caprid-relay`: `namespace_events` yields `NamespaceEvent(type="loaded")` once, after the namespaces already announced
   when the relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET`
   (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported.
@@ -34,6 +36,55 @@ is in [docs/releasing.md](../docs/releasing.md).
   nothing changes against them. **Breaking:** `on_ok` now takes `active_count: int | None`, and `on_namespace_done`
   takes a second argument, `request_ended`, true for the withdrawals the session reports itself when a request ends;
   update handlers passed to `MoqtSession.subscribe_namespace`.
+
+## 0.4.0
+
+- `caprid-relay`: `SupervisedSubscriber.catch_up(key)` replaces a want's accepted subscription at the live edge,
+  break-before-make, when it delivers too late to use (#447), as in the TypeScript SDK. The relay drops what it still
+  held queued for the cancelled subscription, `on_restarted` reports the new reason `"catch-up"`, and the replacement
+  opens at once when the cancelled one had moved past its first group, otherwise after the `retry` backoff. Code that
+  matches every `RestartReason` gains a case.
+- `caprid-relay`: `caprid_relay.media.LatestValueReader(on_value, *, late=None, on_catch_up=None)` reads a latest-wins
+  track such as telemetry or a control (#447), as in the TypeScript SDK. Pass its `subscription_handlers()` or
+  `want_handlers()`; it drops values older than the newest it judged and those the `late` predicate rejects, calls
+  `on_catch_up` once per run of late values (usually `subscriber.catch_up(key)`), and counts them in `stats`
+  (`LatestValueStats`). It replaces a hand-written "newest group applied" marker.
+- `caprid-moq-core`: a FETCH is removed from its session once its data stream has ended (`on_end`) or reset (`on_reset`)
+  and its response has arrived (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it,
+  so its handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
+- Voice bot example: the bot publishes through `connect_supervised_publisher` (#442), so a lost connection no longer
+  ends it. It reconnects as a new generation under `<namespace>/bot` and answers the next utterance; the voice bot
+  page follows it. `run_bot` takes the `SupervisedPublisher` and no longer takes `bot_namespace`, and `bot_catalog()`
+  takes no namespace. Its tracks name none, so they are in whichever generation's namespace serves the catalog. The
+  README adds an install without mise and a note for scripted talkers.
+- `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
+  rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
+  encoder's next scheduled keyframe. The open group still finishes on the old generation.
+- `caprid-moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431), as in the TypeScript SDK. `late` keeps the
+  frames too late against the clock's position and those dropped past the held bound. A reader that reported `late`
+  as one number adds `behind` to keep the old total.
+- `caprid-relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `max_backlog=25` for the old behavior. Keyframe grouping keeps its default of 8.
+- `caprid-relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connect_supervised_subscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`on_publisher_done`) and never subscribes again.
+- Docs only, no code change:
+  - The README points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for
+    Client tokens.
+  - `SequencedFrame.key` is described as set on a group's first frame; under frame grouping that is every frame only
+    when each group holds one.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
 
 ## 0.3.0
 

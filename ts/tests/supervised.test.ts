@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
+import { createFrameWriter } from '../src/frame-writer.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
 import { SubscriptionConnectionClosedError } from '../src/subscription.js';
 import { type SupervisedPublisher, superviseRelayPublisher } from '../src/supervised-publisher.js';
@@ -1044,6 +1045,271 @@ describe('callback failures and progress (#272)', () => {
     // The delays keep doubling (20-40, 40-80, 80-160 ms): nothing reset the backoff.
     expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
   });
+
+  it('counts no status object as progress: the end-of-track marker after a replayed group does not reset the backoff', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 40, maxDelayMs: 1_000 } });
+    const started: number[] = [];
+    for (let count = 1; count <= 4; count++) {
+      await until(() => connections[0]!.subscriptions.length === count, `subscription ${count}`, 2_000);
+      started.push(performance.now());
+      // A finished track while its publisher stays connected: the cached last group, the end-of-track status object
+      // one group later, then TRACK_ENDED.
+      const subscription = connections[0]!.subscriptions.at(-1)!;
+      subscription.accept();
+      subscription.object(10);
+      subscription.handlers.onObject?.({
+        groupId: 11,
+        objectId: 0,
+        status: 'end-of-track',
+        properties: [],
+        payload: new Uint8Array(),
+      } as never);
+      subscription.done();
+    }
+    expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
+  });
+});
+
+describe('waking on the namespace announced again', () => {
+  const slow = { initialDelayMs: 10_000, maxDelayMs: 10_000 };
+  const done = (subscription: FakeSubscriber['subscriptions'][number], statusCode: number) =>
+    subscription.handlers.onPublisherDone?.({ statusCode, streamCount: 0, reason: 'done' } as never);
+
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('resubscribes at once when the namespace is announced after a done, not after the backoff', async () => {
+    const { subscriber, connections } = await start();
+    const restarted: string[] = [];
+    subscriber.want(
+      'v',
+      { namespace: ['room', 'alice'], track: 'v', retry: slow },
+      { onRestarted: (info) => restarted.push(info.reason) },
+    );
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    expect(fake().discoveries[0]!.prefix).toEqual(['room', 'alice']);
+    expect(fake().subscriptions).toHaveLength(1);
+    // Already announced as the watch starts, after INTERNAL_ERROR: the new publisher.
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed on the announcement');
+    expect(restarted).toEqual(['publisher-done']);
+  });
+
+  it('ignores a deeper namespace under the watched one', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'bob'] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fake().subscriptions).toHaveLength(1);
+  });
+
+  it('after TRACK_ENDED waits for the namespace to be withdrawn and announced again, not its announcement as the watch starts', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    fake().subscriptions[0]!.done(); // TRACK_ENDED
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    const discovery = fake().discoveries[0]!;
+    // Still announced for the publisher that ended the track.
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fake().subscriptions).toHaveLength(1);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fake().subscriptions).toHaveLength(1);
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed on the return');
+  });
+
+  it('after TRACK_ENDED still resubscribes after the backoff, its slow fallback', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 60, maxDelayMs: 60 } });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    fake().subscriptions[0]!.done();
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed after the backoff');
+  });
+
+  it('holds one watch across refused attempts and wakes only on an announcement after the latest attempt', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    const discovery = fake().discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'woken');
+    // The announce race: refused, while the namespace stays announced.
+    fake().subscriptions[1]!.reject(UNROUTABLE);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The same announcement does not wake the next wait, and no second request was opened.
+    expect(fake().subscriptions).toHaveLength(2);
+    expect(fake().discoveries).toHaveLength(1);
+    expect(discovery.closed).toBe(false);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 3, 'woken again');
+    fake().subscriptions[2]!.accept();
+    fake().subscriptions[2]!.object(1);
+  });
+
+  it("does not wake on what another want's shared watch saw before this want's latest attempt", async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const of = (track: string) => fake().subscriptions.filter((s) => s.options.track === track);
+    subscriber.want('a', { namespace: ['room'], track: 'a', retry: slow });
+    await until(() => of('a').length === 1, 'a subscribed');
+    of('a')[0]!.accept();
+    done(of('a')[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'a watches the namespace');
+    const discovery = fake().discoveries[0]!;
+    // Withdrawn and announced again while want a waits: a return the watch saw.
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('a').length === 2, 'a woken');
+    // Left unanswered, so want a keeps holding the watch.
+    // Want b's first attempt starts after that return; its TRACK_ENDED must wait for a later one.
+    subscriber.want('b', { namespace: ['room'], track: 'b', retry: slow });
+    await until(() => of('b').length === 1, 'b subscribed');
+    of('b')[0]!.accept();
+    of('b')[0]!.done();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(of('b')).toHaveLength(1);
+    expect(fake().discoveries).toHaveLength(1);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('b').length === 2, 'b woken by a later return');
+  });
+
+  it('waits on the watch kept for reuse when it covers the namespace, rather than go without one', async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const of = (track: string) => fake().subscriptions.filter((s) => s.options.track === track);
+    subscriber.want('x', { namespace: ['room'], track: 'x', retry: slow });
+    await until(() => of('x').length === 1, 'x subscribed');
+    of('x')[0]!.accept();
+    done(of('x')[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'x watches its namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('x').length === 2, 'x woken');
+    // Accepted: want x lets go of the watch, which is kept a moment for reuse.
+    of('x')[1]!.accept();
+    expect(fake().discoveries[0]!.closed).toBe(false);
+    subscriber.want('y', { namespace: ['room', 'alice'], track: 'y', retry: slow });
+    await until(() => of('y').length === 1, 'y subscribed');
+    of('y')[0]!.accept();
+    done(of('y')[0]!, 0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake().discoveries).toHaveLength(1);
+    expect(fake().discoveries[0]!.closed).toBe(false);
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => of('y').length === 2, 'y woken by the shared watch');
+  });
+
+  it('falls back to the backoff when the watch fails', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 60, maxDelayMs: 60 } });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.fail(new RelayError('PREFIX_OVERLAP', 'overlap', 'subscription'));
+    await until(() => fake().subscriptions.length === 2, 'resubscribed after the backoff');
+  });
+
+  it("moves under a followed root's discovery: the overlapping watch is replaced and that want still wakes", async () => {
+    const { subscriber, connections } = await start();
+    const errors: unknown[] = [];
+    subscriber.want('v', { namespace: ['room', 'alice'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    subscriber.want(
+      'g',
+      { namespace: ['room'], track: 'g', generations: true, retry: fast },
+      { onError: (error) => errors.push(error) },
+    );
+    await until(() => fake().discoveries.length === 2, 'the root discovered');
+    expect(fake().discoveries[0]!.closed).toBe(true);
+    expect(fake().discoveries[1]!.prefix).toEqual(['room']);
+    expect(errors).toEqual([]);
+    const v = () => fake().subscriptions.filter((s) => s.options.track === 'v');
+    fake().discoveries[1]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => v().length === 2, 'v woken through the root discovery');
+  });
+
+  it("shares one request with a member view over the namespace: the view and the want's wake both work", async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const changes: { joined: string[]; left: string[] }[] = [];
+    const errors: unknown[] = [];
+    subscriber.members(
+      { root: ['room'] },
+      {
+        onChanged: (change) =>
+          changes.push({ joined: change.joined.map((m) => m.id), left: change.left.map((m) => m.id) }),
+        onError: (error) => errors.push(error),
+      },
+    );
+    await until(() => fake().discoveries.length === 1, 'the view discovers the root');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    fake().discoveries[0]!.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'the view loads');
+    subscriber.want('v', { namespace: ['room', 'alice'], track: 'v', retry: slow });
+    const v = () => fake().subscriptions.filter((s) => s.options.track === 'v');
+    await until(() => v().length === 1, 'subscribed');
+    v()[0]!.accept();
+    v()[0]!.done(); // TRACK_ENDED
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake().discoveries).toHaveLength(1);
+    expect(v()).toHaveLength(1);
+    fake().discoveries[0]!.push({ type: 'unannounced', namespace: ['room', 'alice'] });
+    await until(() => changes.length === 2, 'alice leaves');
+    expect(v()).toHaveLength(1);
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => v().length === 2, 'v woken by the return');
+    await until(() => changes.length === 3, 'alice returns');
+    expect(changes).toEqual([
+      { joined: ['alice'], left: [] },
+      { joined: [], left: ['alice'] },
+      { joined: ['alice'], left: [] },
+    ]);
+    expect(errors).toEqual([]);
+    expect(fake().discoveries[0]!.closed).toBe(false);
+  });
 });
 
 describe('make-before-break moves (#282)', () => {
@@ -1570,6 +1836,113 @@ describe('rotation before the credential expires (#261)', () => {
     connections[1]!.tracks.get('video')!.setDemand(false);
     expect((await changes.next()).value).toBe(false);
     await changes.return?.();
+  });
+
+  it('asks a frame writer for a keyframe when its track moves, and finishes the open group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!;
+    old.tracks.get('video')!.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    const frame = (byte: number, key = false) => ({ payload: Uint8Array.of(byte), key });
+    expect((await writer.write(frame(1, true))).kind).toBe('sent');
+
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const next = connections[1]!.tracks.get('video')!;
+    next.setDemand(true);
+    await until(() => onKeyframeNeeded.mock.calls.length === 1, 'a keyframe asked for on the move');
+    expect(writer.keyframeNeeded).toBe(true);
+    // The old generation's viewers keep their GOP until the keyframe comes.
+    expect((await writer.write(frame(2))).kind).toBe('sent');
+    expect((await writer.write(frame(3, true))).kind).toBe('sent');
+    expect(old.tracks.get('video')!.writes).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+    expect(next.writes).toEqual([Uint8Array.of(3)]);
+    expect(writer.keyframeNeeded).toBe(false);
+    await until(() => old.closeCalls === 1, 'old generation closed once its group finished');
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+    await writer.close();
+  });
+
+  it('asks a frame writer for a keyframe when its track moves while a keyframe opens a group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      // The viewer reaches the next generation while the keyframe's group is opening here.
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    expect((await writer.write({ payload: Uint8Array.of(1), key: true })).kind).toBe('sent');
+    expect(old.writes).toEqual([Uint8Array.of(1)]);
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+    expect(writer.keyframeNeeded).toBe(true);
+    await writer.close();
+  });
+
+  it('asks for no keyframe when one waits behind a keyframe that opened its group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const second = writer.write({ payload: Uint8Array.of(2), key: true });
+    expect([(await first).kind, (await second).kind]).toEqual(['sent', 'sent']);
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(2)]);
+    expect(onKeyframeNeeded).not.toHaveBeenCalled();
+    expect(writer.keyframeNeeded).toBe(false);
+    await writer.close();
+  });
+
+  it('reports a keyframe dropped when its keyframe request overflows the backlog and resets its group', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    let writer: ReturnType<typeof createFrameWriter> | undefined;
+    const forced: Promise<unknown>[] = [];
+    // An encoder that answers the request with a keyframe at once, from inside the callback.
+    writer = createFrameWriter(track, {
+      maxBacklog: 1,
+      onKeyframeNeeded: () => forced.push(writer!.write({ payload: Uint8Array.of(3), key: true })),
+    });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const queued = writer.write({ payload: Uint8Array.of(2), key: false });
+    expect([(await first).kind, (await queued).kind]).toEqual(['dropped', 'dropped']);
+    expect(forced).toHaveLength(1);
+    expect(await forced[0]).toMatchObject({ kind: 'sent' });
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(3)]);
+    await writer.close();
   });
 
   it('moves a track with no demand on the old generation at once', async () => {

@@ -875,22 +875,33 @@ class TestBacklog:
         with pytest.raises(RuntimeError, match="event loop"):
             FrameWriter(FakeTrackWriter())
 
-    async def test_the_default_bounds_follow_the_grouping(self) -> None:
-        # Eight frames behind a video write, twenty-five behind an audio one, and then the next one drops.
-        for grouping, bound in (("keyframe", 8), ("frame", 25)):
-            gate = asyncio.Event()
-            track = FakeTrackWriter(block=gate)
-            writer: FrameWriter[Sample] = FrameWriter(track, grouping=grouping)
-            tasks = [asyncio.create_task(writer.write(key(t))) for t in range(bound + 1)]
-            await track.blocked.wait()
-            await settle()
-            assert writer.backlog == bound
+    async def test_keyframe_grouping_defaults_to_eight_frames_behind_the_write(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track, grouping="keyframe")
+        tasks = [asyncio.create_task(writer.write(key(t))) for t in range(9)]
+        await track.blocked.wait()
+        await settle()
+        assert writer.backlog == 8
 
-            tasks.append(asyncio.create_task(writer.write(key(bound + 1))))
-            await settle()
-            gate.set()
-            assert "dropped" in kinds_of(await asyncio.gather(*tasks))
-            await writer.close()
+        tasks.append(asyncio.create_task(writer.write(key(9))))
+        await settle()
+        gate.set()
+        assert "dropped" in kinds_of(await asyncio.gather(*tasks))
+        await writer.close()
+
+    async def test_frame_grouping_has_no_default_bound(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track, grouping="frame")
+        tasks = [asyncio.create_task(writer.write(key(t))) for t in range(200)]
+        await track.blocked.wait()
+        await settle()
+        assert writer.backlog == 199
+
+        gate.set()
+        assert kinds_of(await asyncio.gather(*tasks)) == ["sent"] * 200
+        await writer.close()
 
 
 class TestKeyframeNeeded:
@@ -904,6 +915,28 @@ class TestKeyframeNeeded:
         assert writer.keyframe_needed
         assert await kinds(writer, [key(1)]) == ["skipped"], "no demand, but the keyframe arrived all the same"
         assert not writer.keyframe_needed and calls == []
+
+    async def test_a_keyframe_handed_the_turn_covers_a_demand_change_seen_before_it_resumes(self) -> None:
+        calls: list[bool] = []
+        replaced: list[bool] = []
+        track = FakeTrackWriter()
+
+        def stale(frame: Sample) -> bool:
+            # The relay replaces its subscription just after the first keyframe opened its group, so the
+            # writer's watcher wakes after the turn passed to the keyframe waiting behind it.
+            if track.groups and not replaced:
+                replaced.append(True)
+                track.bind(True)
+            return False
+
+        writer: FrameWriter[Sample] = FrameWriter(track, stale=stale, on_keyframe_needed=lambda: calls.append(True))
+        first = asyncio.ensure_future(writer.write(key(0)))
+        second = asyncio.ensure_future(writer.write(key(1)))
+        assert [(await first).kind, (await second).kind] == ["sent", "sent"]
+        await settle()
+
+        assert calls == []
+        assert not writer.keyframe_needed
 
     async def test_every_relay_demand_change_resets_the_gop_and_asks_for_a_keyframe(self) -> None:
         calls: list[bool] = []

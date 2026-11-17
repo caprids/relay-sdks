@@ -2,18 +2,18 @@
 ends, and one supervisor per wanted track that keeps a subscription to it open across connections,
 publisher restarts and generations.
 
-Each want retries the announce race, backs off after a publisher's done or a rejection, resubscribes
-a subscription that went stale, and follows a supervised publisher's newest generation through
-namespace discovery. Objects are never fetched to fill a gap: a replacement subscription starts
-live, and ``on_restarted`` tells the application to drop state that assumed continuity. A move to a
-newer generation, or to another track or parameters on a re-want, is made before the break instead,
-as ``switch_to`` makes one (issue #282): the replacement opens while the current subscription keeps
-delivering, and ``on_switched`` marks the cutover. Before the connection's credential expires, the
-supervisor rotates to a new connection the same way (issue #261): every want's subscription moves to
-it make-before-break, and a want that keeps its target sees no break and no repeat. Member views
-(:mod:`caprid_relay.members`) follow who is present under a root from the same
-per-connection discovery. See ``spec/behavior.md``, "Supervised connections". The counterpart of
-``ts/src/supervised-subscriber.ts``.
+Each want retries the announce race, backs off after a publisher's done or a rejection (cut short
+when its namespace is announced again), resubscribes a subscription that went stale, and follows a
+supervised publisher's newest generation through namespace discovery. Objects are never fetched to
+fill a gap: a replacement subscription starts live, and ``on_restarted`` tells the application to
+drop state that assumed continuity. A move to a newer generation, or to another track or parameters
+on a re-want, is made before the break instead, as ``switch_to`` makes one (issue #282): the
+replacement opens while the current subscription keeps delivering, and ``on_switched`` marks the
+cutover. Before the connection's credential expires, the supervisor rotates to a new connection the
+same way (issue #261): every want's subscription moves to it make-before-break, and a want that
+keeps its target sees no break and no repeat. Member views (:mod:`caprid_relay.members`) follow who is
+present under a root from the same per-connection discovery. See ``spec/behavior.md``, "Supervised
+connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from types import TracebackType
 from typing import Literal, Self, TypeAlias
 
 from moq_core import (
+    PUBLISH_DONE_STATUS,
     Closed,
     MessageParameters,
     MoqtObject,
@@ -41,6 +42,7 @@ from moq_core import (
 from ._awaitable import RelayAwaitable
 from ._discovery import (
     DISCOVERY_CAPACITY,
+    DISCOVERY_LINGER,
     DiscoveryIndex,
     DiscoveryWatchHandlers,
     discovery_ending,
@@ -90,14 +92,15 @@ from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _un
 
 _log = logging.getLogger("caprid_relay")
 
-RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated"]
+RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated", "catch-up"]
 """Why a want replaced its subscription.
 
 ``publisher-done``: the relay sent PUBLISH_DONE. ``stale``: no object arrived for ``stale_after``.
 ``generation``: the current generation was withdrawn with none newer, or a move to a newer one
 could not be made before the break. ``connection``:
 the subscriber connection ended and was replaced. ``terminated``: the relay ended the subscription
-with REQUEST_ERROR after accepting it.
+with REQUEST_ERROR after accepting it. ``catch-up``: the application called ``catch_up(key)`` because the
+subscription delivered too late to use.
 """
 
 
@@ -132,7 +135,11 @@ class WantHandlers:
     on_subgroup_reset: Callable[[SubgroupReset], None] | None = None
     """A subgroup stream was reset."""
     on_publisher_done: Callable[[PublishDone], None] | None = None
-    """The relay sent PUBLISH_DONE on the current subscription; the want resubscribes after its backoff."""
+    """The relay sent PUBLISH_DONE on the current subscription.
+
+    The want resubscribes after its backoff, or as soon as its namespace is announced again (after
+    TRACK_ENDED, announced again after a withdrawal).
+    """
     on_restarted: Callable[[RestartReason, tuple[str, ...]], None] | None = None
     """An accepted subscription ended and the want will replace it: drop decoder state that assumed
     continuity. Receives the reason and the namespace the ended subscription was made on. Called
@@ -158,6 +165,8 @@ class _Connection:
     discovery: DiscoveryIndex
     retiring: CancellationToken = field(default_factory=CancellationToken)
     """Cancelled when a rotation replaced this connection: its wants move to the new one."""
+    wakes: dict[tuple[str, ...], _NamespaceWake] = field(default_factory=dict)
+    """One watch per fixed namespace a want waits on to be announced again, shared by every want on it."""
     holds: int = 0
     """Wants with a subscription and member views with a discovery still on this connection; a rotation
     closes it once none are left."""
@@ -214,6 +223,15 @@ class _Want:
     settled_target: tuple[str, MessageParameters | None] | None = None
     """The track and parameters when the latest attempt settled: a later re-want supersedes its outcome."""
     """A discovery failure no wait fixes, seen while backing off, for the loop to surface."""
+    done_status: int | None = None
+    """The PUBLISH_DONE status that ended the running attempt's subscription, if one did."""
+    wake: tuple[_Connection, _NamespaceWake, Callable[[], None]] | None = None
+    """A fixed namespace's watch the want holds from its first wait until a subscription is accepted, so an
+    announcement between two attempts is heard (spec/behavior.md, "Supervised connections")."""
+    wake_mark: tuple[_NamespaceWake, int] | None = None
+    """The watch's count of changes when the latest attempt started: only an announcement after it wakes a wait."""
+    catch_up: Callable[[], None] | None = None
+    """Ends the running attempt for a catch-up; set while an attempt runs."""
 
     def call(self, name: str, *args: object) -> None:
         """Deliver to one handler; nothing reaches a want after it was cancelled, except its own ``on_error``."""
@@ -377,6 +395,22 @@ class SupervisedSubscriber:
         want = self._state.wants.get(key)
         if want is not None:
             self._forget(key, want)
+
+    def catch_up(self, key: str) -> None:
+        """Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use.
+
+        It cancels the subscription, which makes the relay drop what it still holds queued for it, and subscribes
+        again with the same options, so a want without a location filter starts at the newest group.
+        ``on_restarted`` reports ``"catch-up"``. A latest-value reader's ``on_catch_up`` is the usual caller. The new
+        subscription opens without delay when the old one had moved past its first group, and otherwise after the
+        want's ``retry`` backoff, so a link too slow for the track cannot make it spin. Ignored for an unknown key and
+        while no subscription is accepted.
+        """
+        if not isinstance(key, str):
+            raise TypeError("want key must be a string")
+        want = self._state.wants.get(key)
+        if want is not None and want.catch_up is not None:
+            want.catch_up()
 
     def rotate(self) -> None:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
@@ -872,6 +906,17 @@ async def _supervise_want(
                 return
             want.settled_target = None
             want.connection = started
+            want.done_status = None
+            # What the namespace's watch has seen by now, whether this want holds it or another want on the
+            # connection does: only what comes later is news to this attempt. A watch opened later saw nothing before.
+            existing = (
+                want.wake[1]
+                if want.wake is not None
+                else None
+                if want.options.generations
+                else started.wakes.get(want.options.namespace)
+            )
+            want.wake_mark = (existing, existing.seen()) if existing is not None and not existing.failed() else None
             outcome = await _attempt(want, started, next_connection)
             # A rotation may have moved the attempt to another connection: what follows waits on the one it ended on.
             connection = want.connection or started
@@ -907,20 +952,48 @@ async def _supervise_want(
             # on_restarted is application code: it may have wanted another target.
             if outcome.kind != "retry" or (want.options.track, want.options.parameters) != asked:
                 continue
+            # A catch-up replaces a subscription that was delivering: the replacement is wanted now, not after a
+            # backoff.
+            if outcome.reason == "catch-up" and outcome.progressed:
+                failures = 0
+                continue
             # Cached objects followed by a done are not progress: only a later group resets the backoff.
             if outcome.progressed:
                 failures = 0
             delay = backoff_delay(failures, want.retry)
             failures += 1
-            await _backoff(want, connection, delay)
+            # After TRACK_ENDED the namespace may still be announced for the publisher that ended the track: only its
+            # being announced again wakes the wait early, and the backoff is the slow fallback.
+            track_ended = outcome.reason == "publisher-done" and want.done_status == PUBLISH_DONE_STATUS.TRACK_ENDED
+            # Woken by an announcement: a new publisher, whose announce race is retried from the shortest delay.
+            if await _backoff(want, connection, delay, track_ended):
+                failures = 0
     finally:
         want.changes.remove(rewanted)
+        _release_wake(want)
 
 
-async def _backoff(want: _Want, connection: _Connection, delay: float) -> None:
+async def _backoff(want: _Want, connection: _Connection, delay: float, track_ended: bool = False) -> bool:
     """Wait out a retry delay, cut short when a fresh attempt can do better at once: the connection
-    ended, or (following generations) a generation other than the last one tried became the newest."""
+    ended, (following generations) a generation other than the last one tried became the newest, or
+    (on a fixed namespace) the namespace was announced after the latest attempt started, which returns
+    ``True``. After TRACK_ENDED (``track_ended``) only an announcement this watch saw follow a withdrawal
+    counts: one already announced may be the publisher that ended the track."""
     wake = CancellationToken()
+    announced = False
+    watched = None if want.options.generations else _hold_wake(want, connection)
+    mark = want.wake_mark[1] if watched is not None and want.wake_mark and want.wake_mark[0] is watched else 0
+
+    def heard() -> None:
+        nonlocal announced
+        if watched is None or watched.failed():
+            return
+        if (watched.returned_at() if track_ended else watched.announced_at()) <= mark:
+            return
+        announced = True
+        wake.cancel()
+
+    unheard = watched.on_change(heard) if watched is not None else None
     held: tuple[_RootWatch, Callable[[], None]] | None = None
     if want.options.generations and not connection.ended.cancelled:
         with contextlib.suppress(Exception):
@@ -950,16 +1023,45 @@ async def _backoff(want: _Want, connection: _Connection, delay: float) -> None:
     want.changes.append(wake.cancel)
     try:
         changed()
+        heard()
         # A rotation replacing the connection wakes it too: the want's next attempt belongs on the new one.
         await wait_any([want.controller, connection.ended, connection.retiring, wake], limit=delay)
     finally:
         want.changes.remove(wake.cancel)
         if unwatch is not None:
             unwatch()
+        if unheard is not None:
+            unheard()
         if remove_release is not None:
             remove_release()
         if held is not None:
             held[1]()
+    return announced and not want.controller.cancelled
+
+
+def _hold_wake(want: _Want, connection: _Connection) -> _NamespaceWake | None:
+    """The want's watch of its fixed namespace on ``connection``, held until a subscription is accepted or the want
+    ends; one held on an earlier connection is released. ``None`` when none can open: the backoff alone applies then."""
+    if want.wake is not None and want.wake[0] is connection and not want.wake[1].failed():
+        return want.wake[1]
+    _release_wake(want)
+    if connection.ended.cancelled or want.controller.cancelled:
+        return None
+    try:
+        watch, release = _namespace_wake(connection, want.options.namespace)
+    except Exception:
+        # The connection is closing, or its discovery cannot open a request.
+        return None
+    want.wake = (connection, watch, release)
+    return watch
+
+
+def _release_wake(want: _Want) -> None:
+    """Release the want's watch of its fixed namespace, if it holds one."""
+    held = want.wake
+    want.wake = None
+    if held is not None:
+        held[2]()
 
 
 async def _attempt(want: _Want, connection: _Connection, next_connection: Callable[[], _Connection | None]) -> _Outcome:
@@ -1070,6 +1172,12 @@ class _Slot:
         """Record ``obj`` as the latest this slot delivered, if it is later than what it had."""
         if not _at_or_before(obj, self.latest):
             self.latest = (obj.group_id, obj.object_id)
+
+
+def _is_progress(obj: MoqtObject, first_group: int | None) -> bool:
+    """Whether ``obj`` shows the track moving on: an object with a payload in a group after ``first_group``. A status
+    object is not, so the end-of-track marker a relay replays after the cached last group never resets the backoff."""
+    return obj.status == "normal" and first_group is not None and obj.group_id > first_group
 
 
 def _later(a: tuple[int, int] | None, b: tuple[int, int] | None) -> tuple[int, int] | None:
@@ -1344,7 +1452,7 @@ async def _follow(
                 break
             if isinstance(held, ObjectEvent):
                 slot.delivered(held.value)
-                if held.value.group_id > obj.group_id:
+                if _is_progress(held.value, obj.group_id):
                     slot.progressed = True
                 slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
                 deliver("on_object", held.value)
@@ -1363,7 +1471,7 @@ async def _follow(
             last_object_at = loop.time()
             if slot.first_group is None:
                 slot.first_group = obj.group_id
-            elif obj.group_id > slot.first_group:
+            elif _is_progress(obj, slot.first_group):
                 slot.progressed = True
             if slot.largest_group is None or obj.group_id > slot.largest_group:
                 slot.largest_group = obj.group_id
@@ -1412,6 +1520,8 @@ async def _follow(
         slot.accepted = info
         if slot is not active:
             return
+        # Accepted: the watch that waited for the namespace to be announced again is done with.
+        _release_wake(want)
         last_object_at = loop.time()
         want.call("on_subscribed", info, slot.namespace)
 
@@ -1430,6 +1540,7 @@ async def _follow(
             ended_targets.append((slot.namespace, slot.track, slot.parameters))
             pending_failed(slot, None)
         elif slot is active and slot.ended is None:
+            want.done_status = info.status_code
             active_ended("publisher-done")
             want.call("on_publisher_done", info)
 
@@ -1633,6 +1744,12 @@ async def _follow(
         watch_stale()
         reconcile()
 
+    def catch_up() -> None:
+        if over() or not accepted():
+            return
+        settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason="catch-up"))
+
+    want.catch_up = catch_up
     watch_stale()
     want.changes.append(changed)
     unwatch = watch.on_change(reconcile) if watch is not None else None
@@ -1645,6 +1762,8 @@ async def _follow(
     finally:
         # Settles the attempt, so nothing reaches the handlers from here on.
         settle(_CANCELLED)
+        if want.catch_up is catch_up:
+            want.catch_up = None
         if stale_task is not None:
             stale_task.cancel()
         clear_retry()
@@ -1796,6 +1915,150 @@ def _root_watch(connection: _Connection, root: tuple[str, ...]) -> tuple[_RootWa
     """A want's watch of ``root`` on the connection's shared discovery, and its release."""
     watch = _RootWatch(connection.discovery, root)
     return watch, watch._watch.release
+
+
+class _NamespaceWake:
+    """One fixed namespace's announcement, watched on the connection's shared discovery, so a followed root or member
+    view over the namespace serves it. Each change of the namespace is counted, so a waiter compares what came after
+    the moment it marked with :meth:`seen`."""
+
+    __slots__ = (
+        "_announced_at",
+        "_ended",
+        "_listeners",
+        "_namespace",
+        "_on_end",
+        "_returned_at",
+        "_seen",
+        "_watch",
+        "_withdrawn",
+        "linger",
+        "users",
+    )
+
+    def __init__(self, discovery: DiscoveryIndex, namespace: tuple[str, ...], on_end: Callable[[], None]) -> None:
+        self._namespace = namespace
+        self._on_end = on_end
+        self._listeners: list[Callable[[], None]] = []
+        self._seen = 0
+        self._announced_at = 0
+        self._returned_at = 0
+        self._withdrawn = False
+        self._ended = False
+        self.users = 0
+        self.linger: asyncio.TimerHandle | None = None
+        # Raises when the connection's discovery is closed or cannot open a request.
+        self._watch = discovery.watch(
+            namespace,
+            DiscoveryWatchHandlers(
+                on_announced=self._announced, on_unannounced=self._unannounced, on_ended=self._request_ended
+            ),
+        )
+        # A request already open over the namespace shows it without an event: count that as a fresh request's first.
+        if any(len(shown) == len(namespace) for shown in self._watch.namespaces()):
+            self._seen = 1
+            self._announced_at = 1
+
+    def _announced(self, namespace: tuple[str, ...]) -> None:
+        # Only the namespace itself; a deeper one is another publisher's.
+        if len(namespace) != len(self._namespace):
+            return
+        self._seen += 1
+        self._announced_at = self._seen
+        if self._withdrawn:
+            self._returned_at = self._seen
+        self._notify()
+
+    def _unannounced(self, namespace: tuple[str, ...]) -> None:
+        if len(namespace) != len(self._namespace):
+            return
+        self._seen += 1
+        self._announced_at = 0
+        self._returned_at = 0
+        self._withdrawn = True
+        self._notify()
+
+    def _request_ended(self, _error: BaseException | None) -> None:
+        # Refused or ended with the connection: the wants waiting on it back off.
+        self._ended = True
+        self._on_end()
+        self._notify()
+
+    def _notify(self) -> None:
+        for listener in list(self._listeners):
+            listener()
+
+    def seen(self) -> int:
+        """How many changes of the namespace the watch has reported."""
+        return self._seen
+
+    def announced_at(self) -> int:
+        """The count at the latest ``announced``, while the namespace is announced; 0 when it is not."""
+        return self._announced_at
+
+    def returned_at(self) -> int:
+        """As :meth:`announced_at`, but only for an ``announced`` that followed a withdrawal this watch reported."""
+        return self._returned_at
+
+    def failed(self) -> bool:
+        """Whether the watch ended: the relay refused or ended its request, or the connection closed."""
+        return self._ended
+
+    def on_change(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Observe every change, the watch's end included; returns the removal."""
+        self._listeners.append(listener)
+
+        def remove() -> None:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+        return remove
+
+    def close(self) -> None:
+        self._ended = True
+        self._watch.release()
+
+
+def _namespace_wake(connection: _Connection, namespace: tuple[str, ...]) -> tuple[_NamespaceWake, Callable[[], None]]:
+    """The connection's watch for the fixed ``namespace``, opened on first use and closed a moment after its last
+    user leaves. It is served by the connection's discovery, so a root's discovery or a member view serves it too."""
+    entry = connection.wakes.get(namespace)
+    if entry is None:
+        created: list[_NamespaceWake] = []
+
+        def forget_ended() -> None:
+            if created and connection.wakes.get(namespace) is created[0]:
+                del connection.wakes[namespace]
+
+        entry = _NamespaceWake(connection.discovery, namespace, forget_ended)
+        created.append(entry)
+        connection.wakes[namespace] = entry
+    watch = entry
+    # Used again: a keep-alive started by an earlier release no longer applies.
+    if watch.linger is not None:
+        watch.linger.cancel()
+        watch.linger = None
+    watch.users += 1
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        watch.users -= 1
+        if watch.users == 0:
+
+            def linger_over() -> None:
+                # Kept a moment, as a root's discovery is, so the next done finds what it already saw.
+                watch.linger = None
+                if watch.users == 0 and connection.wakes.get(namespace) is watch:
+                    del connection.wakes[namespace]
+                    watch.close()
+
+            watch.linger = asyncio.get_running_loop().call_later(DISCOVERY_LINGER, linger_over)
+
+    return watch, release
 
 
 __all__ = ["RestartReason", "SupervisedSubscriber", "WantHandlers", "WantSwitchedInfo", "connect_supervised_subscriber"]

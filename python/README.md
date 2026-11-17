@@ -16,6 +16,8 @@ The shared protocol pins, behavior contract, and test vectors live in [spec](../
 [root README](../README.md) describes the whole repository. Before 1.0, a minor version can break the
 API, and [CHANGELOG.md](CHANGELOG.md) says what changed. This guide follows the `main` branch, which
 can be ahead of the latest release.
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 
@@ -31,8 +33,11 @@ subscribe** under its root, which is the namespace prefix the token grants. Ask 
 backend owner for it. For another Relay deployment, also ask its operator for an HTTPS Relay
 endpoint.
 
-The SDK uses tokens but does not issue them, and there is no public token signup. A Mux API access
-token is not a Relay JWT.
+The SDK uses tokens but does not issue them. Switchboard does, and calls them Client tokens. Sign up
+at `app.caprid.com`, then mint a Client token through Switchboard's API, or sign one in your backend
+with a signing key. [Credentials](https://www.caprid.com/docs/guides/credentials/) says which
+credential goes where. Only the Client token belongs in a client, and a relay never accepts an API
+key.
 
 A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
 root as the path. A token rooted at `acme/rooms/42` connects to
@@ -42,7 +47,7 @@ it, and the relay verifies the token. Name namespaces relative to the root: `["p
 not a JWT, or has no `root` claim, raises `TypeError` before anything connects and tells you to pass
 `url` ([token-rooted endpoint](../spec/behavior.md#token-rooted-endpoint)).
 
-The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
+The Caprid relays carry announcements between regions, so a publisher and a subscriber can each use
 their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
 Pass `url` to choose the endpoint yourself: a nearby region, a room below the token's root, or
 another deployment. A path the token does not grant fails at connect with `UNAUTHORIZED`. A client
@@ -573,7 +578,9 @@ track treats `RECONNECTING` as an interruption and resumes at the next keyframe.
 
 `want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
 retries the announce race, and resubscribes after `PUBLISH_DONE` or after a rejection that waiting may
-fix, with backoff from 0.25 s up to 8 s. It also moves to the replacement connection. With
+fix, with backoff from 0.25 s up to 8 s, or as soon as its namespace is announced again (after
+`TRACK_ENDED`, announced again after a withdrawal), so a restarted publisher is picked up within about
+a round trip of its announcement. It also moves to the replacement connection. With
 `stale_after` in seconds, it resubscribes a track that went silent. Set that only for tracks that are
 never silent while live. With `generations=True`, it discovers the publisher's root and stays on the
 newest generation, moving as soon as a newer one is announced, with no application channel. A
@@ -614,6 +621,52 @@ the old generation closes. Each want moves its subscription to the new connectio
 move. When the want's target is unchanged, the cutover is invisible: no callback runs, and nothing is
 lost or repeated. Call `rotate()` to rotate now, for example after you revoke a token. See
 [rotation](../spec/behavior.md#rotation).
+
+For video, viewers keep the old generation's picture until the new generation's first keyframe. A
+`FrameWriter` asks for that keyframe through `on_keyframe_needed` as soon as viewers subscribe to the
+new generation, so honor it. In a live test that honored the request, video switched 46 to 206 ms
+after `rotate()`, and no viewer went more than one frame without a picture. An encoder that ignores
+the request switches at its next scheduled keyframe, up to one keyframe interval later. The move
+also reports `True` from `demand_changes()` while demand carries over. Force a keyframe on it, but
+don't restart the encoder. moq-relay can't give a live connection a new token today, so every
+rotation opens a new connection and generation.
+
+### Test recovery by dropping the transport
+
+To check how your application handles a lost connection, close the transport under it on purpose.
+`caprid_relay.quic.connect_quic` is the factory the connect functions use when `create_transport`
+is left out. Wrap it, keep each transport it opens, and close them when you want a drop:
+
+```python
+from caprid_relay import connect_supervised_publisher, connect_supervised_subscriber
+from caprid_relay.quic import connect_quic
+
+opened = []
+
+
+def create_transport(url, protocols):
+    connecting = connect_quic(url, protocols)
+    opened.append(connecting.transport)
+    return connecting
+
+
+def drop_connections():
+    """Drop every open connection, as a network loss would."""
+    for transport in opened:
+        transport.close(0, "chaos: dropped")
+    opened.clear()
+
+
+publisher = await connect_supervised_publisher(
+    url, namespace=namespace, get_token=get_token, create_transport=create_transport
+)
+subscriber = await connect_supervised_subscriber(url, get_token=get_token, create_transport=create_transport)
+```
+
+After `drop_connections()`, each supervisor reports `reconnecting` and then `live` through
+`on_status`. The publisher comes back as a new generation, and each want resubscribes on the new
+connection. Against `ord.relay.mux.global`, a want following generations was receiving again about
+1 s after the drop.
 
 ## Publishing lifecycle
 
@@ -762,6 +815,13 @@ if video.has_demand:  # the relay currently has an upstream subscription for the
 A group that fails part-way, because the relay's subscription changed or ended, is reset instead of
 completed, and the track stays open. Start the next group at the next keyframe.
 
+Serve the catalog before you gate encoding on demand. Viewers read the catalog first, and only then
+subscribe to the video track, which is what gives it demand. If the catalog waits for the encoder's
+first output, and the encoder waits for `has_demand`, neither ever starts, and no viewer gets video.
+Either build the catalog from the encoder configuration you already know, or encode regardless of
+demand until the first decoder configuration arrives, then encode only while `video.has_demand` is
+true.
+
 `demand_changes()` iterates relay demand. It yields the current state first. After that it yields
 `True` when the relay subscribes or replaces its subscription, so `True` can repeat, and `False` when
 the subscription ends. A catalog track uses it to re-send its document on each relay subscription:
@@ -805,7 +865,9 @@ Each `await writer.write(frame)` returns what became of the frame (`sent`, `skip
 `dropped`, `interrupted`, or `ended`) instead of raising. The writer serves writes from several tasks
 in call order. When more than `max_backlog` frames wait behind the one being written, the writer
 drops frames instead of queueing them. Under keyframe grouping it drops the waiting frames and the
-group in progress. Under `grouping="frame"` it drops the oldest waiting frame.
+group in progress. Under `grouping="frame"` it drops the oldest waiting frame. `max_backlog` defaults
+to 8 under keyframe grouping; under frame grouping there is no default bound, so no frame is dropped
+for the backlog, and memory is unbounded while delivery is blocked.
 `writer.keyframe_needed` and `on_keyframe_needed=` say when the next frame must be a keyframe: after a
 demand change, a failure, a stale frame, or a drop. An encoder can then force one. A frame is any
 object with `payload`, `key`, `properties`, and `discontinuity` attributes, so your own encoded-sample
@@ -842,6 +904,139 @@ values, cycles, non-finite numbers, and unpaired surrogates fail locally. Readin
 and `Infinity`. Other conversions follow Python's standard JSON behavior. Text writing uses strict
 UTF-8 encoding. Raw byte `write()` and plain subscriptions remain available.
 
+## Control and telemetry
+
+Apps that send media often send small data beside it. A robot reports telemetry, and a remote
+cockpit sends it controls. Most of this data is **latest-wins**: a newer value makes the older one
+useless. Some of it is not, such as an emergency stop that must arrive even when a newer message
+follows. Choose the pattern per track.
+
+### Each side publishes its own track
+
+A publisher connection serves one namespace. So each side of a two-way app has its own publisher,
+and subscribes to the other side's namespace with a subscriber. The robot publishes `video` and
+`telemetry` under `["room", "robot"]`, and subscribes to `control` under `["room", "cockpit"]`. The
+cockpit does the reverse. Each side's token must grant publishing under its own namespace and
+subscribing under the other's.
+
+```python
+import asyncio
+import json
+import time
+
+from caprid_relay import (
+    MessageParameters,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    read_json,
+)
+from caprid_relay.media import DocumentService, LatestValueReader
+
+# On the robot.
+publisher = await connect_relay_publisher(url, namespace=["room", "robot"], get_token=get_token)
+telemetry = DocumentService(publisher.register_track("telemetry"))
+serving = asyncio.create_task(telemetry.serve())
+
+
+async def report() -> None:
+    while True:
+        telemetry.update(json.dumps(read_sensors()).encode())
+        await asyncio.sleep(0.05)
+
+
+reporting = asyncio.create_task(report())
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+control = LatestValueReader(
+    lambda obj: apply_control(read_json(obj)),
+    late=lambda obj: time.time() - read_json(obj)["sent_at"] > 0.5,
+    on_catch_up=lambda: subscriber.catch_up("control"),
+)
+subscriber.want(
+    "control",
+    ["room", "cockpit"],
+    "control",
+    control.want_handlers(on_error=on_error),
+    parameters=MessageParameters(subscriber_priority=0),
+)
+```
+
+The reader delivers a value only when it is newer than every value before it. The `late` and
+`on_catch_up` arguments are optional. The next section explains them.
+
+### Latest-wins values
+
+Send each value as a group of its own, holding one object. `track.write()` does this, and so does a
+document service. `caprid_relay.media.DocumentService(track)` is the simplest latest-wins publisher.
+`update(value)` replaces the value it holds. While a write is in progress, later updates replace one
+another, so only the newest is sent next. The service also sends the current value again on every
+relay subscription. That matters because an update made while the relay has no subscription is only
+held, not sent. After a failed write, it waits `retry_delay` seconds (1 by default) before it sends again, so
+pass a smaller value for a value that changes quickly.
+
+Make each value complete, not a change to the previous one. A viewer that joins late starts at the
+relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
+and the viewer drops values that arrive superseded.
+
+**Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`RelaySubscriber.max_age_supported`)
+skips groups that a newer one has superseded for longer than the
+`MessageParameters(max_age=...)` (milliseconds) you subscribe with. The SDK sends it only to such a
+relay, so it is safe to set ([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)). In
+a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
+one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
+600 of them arrived before an older group, because each group travels on a stream of its own. The
+same happened with 100 ms subscriber delivery timeouts and with group order descending
+([measurements](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+Delivery timeouts do not change this. The relay ignores the subscriber's, and the publisher's only
+bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+So the viewer does the dropping:
+
+- `caprid_relay.media.LatestValueReader` drops any value older than the newest one it has seen, as
+  in the example above. Group IDs rise within one subscription and start over when a want restarts
+  or moves to a new generation, so the reader starts over there too. Pass its `want_handlers(...)`,
+  with your own callbacks as keyword arguments, and keep the want's `drain` at 0. For a plain
+  subscription, pass `subscription_handlers(...)` instead.
+- To know when a value is too old to act on, put the time it was taken in the payload and pass a
+  `late` predicate. Comparing that time with the viewer's clock assumes the two machines' clocks
+  agree. The reader drops a late value. On the first late value after a value it delivered, it calls
+  `on_catch_up`. There, call the supervised subscriber's `catch_up(key)`. It replaces the
+  subscription at the live edge, which drops the relay's backlog, and runs `on_restarted` with reason
+  `"catch-up"`. A restart does not re-arm `on_catch_up`: it runs again only after a value is
+  delivered. Set the limit above the lateness the viewer's link can reach. Below it, the values after
+  a catch-up are late too, and the reader delivers nothing until the link speeds up. `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
+  `stale_after` does not help here, because a backlog is not silence.
+- Give control and telemetry a subscriber priority ahead of the video on the same connection. The
+  relay orders what it sends you by your subscriber priority alone, where a lower number is more
+  urgent ([measured](../spec/relay-interop.md#subscription-parameters)).
+  `caprid_relay.media.media_subscribe_parameters` gives audio 16 and video 96.
+
+A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
+`write_json()` for each one. A concurrent write raises `WRITE_PENDING`, so queue commands in your own
+code. A write waits for relay demand and sends once the relay subscribes. `write_timeout` (10 s by
+default) covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the
+command was never delivered. Check its `phase`: only `"waiting-for-demand"` means no bytes went
+out. Commands can also arrive out of order, so number them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
+that, have the viewer reply on its own track.
+
+### Latency and staleness: where each is set
+
+The publisher and the viewer set different things, under similar names:
+
+| Setting | Side | What it does |
+| --- | --- | --- |
+| `PlayoutClock(target_latency_us=...)` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `late_drop_us` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
+| Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the `FrameSequencer` re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
+| `late` with `on_catch_up` on `LatestValueReader` | viewer | Drops values your predicate calls late, and on the first one calls `on_catch_up`, where `catch_up(key)` replaces the subscription at the live edge. The want restarts with reason `"catch-up"` ([latest-wins values](#latest-wins-values)). |
+| `stale_after` on `want` | viewer | Resubscribes a track that has been silent that many seconds. The want restarts with reason `"stale"`. Use it only for tracks that are never silent while live. |
+| `media_track_properties(kind, target_latency_us=...)` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
+| Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
+
+The TypeScript sequencer can also ask to catch up when frames keep arriving late
+(`catchUpAfterUs` with `catchUp(key)`). The Python sequencer cannot yet, but `catch_up(key)` on a
+supervised subscriber is there to call.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not on message wording. SDK errors use these stable codes:
@@ -864,7 +1059,7 @@ Branch on `code` and `phase`, not on message wording. SDK errors use these stabl
 | `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and the connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | No transport is available in this runtime. In TypeScript, supply a transport where browser WebTransport is missing. In Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed. |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR`. |
 
 Each error also has a `phase`:
 
@@ -897,7 +1092,7 @@ session with MOQT session termination code `UNAUTHORIZED` (0x2). `MALFORMED_AUTH
 `EXPIRED_AUTH_TOKEN` (0x18) map to it too. It can come in any phase. In phase `connection` it means
 the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)).
 TypeScript reports it too, though in a browser only against moq-relay 0.17.0 or later. Older relays'
-close never reached the page, so a refusal arrived as `TRANSPORT_ERROR` (#14). No other connection
+close never reached the page, so a refusal arrived as `TRANSPORT_ERROR`. No other connection
 failure, and no uncovered namespace, proves that authentication was denied. A subscription outside
 the token's grant is refused per request through `onError` or `on_error` (MOQT `UNAUTHORIZED`, 0x1),
 and the connection stays open.
@@ -973,7 +1168,7 @@ rate, not the network. On an idle host, a connection receiving 1 MiB objects fro
 `sjc.relay.mux.global` spends about 25 ms of CPU per MB, a ceiling of roughly **40 MB/s** (measured
 2026-09-30, aioquic 1.3). A host whose CPU is contended, or an application that does its own work on
 the same loop, gets much less. The adapter reads every datagram already waiting on the socket before
-it transmits (#162). Most of the remaining cost is aioquic's per-packet receive work.
+it transmits. Most of the remaining cost is aioquic's per-packet receive work.
 
 Media bitrates are far below this ceiling, but bulk data transfers may not be. A subscriber that
 falls behind gets no signal. The relay keeps queueing toward it, and the only symptoms are growing
@@ -999,7 +1194,8 @@ Follow that example's setup after you finish the data quickstart.
 user's microphone with `moq_media.opus.OpusDecoder`, waits for a pause, answers with `OpusEncoder`,
 and sends an interrupt when the user talks over it. Speech-to-text, a language model, and
 text-to-speech plug in through one async function, and the text of each reply goes on the transcript
-track. Its browser side is `ts/examples/voice-bot`.
+track. The bot publishes through a supervised publisher, so a dropped connection comes back as a new
+generation and the page follows it. Its browser side is `ts/examples/voice-bot`.
 
 ## Package boundaries
 

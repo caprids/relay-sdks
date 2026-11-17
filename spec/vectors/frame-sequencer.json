@@ -14,7 +14,7 @@
         { "at": "40000", "groupEnd": "0" },
         { "at": "1000000", "object": ["1", "0", "11000000"] },
         { "at": "1000000", "poll": { "frames": [["1", "0"]], "waitUs": null } },
-        { "at": "1000000", "stats": { "delivered": "4", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "1" }, "targetLatency": "2000000" }
+        { "at": "1000000", "stats": { "delivered": "4", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "1" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -36,7 +36,7 @@
         { "at": "3500000", "poll": { "frames": [], "waitUs": "1533333" } },
         { "at": "3500000", "groupEnd": "9" },
         { "at": "3500000", "poll": { "frames": [["10", "0"], ["10", "1"]], "waitUs": null } },
-        { "at": "3500000", "stats": { "delivered": "5", "late": "2", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "3500000", "stats": { "delivered": "5", "late": "0", "behind": "2", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -51,7 +51,7 @@
         { "at": "0", "object": ["0", "2", "66666"] },
         { "at": "0", "groupEnd": "0" },
         { "at": "0", "poll": { "frames": [["0", "2"], ["1", "0"], ["1", "1"]], "waitUs": null } },
-        { "at": "0", "stats": { "delivered": "5", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "5", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -71,7 +71,7 @@
         { "at": "1000000", "poll": { "frames": [], "waitUs": "2033333" } },
         { "at": "3000000", "poll": { "frames": [], "waitUs": "33333" } },
         { "at": "4000000", "poll": { "frames": [["2", "0", "gap"], ["4", "0", "gap"]], "waitUs": null } },
-        { "at": "4000000", "stats": { "delivered": "5", "late": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "4000000", "stats": { "delivered": "5", "late": "0", "behind": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -84,7 +84,7 @@
         { "at": "100000", "object": ["1", "0", "1000000"] },
         { "at": "100000", "poll": { "frames": [], "waitUs": "1900000" } },
         { "at": "2000000", "poll": { "frames": [["1", "0", "gap"]], "waitUs": null } },
-        { "at": "2000000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "2000000", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -97,7 +97,7 @@
         { "at": "0", "poll": { "frames": [["0", "0"], ["0", "1"]], "waitUs": "2033333" } },
         { "at": "100000", "groupReset": "0" },
         { "at": "100000", "poll": { "frames": [["1", "0", "gap"]], "waitUs": null } },
-        { "at": "100000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "100000", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -112,7 +112,7 @@
         { "at": "2500000", "object": ["100", "0", "2650000"] },
         { "at": "2500000", "object": ["99", "0", "2630000"] },
         { "at": "2500000", "poll": { "frames": [["50", "0", "gap"], ["99", "0", "gap"], ["100", "0"]], "waitUs": null } },
-        { "at": "2500000", "stats": { "delivered": "4", "late": "1", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "2500000", "stats": { "delivered": "4", "late": "1", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -123,7 +123,7 @@
         { "at": "0", "object": ["1", "0", "500000"] },
         { "at": "0", "object": ["4", "0", "2400000"] },
         { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": "50000" } },
-        { "at": "0", "stats": { "delivered": "1", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "1000000" }
+        { "at": "0", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "1000000" }
       ]
     },
     {
@@ -139,7 +139,7 @@
         { "at": "7000000", "poll": { "frames": [["2", "0", "resync"]], "waitUs": "50000" } },
         { "at": "7000000", "object": ["2", "1", "2033333"] },
         { "at": "7000000", "poll": { "frames": [["2", "1"]], "waitUs": "50000" } },
-        { "at": "7000000", "stats": { "delivered": "2", "late": "3", "skippedGroups": "3", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "7000000", "stats": { "delivered": "2", "late": "3", "behind": "0", "skippedGroups": "3", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -151,7 +151,7 @@
         { "at": "0", "object": ["3", "0", "50000"] },
         { "at": "0", "object": ["3", "1", "83333"] },
         { "at": "0", "poll": { "frames": [["3", "0", "restart"], ["3", "1"]], "waitUs": "50000" } },
-        { "at": "0", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -165,7 +165,7 @@
         { "at": "2000000", "poll": { "frames": [], "waitUs": "1000000" } },
         { "at": "3000000", "object": ["12", "0", "2500000"] },
         { "at": "3000000", "poll": { "frames": [["12", "0", "resync"]], "waitUs": null } },
-        { "at": "3000000", "stats": { "delivered": "1", "late": "2", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "3000000", "stats": { "delivered": "1", "late": "2", "behind": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -181,7 +181,7 @@
         { "at": "7000000", "poll": { "frames": [["1", "0", "resync"], ["1", "1"]], "waitUs": null } },
         { "at": "7000000", "object": ["2", "0", "2000000"] },
         { "at": "7000000", "poll": { "frames": [["2", "0"]], "waitUs": "50000" } },
-        { "at": "7000000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "7000000", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -199,7 +199,7 @@
         { "at": "0", "groupEnd": "5" },
         { "at": "0", "object": ["6", "0", "6000000"] },
         { "at": "0", "poll": { "frames": [["6", "0", "gap"]], "waitUs": "50000" } },
-        { "at": "0", "stats": { "delivered": "2", "late": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -214,7 +214,7 @@
         { "at": "100000", "object": ["6", "0", "3200001"] },
         { "at": "100000", "groupEnd": "5" },
         { "at": "100000", "poll": { "frames": [["6", "0"]], "waitUs": "50000" } },
-        { "at": "100000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "100000", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -227,7 +227,7 @@
         { "at": "20000", "object": ["1", "0", "2100000"] },
         { "at": "20000", "object": ["2", "0", "2120000"] },
         { "at": "20000", "poll": { "frames": [["1", "0", "resync"], ["2", "0"]], "waitUs": null } },
-        { "at": "20000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "20000", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -250,7 +250,7 @@
         { "at": "3200000", "object": ["6", "0", "2000000"] },
         { "at": "3200000", "object": ["7", "0", "3180000"] },
         { "at": "3200000", "poll": { "frames": [["7", "0", "gap"]], "waitUs": null } },
-        { "at": "3200000", "stats": { "delivered": "2", "late": "6", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "3200000", "stats": { "delivered": "2", "late": "6", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -265,7 +265,7 @@
         { "at": "0", "groupEnd": "0" },
         { "at": "0", "poll": { "frames": [["1", "0"]], "waitUs": "0" } },
         { "at": "0", "poll": { "frames": [["3", "0", "resync"]], "waitUs": "50000" } },
-        { "at": "0", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -279,7 +279,7 @@
         { "at": "7000000", "object": ["1", "2", "1066666"] },
         { "at": "7000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "9000000", "poll": { "frames": [["1", "0", "resync"], ["1", "1"], ["1", "2"]], "waitUs": "50000" } },
-        { "at": "9000000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "9000000", "stats": { "delivered": "3", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -293,7 +293,7 @@
         { "at": "6000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "7000000", "poll": { "frames": [], "waitUs": "1000000" } },
         { "at": "8000000", "poll": { "frames": [["2", "0", "resync"], ["2", "1"]], "waitUs": "50000" } },
-        { "at": "8000000", "stats": { "delivered": "2", "late": "1", "skippedGroups": "2", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "8000000", "stats": { "delivered": "2", "late": "1", "behind": "0", "skippedGroups": "2", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -305,7 +305,7 @@
         { "at": "100000", "restart": true },
         { "at": "100000", "object": ["0", "0", "0"] },
         { "at": "100000", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
-        { "at": "100000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "100000", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -315,7 +315,7 @@
         { "at": "0", "restart": true },
         { "at": "0", "object": ["0", "0", "0"] },
         { "at": "0", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
-        { "at": "0", "stats": { "delivered": "1", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -329,7 +329,7 @@
         { "at": "0", "object": ["0", "0", "0"] },
         { "at": "0", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "2000000", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
-        { "at": "2000000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "2000000", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -345,7 +345,7 @@
         { "at": "0", "poll": { "frames": [["3", "0"]], "waitUs": null } },
         { "at": "0", "object": ["5", "0", "100000"] },
         { "at": "0", "poll": { "frames": [["5", "0", "gap"]], "waitUs": null } },
-        { "at": "0", "stats": { "delivered": "4", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "4", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -365,7 +365,7 @@
         { "at": "0", "object": ["2", "1", "140000"] },
         { "at": "0", "object": ["2", "2", "160000"] },
         { "at": "0", "poll": { "frames": [["2", "1", "gap"], ["2", "2"]], "waitUs": null } },
-        { "at": "0", "stats": { "delivered": "7", "late": "1", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "7", "late": "0", "behind": "1", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -378,7 +378,7 @@
         { "at": "0", "object": ["0", "1", "920000"] },
         { "at": "0", "clockReset": true },
         { "at": "0", "poll": { "frames": [["0", "0"], ["0", "1"]], "waitUs": null } },
-        { "at": "0", "stats": { "delivered": "2", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "0", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -390,7 +390,7 @@
         { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "7000000", "report": "1000000" },
         { "at": "7000000", "poll": { "frames": [["1", "0"], ["1", "1"]], "waitUs": null } },
-        { "at": "7000000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "7000000", "stats": { "delivered": "2", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -401,7 +401,7 @@
         { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "5500000", "clockReset": true },
         { "at": "5500000", "poll": { "frames": [["1", "0"]], "waitUs": "50000" } },
-        { "at": "5500000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "5500000", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -414,7 +414,7 @@
         { "at": "10000000", "report": "5000000" },
         { "at": "10000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "12000000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
-        { "at": "12000000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "12000000", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -428,7 +428,7 @@
         { "at": "10010000", "anchor": "20000000" },
         { "at": "10010000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "12010000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
-        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
     {
@@ -441,7 +441,7 @@
         { "at": "10010000", "report": "20000000" },
         { "at": "10010000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "12010000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
-        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "behind": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     }
   ]
