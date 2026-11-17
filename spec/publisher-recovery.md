@@ -3,7 +3,7 @@
 Replacing a publisher connection restores an upstream source for new subscriptions. It does
 **not** move existing subscribers to that source (moq-relay 0.15.8 and 0.17.0 never do), and a new
 subscription need not succeed immediately.
-These are relay lifecycle limits tracked in [#34](https://github.com/muxinc/relay-sdks/issues/34).
+These are relay lifecycle limits.
 The connection primitives do not automatically reconnect or resubscribe. The opt-in
 [supervised connections](behavior.md#supervised-connections) implement the policy below for live
 applications: a fresh generation namespace per publisher connection, wants that retry and
@@ -46,9 +46,7 @@ Measured on mux.global's moq-relay 0.17.0 on 2026-10-05 with the Python SDK
   Once the finished track has gone unread for about 30 s the relay forgets it, and a subscribe gets
   request error 16 `not found`.
 
-See [issue #34](https://github.com/muxinc/relay-sdks/issues/34) and
-[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for the measurements. They do not
-define a recovery deadline.
+These measurements do not define a recovery deadline.
 
 An orderly publisher close helps the relay learn about shutdown sooner, but neither graceful
 closure nor successful replacement writes promise transparent handoff. Write completion only
@@ -85,8 +83,7 @@ A useful policy is:
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
    objects followed by `onPublisherDone` / `on_publisher_done` must not reset the budget or create
    an immediate resubscribe loop.
-   Reset only after meaningful fresh progress. See
-   [the cached-track resubscription issue](https://github.com/muxinc/relay-sdks/issues/21).
+   Reset only after meaningful fresh progress.
 6. On a media publisher generation change, reacquire the catalog/configuration and resume at a
    usable keyframe. Group/object IDs can restart. They are not an application continuity identifier.
    If continuity matters, include a publisher generation and sequence in the application payload

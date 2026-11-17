@@ -5,6 +5,13 @@ The package depends only on the generic MoQ core, and needs no transport library
 connection. The one encoder, `moq_media.opus`, needs the `opus` extra (see [Opus](#opus)).
 `import moq_media` never loads it.
 
+```sh
+uv add caprid-moq-media
+```
+
+`pip install caprid-moq-media` works too. The frame writer, frame reader, and catalog service that
+send and receive these formats are in `caprid_relay.media`, part of `caprid-relay`.
+
 The catalog builder emits compact UTF-8 JSON bytes. It withholds `avc1` and `avc3` until non-empty init
 data exists, derives their profile, constraint, and level suffix from avcC (keeping `avc3`), forces
 Opus to 48 kHz, and rejects duplicate names and media roles on data tracks. Catalog namespaces use the
@@ -142,7 +149,7 @@ plays. List the track (`DataTrackInfo(name=TRANSCRIPT_TRACK)`), register it, and
 same `seq` with `until_us=` and `final=True` once its last audio is sent. Send no final version for a
 segment an interrupt cut. A listener reads each with `parse_transcript_segment`, keeps them in a
 `Transcript` (`apply`, and `cut` on each interrupt with the playout position), and shows
-`lines_at(clock.position_us)`. See [spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#transcript-track).
+`lines_at(clock.position_us())`. See [spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#transcript-track).
 
 ## Opus
 

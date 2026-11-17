@@ -62,8 +62,8 @@ export function encodeMicrophone(
   options: EncodeMicrophoneOptions,
 ): MicrophoneEncoding {
   const { signal } = options;
-  // Every audio frame is its own group: Opus frames decode independently, so a lost one costs only itself, and a
-  // transport that falls behind drops the oldest frames first.
+  // Every audio frame is its own group: Opus frames decode independently, so a lost one costs only itself. With no
+  // maxBacklog the writer drops none while the transport falls behind: they wait, and arrive late.
   const frames = createFrameWriter<LocFrame>(track, { grouping: 'frame' });
   let encoder: AudioEncoder | undefined;
   let timeline: SourceTimeline | undefined;

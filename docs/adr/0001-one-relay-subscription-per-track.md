@@ -12,7 +12,7 @@ The Relay SDKs model demand as one relay subscription per track: `hasDemand` is 
 binding replaces the previous one, and an operation in flight when that happens fails with
 `SUBSCRIPTION_CHANGED` instead of being sent twice. We chose this because the tested relay aggregates
 every downstream viewer into a single upstream subscription (§9.4 "Relays MAY aggregate"; observed in
-[issue #24](https://github.com/muxinc/relay-sdks/issues/24)) and keeps that subscription for about
+issue #24) and keeps that subscription for about
 30 seconds after the last viewer leaves, so per-subscription fan-out on the publisher side would
 add interface and state for a case the relay never produces.
 
@@ -29,7 +29,7 @@ add interface and state for a case the relay never produces.
 
 The 30-second hold in the rationale no longer applies: moq-relay 0.15.x (production from
 2026-09-28) cancels its upstream subscription about 50 ms after the last viewer leaves
-([issue #137](https://github.com/muxinc/relay-sdks/issues/137); measurements in
+(issue #137; measurements in
 [relay demand](../../spec/relay-interop.md#relay-demand)). The decision stands on the coalescing
 argument alone, which was re-measured: a second viewer still produces no new subscription, so the
 relay still never presents two live subscriptions to one track.

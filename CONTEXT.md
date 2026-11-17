@@ -1,6 +1,6 @@
 # Relay SDKs
 
-The Relay SDKs (TypeScript `@caprid/relay`, Python `caprid_relay`) publish to and subscribe from the Mux
+The Relay SDKs (TypeScript `@caprid/relay`, Python `caprid_relay`) publish to and subscribe from the Caprid
 MoQ Relay under one shared behaviour contract. Public names live in
 [spec/vocabulary.md](spec/vocabulary.md) and are not repeated here. This glossary holds the
 internal, relay-side and test vocabulary that the code, its tests and its reviews use.
@@ -116,13 +116,14 @@ _Avoid_: frame publisher, media writer, GOP mapper, track publisher, sink, media
 
 **Backlog**:
 The frames handed to a frame writer that the transport has not taken yet, in arrival order and
-bounded. An encoder whose output it cannot await fills it, and one that awaits each write never does.
+bounded by default under keyframe grouping, and under frame grouping only when a bound is given.
+An encoder whose output it cannot await fills it, and one that awaits each write never does.
 _Avoid_: queue (unqualified), buffer, pending writes
 
 **Drop**:
 A frame the frame writer discarded because its backlog overflowed: under keyframe grouping the
-whole backlog and the open group go, under frame grouping the oldest frame. Unlike a stale frame,
-it says the transport fell behind, not that the frame was late against the application's clock.
+whole backlog and the open group go, under frame grouping (when a bound is set) the oldest frame.
+Unlike a stale frame, it says the transport fell behind, not that the frame was late against the application's clock.
 _Avoid_: stale (that is the application's lateness), skip (that is no demand), overflow (the cause)
 
 **Keyframe needed**:

@@ -313,7 +313,7 @@ describe('createAudioPlayer', () => {
     });
     for (const index of [1, 2, 4, 3, 5, 6]) reader.onObject(object(index));
     reader.close();
-    expect(sequencer.stats.late).toBe(1);
+    expect(sequencer.stats).toMatchObject({ late: 0, behind: 1 });
     await settle();
     const played = context.render(160).get(nodeOf(context)) ?? [];
     expect(markers(played)).toEqual([1, 2, 4, 5, 6]);

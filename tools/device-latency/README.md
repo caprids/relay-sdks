@@ -3,7 +3,7 @@
 A static page that measures what the [browser capture recipe](../../spec/media-layer.md#browser-capture)
 cannot see: how late a microphone delivers sound, and whether each browser's
 `getOutputTimestamp()` and `outputLatency` report the real output delay. It is the measurement rig
-for [issue #290](https://github.com/muxinc/relay-sdks/issues/290). It needs no relay, no build and no
+for issue #290. It needs no relay, no build and no
 dependencies, and it runs in Chrome, Firefox and Safari.
 
 ## Run it (macOS)
