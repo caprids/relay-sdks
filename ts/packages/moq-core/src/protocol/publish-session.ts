@@ -92,16 +92,17 @@ export interface MoqtPublishSessionCallbacks {
   /** GOAWAY (control stream or a request stream): stop initiating, migrate. */
   onGoaway?(goaway: Goaway): void;
   /**
-   * The announced namespace reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation — the peer can now route
-   * SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own; this is the strongest "announced" fact
-   * the transport draft offers.
+   * An announced namespace first reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation — the peer can now
+   * route SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own; this is the strongest "announced"
+   * fact the transport draft offers. Called once per namespace per `announce()`.
    */
   onAnnounced?(info: { namespace: TrackNamespace }): void;
   /**
-   * The solicitation stream carrying the announce ended while the session was still live — the peer rejected the
-   * announce (unauthorized suffix) or withdrew its namespace interest. Either way the ingest path is gone.
+   * The last solicitation stream carrying an announced namespace ended while the session was still live — the peer
+   * rejected the announce (unauthorized suffix) or withdrew its namespace interest. Either way that namespace's ingest
+   * path is gone. Not called for a namespace `withdraw()` removed.
    */
-  onAnnounceEnded?(info: { error?: unknown }): void;
+  onAnnounceEnded?(info: { namespace: TrackNamespace; error?: unknown }): void;
   /** The peer subscribed to a registered track (already answered SUBSCRIBE_OK). */
   onSubscribe?(subscribe: IncomingSubscribe): void;
   /** A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE). */
@@ -111,7 +112,12 @@ export interface MoqtPublishSessionCallbacks {
    * `INTERNAL_ERROR` instead. The track stays registered and the session stays up, but a cause that lies in the track
    * (its properties) fails every subscription to it. `error` is the encoder's failure.
    */
-  onSubscribeFailed?(info: { requestId: number; trackName: string; error: unknown }): void;
+  onSubscribeFailed?(info: {
+    requestId: number;
+    trackNamespace: TrackNamespace;
+    trackName: string;
+    error: unknown;
+  }): void;
   /**
    * A track's effective alias binding changed. The most recent live subscription wins the binding (a replaced one ends
    * with PUBLISH_DONE `TRACK_ENDED` — a clean end for that request, covering the peer's resubscribe races), and only
@@ -119,7 +125,7 @@ export interface MoqtPublishSessionCallbacks {
    * permits data (`forward: 0` subscribes without authorizing it; REQUEST_UPDATE toggles it). `undefined` means no live
    * forwarding subscription, so no data streams may be opened for the track.
    */
-  onTrackBinding?(info: { trackName: string; trackAlias: number | undefined }): void;
+  onTrackBinding?(info: { trackNamespace: TrackNamespace; trackName: string; trackAlias: number | undefined }): void;
   /**
    * REQUEST_UPDATE on an inbound request stream. `requestId` is the request being updated (the stream's SUBSCRIBE or
    * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§6.4.2.1). A subscription
@@ -201,14 +207,25 @@ export interface RegisteredTrack {
 export interface MoqtPublishSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
-  /** Whether a current solicitation covers the desired namespace; undefined before any is accepted. */
-  readonly namespaceSolicited: boolean | undefined;
   /**
-   * Announce the namespace on every matching solicitation — current and future. The wire write additionally waits for
-   * the first `registerTrack()`: an announce invites immediate SUBSCRIBEs, and an empty registry would answer them with
-   * a terminal DOES_NOT_EXIST. Result via `onAnnounced` / `onAnnounceEnded`.
+   * Whether a current solicitation covers an announced namespace; undefined before any solicitation is accepted or
+   * while nothing is announced. With several namespaces announced, use {@link isSolicited} for one of them.
+   */
+  readonly namespaceSolicited: boolean | undefined;
+  /** Whether a current solicitation covers `trackNamespace`; undefined before any solicitation is accepted. */
+  isSolicited(trackNamespace: TrackNamespace): boolean | undefined;
+  /**
+   * Announce a namespace on every matching solicitation — current and future. A session announces any number of
+   * namespaces; announcing one already announced does nothing. The wire write additionally waits for the first
+   * `registerTrack()` in that namespace: an announce invites immediate SUBSCRIBEs, and an empty registry would answer
+   * them with a terminal DOES_NOT_EXIST. Result via `onAnnounced` / `onAnnounceEnded`.
    */
   announce(trackNamespace: TrackNamespace): void;
+  /**
+   * Stop announcing a namespace: NAMESPACE_DONE on every solicitation that carried it. Its tracks stay registered and
+   * their subscriptions are untouched; end them first. Withdrawing a namespace not announced does nothing.
+   */
+  withdraw(trackNamespace: TrackNamespace): void;
   /** Register one servable track; the peer's SUBSCRIBEs are answered from this registry. */
   registerTrack(options: RegisterTrackOptions): RegisteredTrack;
   /**
@@ -348,6 +365,10 @@ interface TrackRecord {
   /** The largest object location `objectPublished` recorded: TRACK_STATUS_OK's LARGEST_OBJECT without `getLargestObject`. */
   largestObject: Location | undefined;
   key: string;
+  /** The track's namespace. */
+  namespace: TrackNamespace;
+  /** The track's namespace, as {@link namespaceKey} spells it. */
+  namespaceKey: string;
   trackName: string;
   subscribers: SubscriberStream[];
   done: boolean;
@@ -411,6 +432,18 @@ function readLargestObjectForUpdate(track: TrackRecord): Location | undefined {
   }
 }
 
+/** A namespace as a map key: fields may contain any character, so they are not joined. */
+function namespaceKey(namespace: TrackNamespace): string {
+  return JSON.stringify(namespace);
+}
+
+/** One namespace the session announces. */
+interface AnnounceRecord {
+  namespace: TrackNamespace;
+  /** Whether `onAnnounced` has run for this announce. */
+  fired: boolean;
+}
+
 function trackKey(namespace: TrackNamespace, name: string): string {
   return `${namespace.join('/')}--${name}`;
 }
@@ -463,8 +496,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * indistinguishable — session-fatal, per the draft.
    */
   #peerRequestIds = new Set<number>();
-  #desiredNamespace: TrackNamespace | undefined;
-  #announcedFired = false;
+  /** The namespaces to announce, by {@link namespaceKey}. */
+  #announces = new Map<string, AnnounceRecord>();
+  /** Namespaces with at least one registered track, by {@link namespaceKey}: an announce waits for its first. */
+  #trackNamespaces = new Set<string>();
   #receivedNamespaceSolicitation = false;
 
   #resolveReady!: () => void;
@@ -493,9 +528,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   get namespaceSolicited(): boolean | undefined {
-    const namespace = this.#desiredNamespace;
-    if (namespace === undefined || !this.#receivedNamespaceSolicitation) return undefined;
-    return [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, namespace));
+    if (this.#announces.size === 0 || !this.#receivedNamespaceSolicitation) return undefined;
+    return [...this.#announces.values()].some(({ namespace }) =>
+      [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, namespace))
+    );
+  }
+
+  isSolicited(trackNamespace: TrackNamespace): boolean | undefined {
+    if (!this.#receivedNamespaceSolicitation) return undefined;
+    return [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, trackNamespace));
   }
 
   // ---------------------------------------------------------------------------
@@ -685,37 +726,69 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   announce(trackNamespace: TrackNamespace): void {
     if (this.#destroyed || this.#closing) return;
 
-    this.#desiredNamespace = trackNamespace;
+    const key = namespaceKey(trackNamespace);
+    if (this.#announces.has(key)) return;
+
+    const record: AnnounceRecord = { namespace: [...trackNamespace], fired: false };
+    this.#announces.set(key, record);
 
     for (const stream of this.#namespaceStreams) {
-      this.#reconcileAnnounce(stream);
+      this.#reconcileAnnounce(stream, record);
+    }
+  }
+
+  withdraw(trackNamespace: TrackNamespace): void {
+    if (this.#destroyed || this.#closing) return;
+
+    const key = namespaceKey(trackNamespace);
+    const record = this.#announces.get(key);
+    if (!record) return;
+
+    this.#announces.delete(key);
+
+    for (const stream of this.#namespaceStreams) {
+      if (!isNamespacePrefix(stream.prefix, record.namespace)) continue;
+
+      const suffix = namespaceKey(record.namespace.slice(stream.prefix.length));
+      const index = stream.announced.findIndex((existing) => namespaceKey(existing) === suffix);
+      if (index === -1) continue;
+
+      const [entry] = stream.announced.splice(index, 1);
+      // A failed write means the carrier is dead, which its own failure path reports.
+      void stream.writer.write(encodeNamespaceDone(entry!)).catch(() => {});
     }
   }
 
   /**
-   * Write the desired namespace onto a solicitation stream whose prefix covers it. Solicitations, `announce()`, and the
-   * first `registerTrack()` arrive in any order — the relay's SUBSCRIBE_NAMESPACE races our post-SETUP setup — so all
-   * three paths funnel here. The announce is deferred until at least one track is registered: an announced namespace
-   * invites immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on moq-lite-rs (the relay aborts
-   * the request rather than retrying), so advertising an empty registry would permanently break the first viewer in the
-   * pre-registration window.
+   * Write announced namespaces onto a solicitation stream whose prefix covers them: every one, or only `only`.
+   * Solicitations, `announce()`, and each namespace's first `registerTrack()` arrive in any order — the relay's
+   * SUBSCRIBE_NAMESPACE races our post-SETUP setup — so all three paths funnel here. A namespace's announce is deferred
+   * until a track in it is registered: an announced namespace invites immediate SUBSCRIBEs, and answering one with
+   * DOES_NOT_EXIST is terminal on moq-lite-rs (the relay aborts the request rather than retrying), so advertising an
+   * empty registry would permanently break the first viewer in the pre-registration window.
    */
-  #reconcileAnnounce(stream: NamespaceStream): void {
-    const namespace = this.#desiredNamespace;
-    if (namespace === undefined || this.#tracks.size === 0) return;
+  #reconcileAnnounce(stream: NamespaceStream, only?: AnnounceRecord): void {
+    for (const record of only ? [only] : [...this.#announces.values()]) {
+      this.#announceOn(stream, record);
+    }
+  }
 
+  #announceOn(stream: NamespaceStream, record: AnnounceRecord): void {
+    const { namespace } = record;
+    if (!this.#trackNamespaces.has(namespaceKey(namespace))) return;
     if (!isNamespacePrefix(stream.prefix, namespace)) return;
 
     const suffix = namespace.slice(stream.prefix.length);
-    if (stream.announced.some((existing) => existing.join('/') === suffix.join('/'))) return;
+    const key = namespaceKey(suffix);
+    if (stream.announced.some((existing) => namespaceKey(existing) === key)) return;
 
     stream.announced.push(suffix);
     stream.writer
       .write(encodeNamespace(suffix))
       .then(() => {
-        if (this.#destroyed || this.#announcedFired) return;
+        if (this.#destroyed || record.fired || this.#announces.get(namespaceKey(namespace)) !== record) return;
 
-        this.#announcedFired = true;
+        record.fired = true;
         this.#callbacks.onAnnounced?.({ namespace });
       })
       .catch((error: unknown) => {
@@ -728,37 +801,58 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         // was reported there.
         if (!this.#namespaceStreams.delete(stream)) return;
 
-        stream.announced = stream.announced.filter((existing) => existing !== suffix);
+        const lost = this.#carriedBy(stream);
+        stream.announced = [];
         void stream.writer.close().catch(() => {});
-        void this.#reportAnnounceLoss(error);
+        void this.#reportAnnounceLoss(error, lost);
       });
   }
 
+  /** The announced namespaces a solicitation stream carries entries for. */
+  #carriedBy(stream: NamespaceStream): AnnounceRecord[] {
+    const suffixes = new Set(stream.announced.map(namespaceKey));
+    return [...this.#announces.values()].filter(
+      ({ namespace }) =>
+        isNamespacePrefix(stream.prefix, namespace) && suffixes.has(namespaceKey(namespace.slice(stream.prefix.length)))
+    );
+  }
+
   /**
-   * Fire `onAnnounceEnded` when no solicitation carries the announce anymore — shared by the read-loop cleanup and the
-   * response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
+   * Fire `onAnnounceEnded` for each of `lost` that no solicitation carries anymore — shared by the read-loop cleanup
+   * and the response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
    * destroyed, or migrating (a GOAWAY makes the peer's streams ending the orderly drain), and once the transport has
    * ended: an ended transport fails every stream as it settles `closed`, and that is connection loss, which
    * `#handleClosed` reports, not a withdrawal. A failure with `source` `'session'` (TA-23) or the settled `closed`
-   * decides, not whether the `closed` handler happened to run first.
+   * decides, not whether the `closed` handler happened to run first. A namespace withdrawn meanwhile is not reported.
    */
-  async #reportAnnounceLoss(cause: unknown): Promise<void> {
-    if (this.#announceLossSilenced() || this.#announceCarried()) return;
+  async #reportAnnounceLoss(cause: unknown, lost: AnnounceRecord[]): Promise<void> {
+    const stillLost = () =>
+      lost.filter(
+        (record) =>
+          this.#announces.get(namespaceKey(record.namespace)) === record && !this.#announceCarried(record.namespace)
+      );
+    if (this.#announceLossSilenced() || stillLost().length === 0) return;
     if (isSessionError(cause) || (await hasSettled(this.#transport.closed))) return;
-    // A replacement solicitation may have picked the announce up during that turn.
-    if (this.#announceLossSilenced() || this.#announceCarried()) return;
+    // A replacement solicitation may have picked an announce up during that turn.
+    if (this.#announceLossSilenced()) return;
 
-    const error = new MoqtProtocolError('the namespace solicitation carrying the announce ended');
-    error.cause = cause;
-    this.#callbacks.onAnnounceEnded?.({ error });
+    for (const { namespace } of stillLost()) {
+      const error = new MoqtProtocolError('the namespace solicitation carrying the announce ended');
+      error.cause = cause;
+      this.#callbacks.onAnnounceEnded?.({ namespace, error });
+    }
   }
 
   #announceLossSilenced(): boolean {
     return this.#destroyed || this.#closing || this.#receivedGoaway;
   }
 
-  #announceCarried(): boolean {
-    return [...this.#namespaceStreams].some((stream) => stream.announced.length > 0);
+  #announceCarried(namespace: TrackNamespace): boolean {
+    return [...this.#namespaceStreams].some((stream) => {
+      if (!isNamespacePrefix(stream.prefix, namespace)) return false;
+      const suffix = namespaceKey(namespace.slice(stream.prefix.length));
+      return stream.announced.some((existing) => namespaceKey(existing) === suffix);
+    });
   }
 
   registerTrack(options: RegisterTrackOptions): RegisteredTrack {
@@ -773,6 +867,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       getLargestObject: options.getLargestObject,
       largestObject: undefined,
       key: trackKey(options.trackNamespace, options.trackName),
+      namespace: [...options.trackNamespace],
+      namespaceKey: namespaceKey(options.trackNamespace),
       trackName: options.trackName,
       subscribers: [],
       done: false,
@@ -781,11 +877,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     this.#tracks.set(track.key, track);
 
-    // The first registration may be what the deferred announce was
-    // waiting for (see #reconcileAnnounce).
-    if (this.#tracks.size === 1) {
-      for (const stream of this.#namespaceStreams) {
-        this.#reconcileAnnounce(stream);
+    // The namespace's first registration may be what its deferred announce
+    // was waiting for (see #reconcileAnnounce).
+    if (!this.#trackNamespaces.has(track.namespaceKey)) {
+      this.#trackNamespaces.add(track.namespaceKey);
+      const record = this.#announces.get(track.namespaceKey);
+      if (record) {
+        for (const stream of this.#namespaceStreams) {
+          this.#reconcileAnnounce(stream, record);
+        }
       }
     }
 
@@ -849,7 +949,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     }
 
     if (hadReported && !this.#destroyed) {
-      this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: undefined });
+      this.#callbacks.onTrackBinding?.({
+        trackNamespace: track.namespace,
+        trackName: track.trackName,
+        trackAlias: undefined,
+      });
     }
 
     return Promise.all([...track.pendingEnds]).then(() => {});
@@ -1329,7 +1433,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#namespaceStreams.delete(record);
     void writer.close().catch(() => {});
 
-    if (record.announced.length > 0) await this.#reportAnnounceLoss(cause);
+    const lost = this.#carriedBy(record);
+    record.announced = [];
+    if (lost.length > 0) await this.#reportAnnounceLoss(cause, lost);
   }
 
   /**
@@ -1425,7 +1531,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
 
       if (!this.#destroyed) {
-        this.#callbacks.onSubscribeFailed?.({ requestId: subscribe.requestId, trackName: track.trackName, error });
+        this.#callbacks.onSubscribeFailed?.({
+          requestId: subscribe.requestId,
+          trackNamespace: track.namespace,
+          trackName: track.trackName,
+          error,
+        });
       }
       return;
     }
@@ -1504,6 +1615,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
 
       this.#callbacks.onTrackBinding?.({
+        trackNamespace: track.namespace,
         trackName: track.trackName,
         trackAlias: subscriber.forwarding ? trackAlias : undefined,
       });
@@ -1541,6 +1653,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
             if (!subscriber.finished && subscriber.accepted) {
               this.#callbacks.onTrackBinding?.({
+                trackNamespace: track.namespace,
                 trackName: track.trackName,
                 trackAlias: subscriber.forwarding ? subscriber.trackAlias : undefined,
               });
@@ -1577,7 +1690,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
                 this.#callbacks.onSubscribeEnd?.({ requestId: subscribe.requestId });
                 const binding = track.subscribers.filter((s) => !s.finished && s.accepted && s.forwarding).at(-1);
 
-                this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: binding?.trackAlias });
+                this.#callbacks.onTrackBinding?.({
+                  trackNamespace: track.namespace,
+                  trackName: track.trackName,
+                  trackAlias: binding?.trackAlias,
+                });
               }
             } else {
               // The subscribe driver treats REQUEST_OK as the update's
@@ -1647,7 +1764,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         // pending one accepts, it emits its own binding.
         const binding = track.subscribers.filter((s) => !s.finished && s.accepted && s.forwarding).at(-1);
 
-        this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: binding?.trackAlias });
+        this.#callbacks.onTrackBinding?.({
+          trackNamespace: track.namespace,
+          trackName: track.trackName,
+          trackAlias: binding?.trackAlias,
+        });
       }
     }
   }
