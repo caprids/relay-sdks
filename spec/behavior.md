@@ -787,12 +787,18 @@ taken over.
   the new connection while the old subscription keeps delivering. A want following generations
   discovers the root on the new connection first. Then:
   - **Same target** (namespace, track and parameters): the same publisher's stream continues. The
-    replacement starts at the latest group, so its objects at or before the last location the old
-    subscription delivered are dropped, and the first one after it cuts over without `until`. No
-    callback marks it, no `onSwitched`, `onRestarted` or `onSubscribed`, and nothing is lost or
-    repeated, so decoders keep their state. The old subscription is cancelled, not drained. Once
-    any of the want's subscriptions has heard `PUBLISH_DONE`, nothing is dropped: a restarted
-    publisher numbers its groups from 0 again.
+    replacement's first object cuts over without `until`. The replacement starts at the latest
+    group, so that object is usually one the old subscription delivered. It is dropped, as is every
+    object at or before the last location the old subscription delivered, and delivery carries on
+    from the first one after it. A subgroup end the old subscription reported is not reported
+    again. The cutover does not wait for a new object: both connections receive each object within
+    a fraction of a millisecond, and while the old one delivers each first the replacement would
+    never take over, holding the old connection for the whole overlap. No callback marks the cutover, no `onSwitched`, `onRestarted` or `onSubscribed`,
+    and nothing is lost or repeated, so decoders keep their state. The old subscription is
+    cancelled, not drained. Once any of the want's subscriptions has heard `PUBLISH_DONE`, nothing
+    is dropped: a restarted publisher numbers its groups from 0 again. A want whose track sends
+    nothing and has no group cached at the relay has no first object, and keeps the old connection
+    open until the overlap ends.
   - **Another target**, a newer generation announced on the new connection or a re-want: an
     ordinary move, with `until`, the drain and `onSwitched`.
   - The old connection closing under the old subscription leaves the replacement to carry on, and
