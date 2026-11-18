@@ -163,9 +163,6 @@ out of order across group streams, and the sequencer drops what is too late agai
 `catchUpAfterUs` tune audio delivery for a listener or for speech-to-text. `missingGroups` on a frame names the groups
 skipped before it (see [voice delivery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#voice-delivery-per-direction)).
 
-The combined `register_media` publishing handle is still a proposal in `spec/media-layer.md`. `@caprid/relay/media`
-ships the frame writer and catalog service that it would compose.
-
 ## Media timeline
 
 msf-01's Media Timeline track maps media time to group locations, for seeking and playlists, with one record per video

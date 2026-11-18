@@ -968,8 +968,7 @@ already rejected as the name of a step that does not send); `MediaTrackWriter.wr
 (redundant on a type named for frames); an events iterator for the catalog service (two counters
 answer what the example's `finished` line asks); exceptions for interrupted and ended frames (see
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
-changes, gets `DocumentService` instead of a mode). The `register_media` handle in
-[media-layer.md](media-layer.md) remains a proposal.
+changes, gets `DocumentService` instead of a mode).
 
 "Latest-value reader" pairs with the frame reader and with the document service it reads. The
 publisher sends the latest value, and the reader delivers it. "Superseded", not "stale" or "old",
