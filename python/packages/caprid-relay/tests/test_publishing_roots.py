@@ -327,7 +327,7 @@ async def test_holds_the_view_through_a_reconnect_and_reports_nothing_when_the_s
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "bob", "zed"])
 
 
-async def test_reports_exactly_the_root_removed_during_an_outage_once_the_new_discovery_loads(
+async def test_reports_exactly_the_root_removed_during_an_outage_after_the_grace_on_the_new_discovery(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
@@ -343,8 +343,12 @@ async def test_reports_exactly_the_root_removed_during_an_outage_once_the_new_di
     nxt.push("announced", at("alice"))
     await pause()
     assert len(r.changes) == 1
+    loaded_at = asyncio.get_running_loop().time()
     nxt.push("loaded")
-    await until(lambda: len(r.changes) == 2, "the difference")
+    await pause()
+    assert len(r.changes) == 1
+    await until(lambda: len(r.changes) == 2, "the removal")
+    assert asyncio.get_running_loop().time() - loaded_at >= 0.09
     assert summary(r.changes[1]) == change([], ["bob"], ["alice"])
     await pause()
     assert len(r.changes) == 2
@@ -515,7 +519,7 @@ async def test_reports_a_withdrawal_with_nothing_after_it_once_after_the_grace(
     assert len(r.changes) == 2
 
 
-async def test_reports_a_reconnects_additions_and_removals_in_one_change_with_no_grace(
+async def test_reports_a_reconnects_additions_at_the_load_and_its_removals_after_the_grace(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
@@ -530,11 +534,19 @@ async def test_reports_a_reconnects_additions_and_removals_in_one_change_with_no
     nxt = await relay.discovery(1)
     nxt.push("announced", at("carol"))
     nxt.push("announced", at("dave"))
+    loaded_at = asyncio.get_running_loop().time()
     nxt.push("loaded")
-    await until(lambda: len(r.changes) == 2, "the difference")
-    assert summary(r.changes[1]) == change(["dave"], ["alice", "bob"], ["carol", "dave"])
+    await until(lambda: len(r.changes) == 2, "the addition at the load")
+    assert asyncio.get_running_loop().time() - loaded_at < 0.05
+    await until(lambda: len(r.changes) == 4, "the removals")
+    assert asyncio.get_running_loop().time() - loaded_at >= 0.09
+    assert [summary(c) for c in r.changes[1:]] == [
+        change(["dave"], [], ["alice", "bob", "carol", "dave"]),
+        change([], ["alice"], ["bob", "carol", "dave"]),
+        change([], ["bob"], ["carol", "dave"]),
+    ]
     await pause(0.15)
-    assert len(r.changes) == 2
+    assert len(r.changes) == 4
 
 
 async def test_reports_nothing_for_a_root_the_old_discovery_still_shows_when_the_new_snapshot_misses_its_announce(
@@ -1168,7 +1180,7 @@ def test_settles_every_pending_leave_by_a_new_loads_snapshot_one_it_shows_stays_
     assert ids(removed.present) == ["alice", "carol"]
 
 
-def test_a_reconnect_reports_a_root_the_old_discovery_showed_as_removed_at_once_and_holds_one_in_its_grace() -> None:
+def test_a_reconnect_gives_the_grace_to_a_root_the_old_discovery_showed_and_to_one_already_in_its_grace() -> None:
     _on, source, phase, _effects = loaded("alice", "bob")
     withdrawn = _transition(phase, _Namespace(source, "unannounced", at("bob")), PREFIX).phase
     ended = _transition(withdrawn, _Ended(source, SubscriptionConnectionClosedError(None)), PREFIX)
@@ -1178,11 +1190,9 @@ def test_a_reconnect_reports_a_root_the_old_discovery_showed_as_removed_at_once_
     candidate = opened_source(reopened.effects)
     done = _transition(reopened.phase, _Loaded(candidate), PREFIX)
     assert isinstance(done.phase, _Live)
-    assert done.phase.leaving == ("bob",)
-    assert done.effects[0] == _ScheduleLeave("bob")
-    assert len(done.effects) == 2
-    removed = emitted(done.effects[1])
-    assert (ids(removed.added), ids(removed.removed)) == ([], ["alice"])
+    assert done.phase.settled is ended.phase.settled
+    assert done.phase.leaving == ("alice", "bob")
+    assert done.effects == (_ScheduleLeave("alice"), _ScheduleLeave("bob"))
 
 
 def test_holds_a_root_whose_last_namespace_went_until_its_grace_runs_out_and_cancels_it_if_one_comes_back() -> None:

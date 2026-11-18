@@ -48,10 +48,9 @@ export interface PublishingRootsHandlers {
    * prefix; every later call names at least one root in `added` or `removed`. A root whose last namespace is withdrawn
    * is removed once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
    * announce calls nothing. A root's generations changing, the relay repeating an announce, and the subscriber's
-   * reconnects and rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
-   * discovery shows, if there is one, additions and removals together. The exception is a root the new discovery misses
-   * but the old one still showed, or was giving its 100 ms: it is removed in a later call, once the new discovery has
-   * shown it nothing for 100 ms.
+   * reconnects and rotations call nothing. A reconnect, rotation or retry calls it once with the roots its new
+   * discovery adds, if there are any. A root the new discovery misses is removed in a later call, once the new
+   * discovery has shown it nothing for 100 ms.
    */
   onChanged?(change: PublishingRootsChange): void;
   /**
@@ -364,19 +363,15 @@ function fromLive(phase: Live, input: Arrival, prefix: readonly string[]): Step 
 }
 
 /**
- * A root the new snapshot misses is removed at once only when nothing else shows it. One the old discovery still shows,
- * or one already in its grace, may have announced just after the snapshot was taken, so it gets the grace against the
- * new discovery instead.
+ * A root the new snapshot misses is never removed at the load: it gets the grace against the new discovery. The
+ * snapshot may have been taken inside a publisher rotation's gap, or just before a root's announce reached this relay.
  */
 function adopt(phase: Replacing, candidate: Source, prefix: readonly string[]): Step {
   const { added, removed: missing } = diffRoots(phase.settled, candidate.presence, prefix);
-  const doubtful = (id: string) => phase.leaving.has(id) || (phase.source?.presence.has(id) ?? false);
-  const removed = missing.filter((gone) => !doubtful(gone.id));
-  const leaving: Leaving = new Set(missing.filter((gone) => doubtful(gone.id)).map((gone) => gone.id));
+  const leaving: Leaving = new Set(missing.map((gone) => gone.id));
   let settled = phase.settled;
-  if (added.length > 0 || removed.length > 0) {
+  if (added.length > 0) {
     const next = new Map(phase.settled);
-    for (const gone of removed) next.delete(gone.id);
     for (const arrived of added) next.set(arrived.id, arrived);
     settled = next;
   }
@@ -386,7 +381,7 @@ function adopt(phase: Replacing, candidate: Source, prefix: readonly string[]): 
       ...(phase.source ? [release(phase.source)] : []),
       ...[...phase.leaving].filter((id) => !leaving.has(id)).map(cancelLeave),
       ...[...leaving].map((id): PublishingRootsEffect => ({ kind: 'schedule-leave', id })),
-      ...(settled === phase.settled ? [] : [emit(added, removed, settled)]),
+      ...(settled === phase.settled ? [] : [emit(added, [], settled)]),
     ],
   };
 }
@@ -446,10 +441,10 @@ export function transition(phase: PublishingRootsPhase, input: PublishingRootsIn
 }
 
 /**
- * How long a root stays after its last namespace is withdrawn live before it is reported as removed; a newly loaded
- * discovery's snapshot needs none. It counts only while the followed discovery delivers: one that runs out while the
- * request is replaced or its stream has failed waits for the next load, which settles it or starts it again. The relay
- * orders nothing across two sessions: with no demand on the rotating publisher, the old generation's withdrawal
+ * How long a root stays before it is reported as removed, after its last namespace is withdrawn live or after a newly
+ * loaded discovery's snapshot misses it. It counts only while the followed discovery delivers: one that runs out while
+ * the request is replaced or its stream has failed waits for the next load, which settles it or starts it again. The
+ * relay orders nothing across two sessions: with no demand on the rotating publisher, the old generation's withdrawal
  * arrived before the new generation's announce in 24 of 75 rotations measured on ord and fra (2026-11-03), by at most
  * 0.2 ms.
  */

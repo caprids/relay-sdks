@@ -13,9 +13,9 @@ each section says what changed and what to do about it. How to cut a release is 
   below a root is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
   first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
   `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
-  only the roots added or removed meanwhile, in one call. A root whose removal was already pending, or that the old
-  connection still showed, is removed in a later call once the new discovery has shown it nothing for 100 ms. An
-  application can build a room roster with no roster server.
+  only the roots added or removed meanwhile. New roots come in one call at the load. A root the new discovery misses
+  is removed in a later call, once the new discovery has shown it nothing for 100 ms, so a snapshot taken inside a
+  publisher rotation's gap reports nothing (#427). An application can build a room roster with no roster server.
 - `@caprid/relay/media`: presence, a live room roster with no roster server (#422). Each participant calls
   `publishPresence(publisher, document)` on its supervised publisher: the document (JSON) goes out on every relay
   subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls

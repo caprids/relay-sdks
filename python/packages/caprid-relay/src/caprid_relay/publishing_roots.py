@@ -64,9 +64,8 @@ class PublishingRootsHandlers:
     last namespace is withdrawn is removed once it has had none for 0.1 s, so a rotation whose withdrawal
     arrives just before the new generation's announce calls nothing, and neither do a root's generations
     changing or the relay repeating an announce. After a reconnect, rotation or retry, one call carries
-    the difference the new discovery shows, if there is any, additions and removals together. The
-    exception is a root the new discovery misses but the old one still showed, or was giving its 0.1 s:
-    it is removed in a later call, once the new discovery has shown it nothing for 0.1 s."""
+    the roots the new discovery adds, if there are any. A root the new discovery misses is removed in a
+    later call, once the new discovery has shown it nothing for 0.1 s."""
     on_error: Callable[[BaseException], None] | None = None
     """A discovery failure no wait fixes: the relay refusing the request with a REQUEST_ERROR that does not
     invite a retry, such as NOT_SUPPORTED from a relay without namespace discovery. The view is closed. A
@@ -400,29 +399,21 @@ def _from_live(phase: _Live, event: _Input, prefix: Sequence[str]) -> _Step:
 
 
 def _adopt(phase: _Replacing, candidate: _Source, prefix: Sequence[str]) -> _Step:
-    """A root the new snapshot misses is removed at once only when nothing else shows it.
+    """A root the new snapshot misses is never removed at the load: it gets the grace against the new discovery.
 
-    One the old discovery still shows, or one already in its grace, may have announced just after
-    the snapshot was taken, so it gets the grace against the new discovery instead.
+    The snapshot may have been taken inside a publisher rotation's gap, or just before a root's
+    announce reached this relay.
     """
     added, missing = _diff_roots(phase.settled, candidate.presence, prefix)
-
-    def doubtful(root_id: str) -> bool:
-        return root_id in phase.leaving or (phase.source is not None and root_id in phase.source.presence)
-
-    removed = tuple(gone for gone in missing if not doubtful(gone.id))
-    leaving = tuple(gone.id for gone in missing if doubtful(gone.id))
-    settled = phase.settled
-    if added or removed:
-        gone_ids = {gone.id for gone in removed}
-        settled = _settle((*(root for root in settled.present if root.id not in gone_ids), *added))
+    leaving = tuple(gone.id for gone in missing)
+    settled = _settle((*phase.settled.present, *added)) if added else phase.settled
     return _Step(
         _Live(settled, leaving, candidate),
         (
             *(() if phase.source is None else (_Release(phase.source),)),
             *(_CancelLeave(root_id) for root_id in phase.leaving if root_id not in leaving),
             *map(_ScheduleLeave, leaving),
-            *(() if settled is phase.settled else (_emit(added, removed, settled),)),
+            *(() if settled is phase.settled else (_emit(added, (), settled),)),
         ),
     )
 
@@ -483,8 +474,8 @@ def _transition(phase: _Phase, event: _Input, prefix: Sequence[str]) -> _Step:
 
 
 _LEAVE_GRACE = 0.1
-"""Seconds a root stays after its last namespace is withdrawn live before it is reported as removed; a
-newly loaded discovery's snapshot needs none. They count only while the followed discovery delivers:
+"""Seconds a root stays before it is reported as removed, after its last namespace is withdrawn live or
+after a newly loaded discovery's snapshot misses it. They count only while the followed discovery delivers:
 a grace that runs out while the request is replaced or its stream has failed waits for the next load,
 which settles it or starts it again. The relay orders nothing across two sessions: with no demand on
 the rotating publisher, the old generation's withdrawal arrived before the new generation's announce

@@ -253,7 +253,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     });
   });
 
-  it('reports exactly the root removed during an outage, once the new discovery loads', async () => {
+  it('reports exactly the root removed during an outage, after the grace on the new discovery', async () => {
     const { connections, subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
     subscriber.publishingRoots({ prefix: PREFIX }, handlers);
@@ -267,8 +267,12 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     next.push({ type: 'announced', namespace: at('alice') });
     await pause();
     expect(changes).toHaveLength(1);
+    const loaded = Date.now();
     next.push({ type: 'loaded' });
-    await until(() => changes.length === 2, 'the difference');
+    await pause();
+    expect(changes).toHaveLength(1);
+    await until(() => changes.length === 2, 'the removal');
+    expect(Date.now() - loaded).toBeGreaterThanOrEqual(90);
     expect(summary(changes[1]!)).toEqual({ added: [], removed: ['bob'], present: ['alice'], initial: false });
     await pause();
     expect(changes).toHaveLength(2);
@@ -418,7 +422,7 @@ describe('a root being removed', () => {
     expect(changes).toHaveLength(2);
   });
 
-  it("reports a reconnect's additions and removals in one change, with no grace", async () => {
+  it("reports a reconnect's additions at the load and its removals after the grace", async () => {
     const { connections, subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
     subscriber.publishingRoots({ prefix: PREFIX }, handlers);
@@ -430,16 +434,19 @@ describe('a root being removed', () => {
     const next = await discovery(1);
     next.push({ type: 'announced', namespace: at('carol') });
     next.push({ type: 'announced', namespace: at('dave') });
+    const loaded = Date.now();
     next.push({ type: 'loaded' });
-    await until(() => changes.length === 2, 'the difference');
-    expect(summary(changes[1]!)).toEqual({
-      added: ['dave'],
-      removed: ['alice', 'bob'],
-      present: ['carol', 'dave'],
-      initial: false,
-    });
+    await until(() => changes.length === 2, 'the addition at the load');
+    expect(Date.now() - loaded).toBeLessThan(50);
+    await until(() => changes.length === 4, 'the removals');
+    expect(Date.now() - loaded).toBeGreaterThanOrEqual(90);
+    expect(changes.slice(1).map(summary)).toEqual([
+      { added: ['dave'], removed: [], present: ['alice', 'bob', 'carol', 'dave'], initial: false },
+      { added: [], removed: ['alice'], present: ['bob', 'carol', 'dave'], initial: false },
+      { added: [], removed: ['bob'], present: ['carol', 'dave'], initial: false },
+    ]);
     await pause(150);
-    expect(changes).toHaveLength(2);
+    expect(changes).toHaveLength(4);
   });
 
   it('reports nothing for a root the old discovery still shows when the new snapshot misses its announce', async () => {
@@ -1048,7 +1055,7 @@ describe('the publishing-roots transition', () => {
     expect([...emitted.change.present.keys()]).toEqual(['alice', 'carol']);
   });
 
-  it('on a reconnect, reports a root shown when the old discovery ended as removed at once, and holds one in its grace', () => {
+  it('on a reconnect, gives the grace to a root shown when the old discovery ended and to one already in its grace', () => {
     const { source, step } = loaded('alice', 'bob');
     const withdrawn = transition(
       step.phase,
@@ -1064,13 +1071,10 @@ describe('the publishing-roots transition', () => {
     const opened = transition(ended.phase, { kind: 'connection', connection: connection() }, PREFIX);
     const candidate = (opened.effects[0] as { source: Source }).source;
     const done = transition(opened.phase, { kind: 'loaded', source: candidate }, PREFIX);
-    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set(['bob']) });
+    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set(['alice', 'bob']) });
     expect(done.effects).toEqual([
+      { kind: 'schedule-leave', id: 'alice' },
       { kind: 'schedule-leave', id: 'bob' },
-      {
-        kind: 'emit',
-        change: expect.objectContaining({ added: [], removed: [expect.objectContaining({ id: 'alice' })] }),
-      },
     ]);
   });
 
