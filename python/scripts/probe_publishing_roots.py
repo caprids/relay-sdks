@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
-"""Opt-in live probe of member discovery (issue #422). Excluded from ``mise run python:check``'s tests.
+"""Opt-in live probe of publishing-roots discovery (issue #422). Excluded from ``mise run python:check``'s tests.
 
-The Python twin of ``ts/scripts/probe-members.mjs``: the same flags, environment and JSON lines, so a
-lane script compares a TypeScript run and a Python run line for line. Who is present under a namespace
-root, from the subscriber's side, across publisher rotations, crashes, clean departures and the
-subscriber's own rotations and reconnects.
+The Python twin of ``ts/scripts/probe-publishing-roots.mjs``: the same flags, environment and JSON lines,
+so a lane script compares a TypeScript run and a Python run line for line. Which roots are publishing
+under a namespace prefix, from the subscriber's side, across publisher rotations, crashes, clean
+departures and the subscriber's own rotations and reconnects.
 
-Each member p0..p{N-1} is a child process (this script with ``--publisher-child``) running a supervised
-publisher on ``[*root, id]`` with one track, ``beat``, written every 100 ms. The subscriber runs here, in
-one of two views:
+Each root p0..p{N-1} is a child process (this script with ``--publisher-child``) running a supervised
+publisher on ``[*prefix, id]`` with one track, ``beat``, written every 100 ms. The subscriber runs here,
+in one of two views:
 
-- ``--view members``: ``SupervisedSubscriber.members(root, ...)``: joins and leaves as the SDK reports them.
-- ``--view raw``: ``connect_relay_subscriber`` and ``namespace_events`` on the root, unsupervised; the probe
-  folds the generation namespaces into members itself (a member joins on its first namespace and leaves
+- ``--view roots``: ``SupervisedSubscriber.publishing_roots(prefix, ...)``: additions and removals as the
+  SDK reports them, logged as ``joined`` and ``left``.
+- ``--view raw``: ``connect_relay_subscriber`` and ``namespace_events`` on the prefix, unsupervised; the
+  probe folds the generation namespaces into roots itself (a root joins on its first namespace and leaves
   on its last). Works without the ``loaded`` event, which it waits for only briefly.
 
 Every event is one JSON line on stdout with ``t``, ms since the probe started; the last line is
 ``{"summary": {...}}``. ``duplicates`` counts the joins and leaves the ground truth does not explain: a
-join for a member already present, a second join (no publisher here ever restarts), a leave for a member
+join for a root already present, a second join (no publisher here ever restarts), a leave for a root
 not present or whose publisher is still up, and any event for an id with no publisher. The exit code is 0
 unless the probe itself fails.
 
 Flags (durations in ms, as in the TypeScript probe)::
 
-    --view members|raw (default members)    --members N (default 5)     --root a/b (default <uuid>/p)
+    --view roots|raw (default roots)        --publishers N (default 5)  --prefix a/b (default <uuid>/p)
     --subscriber-after                       start the subscriber once every publisher is up (default: before)
     --rotate-publishers K                    rotate every publisher K times, one at a time
-    --rotate-subscriber K                    SupervisedSubscriber.rotate() K times (members view)
+    --rotate-subscriber K                    SupervisedSubscriber.rotate() K times (roots view)
     --reconnect-subscriber                   close the subscriber's QUIC transport and refuse dials for --outage-ms
     --outage-ms MS (default 3000)            --depart-during-outage M   M publishers close during the outage
     --kill-publisher M                       SIGKILL M publishers        --close-publisher M   M publishers close
-    --want-generations                       want [*root, 'p0'] track `beat` with generations=True
-    --latency --trials T (default 5)         T new publishers: generation-up to joined (members) or announced
+    --want-generations                       want [*prefix, 'p0'] track `beat` with generations=True
+    --latency --trials T (default 5)         T new publishers: generation-up to joined (roots) or announced
                                              (raw), and a fresh subscriber's connect-to-loaded per trial
     --settle-ms MS (default 15000)           how long to wait for each expected join or leave
     --end close|keep (default close)         close every remaining publisher and wait for its leave, or not
@@ -41,7 +42,8 @@ Environment: ``RELAY_URL`` (a room-rooted endpoint), ``RELAY_SUB_URL`` (default 
 ``RELAY_TOKEN`` or ``RELAY_ANONYMOUS=1``. A local relay's trust root is ``RELAY_CA_FILE`` (a PEM file), as
 for the other Python scripts: aioquic cannot pin ``RELAY_CERTIFICATE_HASH``.
 
-    RELAY_URL=https://ord.relay.mux.global/mattypoo mise run python:probe:members -- --members 5 --rotate-publishers 3
+    RELAY_URL=https://ord.relay.mux.global/mattypoo \
+        mise run python:probe:publishing-roots -- --publishers 5 --rotate-publishers 3
 """
 
 from __future__ import annotations
@@ -87,11 +89,11 @@ Event = dict[str, Any]
 
 
 def parse_flags(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Live probe of member discovery", allow_abbrev=False)
+    parser = argparse.ArgumentParser(description="Live probe of publishing-roots discovery", allow_abbrev=False)
     parser.add_argument("--publisher-child")
-    parser.add_argument("--view", default="members")
-    parser.add_argument("--members", default="5")
-    parser.add_argument("--root")
+    parser.add_argument("--view", default="roots")
+    parser.add_argument("--publishers", default="5")
+    parser.add_argument("--prefix")
     parser.add_argument("--subscriber-after", action="store_true")
     parser.add_argument("--rotate-publishers", default="0")
     parser.add_argument("--rotate-subscriber", default="0")
@@ -117,7 +119,7 @@ class Relay:
     sub_url: str
     token: str | None
     ca_file: str | None
-    root: tuple[str, ...]
+    prefix: tuple[str, ...]
 
     def get_token(self) -> str | None:
         return self.token
@@ -145,8 +147,8 @@ def read_relay(flags: argparse.Namespace) -> Relay:
         raise SystemExit("Set RELAY_TOKEN, or RELAY_ANONYMOUS=1 for a local relay")
     if os.environ.get("RELAY_CERTIFICATE_HASH") and not os.environ.get("RELAY_CA_FILE"):
         raise SystemExit("aioquic cannot pin RELAY_CERTIFICATE_HASH; set RELAY_CA_FILE to the relay's certificate")
-    root = tuple(field for field in flags.root.split("/") if field) if flags.root else (str(uuid.uuid4()), "p")
-    return Relay(url, os.environ.get("RELAY_SUB_URL") or url, token, os.environ.get("RELAY_CA_FILE"), root)
+    prefix = tuple(field for field in flags.prefix.split("/") if field) if flags.prefix else (str(uuid.uuid4()), "p")
+    return Relay(url, os.environ.get("RELAY_SUB_URL") or url, token, os.environ.get("RELAY_CA_FILE"), prefix)
 
 
 def now_ms() -> float:
@@ -154,7 +156,7 @@ def now_ms() -> float:
     return time.monotonic() * 1000
 
 
-async def run_publisher(relay: Relay, member: str) -> None:
+async def run_publisher(relay: Relay, root_id: str) -> None:
     def send(message: dict[str, Any]) -> None:
         sys.stdout.write(json.dumps(message) + "\n")
         sys.stdout.flush()
@@ -167,7 +169,7 @@ async def run_publisher(relay: Relay, member: str) -> None:
 
     publisher = await connect_supervised_publisher(
         relay.url,
-        namespace=(*relay.root, member),
+        namespace=(*relay.prefix, root_id),
         get_token=relay.get_token,
         create_transport=relay.dial,
         on_generation=on_generation,
@@ -330,42 +332,42 @@ class Probe:
                     publisher.process.kill()
 
     async def start_publisher(self) -> Publisher:
-        member = f"p{self.next_index}"
+        root_id = f"p{self.next_index}"
         self.next_index += 1
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             __file__,
             "--publisher-child",
-            member,
-            "--root",
-            "/".join(self.relay.root),
+            root_id,
+            "--prefix",
+            "/".join(self.relay.prefix),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
         )
-        publisher = Publisher(member, process)
-        self.publishers[member] = publisher
+        publisher = Publisher(root_id, process)
+        self.publishers[root_id] = publisher
         self.spawn(self.follow_publisher(publisher))
         return publisher
 
     async def follow_publisher(self, publisher: Publisher) -> None:
-        member = publisher.id
+        root_id = publisher.id
         assert publisher.process.stdout is not None
         async for line in publisher.process.stdout:
             message = json.loads(line)
             if message["type"] == "generation-up":
                 publisher.generations.append(message["generation"])
-                fields = {"id": member, "generation": message["generation"], "first": len(publisher.generations) == 1}
+                fields = {"id": root_id, "generation": message["generation"], "first": len(publisher.generations) == 1}
                 self.emit("publisher-up", fields, self.since_start(message["at"]))
             elif message["type"] == "status":
-                fields = {"id": member, "status": message["status"]}
+                fields = {"id": root_id, "status": message["status"]}
                 self.emit("publisher-status", fields | ({"error": message["error"]} if "error" in message else {}))
             elif message["type"] == "closed":
-                self.emit("publisher-closed", {"id": member}, self.since_start(message["at"]))
+                self.emit("publisher-closed", {"id": root_id}, self.since_start(message["at"]))
         code = await publisher.process.wait()
         publisher.exited = True
         if publisher.departure is None:
             exit_code, exit_signal = (None, signal.Signals(-code).name) if code < 0 else (code, None)
-            self.emit("publisher-exit", {"id": member, "code": exit_code, "signal": exit_signal})
+            self.emit("publisher-exit", {"id": root_id, "code": exit_code, "signal": exit_signal})
 
     def alive(self) -> list[Publisher]:
         return [publisher for publisher in self.publishers.values() if publisher.departure is None]
@@ -394,27 +396,27 @@ class Probe:
 
         await asyncio.gather(*(waits(publisher) for publisher in departed))
 
-    def observe(self, type_: str, member: str, fields: dict[str, Any] | None = None) -> None:
-        publisher = self.publishers.get(member)
+    def observe(self, type_: str, root_id: str, fields: dict[str, Any] | None = None) -> None:
+        publisher = self.publishers.get(root_id)
         unexplained = None
         if publisher is None:
             unexplained = "no such publisher"
-        elif type_ == "joined" and member in self.present:
+        elif type_ == "joined" and root_id in self.present:
             unexplained = "already present"
-        elif type_ == "joined" and member in self.ever_joined:
+        elif type_ == "joined" and root_id in self.ever_joined:
             unexplained = "joined again"
-        elif type_ == "left" and member not in self.present:
+        elif type_ == "left" and root_id not in self.present:
             unexplained = "not present"
         elif type_ == "left" and publisher.departure is None:
             unexplained = "publisher still up"
         self.counts[type_] += 1
         if type_ == "joined":
-            self.present.add(member)
-            self.ever_joined.add(member)
+            self.present.add(root_id)
+            self.ever_joined.add(root_id)
         else:
-            self.present.discard(member)
+            self.present.discard(root_id)
         extra = {"unexplained": unexplained} if unexplained else {}
-        event = self.emit(type_, {"id": member, "view": self.view, **(fields or {}), **extra})
+        event = self.emit(type_, {"id": root_id, "view": self.view, **(fields or {}), **extra})
         if unexplained:
             self.duplicates.append(event)
 
@@ -425,7 +427,7 @@ class Probe:
         def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
             if primary and now_ms() < self.outage_until:
                 self.emit("subscriber-dial", {"refused": True})
-                raise ConnectionRefusedError("probe-members outage: dial refused")
+                raise ConnectionRefusedError("probe-publishing-roots outage: dial refused")
             opened = relay.dial(url, protocols)
             transports.append(opened)
             if primary:
@@ -439,13 +441,13 @@ class Probe:
             if not loaded.done():
                 loaded.set_result(Loaded(ids, round(now_ms() - connect_at, 1)))
 
-        if self.view == "members":
-            return await self.open_members_view(sink, primary, create_transport, transports, loaded, resolve_loaded)
+        if self.view == "roots":
+            return await self.open_roots_view(sink, primary, create_transport, transports, loaded, resolve_loaded)
 
         subscriber = await connect_relay_subscriber(
             relay.sub_url, get_token=relay.get_token, create_transport=create_transport
         )
-        namespaces = subscriber.namespace_events(relay.root)
+        namespaces = subscriber.namespace_events(relay.prefix)
         generations: dict[str, set[str]] = {}
 
         async def fold() -> None:
@@ -457,25 +459,25 @@ class Probe:
                         if sink.loaded:
                             sink.loaded(ids)
                         continue
-                    rest = event.namespace[len(relay.root) :]
+                    rest = event.namespace[len(relay.prefix) :]
                     if not rest or len(rest) > 2:
                         continue
-                    member = rest[0]
+                    root_id = rest[0]
                     generation = rest[1] if len(rest) == 2 else None
                     if sink.raw:
-                        sink.raw(event.type, member, generation)
-                    held = generations.get(member, set())
+                        sink.raw(event.type, root_id, generation)
+                    held = generations.get(root_id, set())
                     if event.type == "announced":
                         held.add(generation or "")
-                        generations[member] = held
+                        generations[root_id] = held
                         if len(held) == 1 and sink.joined:
-                            sink.joined(member, {})
+                            sink.joined(root_id, {})
                     elif (generation or "") in held:
                         held.discard(generation or "")
                         if not held:
-                            del generations[member]
+                            del generations[root_id]
                             if sink.left:
-                                sink.left(member)
+                                sink.left(root_id)
             except Exception as error:
                 if sink.error:
                     sink.error(error)
@@ -488,7 +490,7 @@ class Probe:
 
         return View(transports, loaded, close)
 
-    async def open_members_view(
+    async def open_roots_view(
         self,
         sink: Sink,
         primary: bool,
@@ -497,7 +499,7 @@ class Probe:
         loaded: asyncio.Future[Loaded],
         resolve_loaded: Callable[[list[str]], None],
     ) -> View:
-        from caprid_relay import MembersChange, MembersHandlers
+        from caprid_relay import PublishingRootsChange, PublishingRootsHandlers
 
         relay = self.relay
 
@@ -517,27 +519,29 @@ class Probe:
             on_status=on_status,
         )
 
-        def on_changed(change: MembersChange) -> None:
+        def on_changed(change: PublishingRootsChange) -> None:
             if change.initial:
-                ids = [member.id for member in change.joined]
+                ids = [root.id for root in change.added]
                 resolve_loaded(ids)
                 if sink.loaded:
                     sink.loaded(ids)
-            for member in change.joined:
+            for root in change.added:
                 if sink.joined:
-                    sink.joined(member.id, {"initial": True} if change.initial else {})
-            for member in change.left:
+                    sink.joined(root.id, {"initial": True} if change.initial else {})
+            for root in change.removed:
                 if sink.left:
-                    sink.left(member.id)
+                    sink.left(root.id)
 
         def on_error(error: BaseException) -> None:
             if sink.error:
                 sink.error(error)
 
-        members = supervised.members(relay.root, MembersHandlers(on_changed=on_changed, on_error=on_error))
+        roots_view = supervised.publishing_roots(
+            relay.prefix, PublishingRootsHandlers(on_changed=on_changed, on_error=on_error)
+        )
 
         def close() -> None:
-            members.close()
+            roots_view.close()
             supervised.close()
 
         return View(transports, loaded, close, supervised)
@@ -545,11 +549,11 @@ class Probe:
     async def run(self) -> None:
         flags = self.flags
         view = self.view
-        if view not in ("members", "raw"):
-            raise ValueError("--view must be members or raw")
+        if view not in ("roots", "raw"):
+            raise ValueError("--view must be roots or raw")
         if flags.end not in ("close", "keep"):
             raise ValueError("--end must be close or keep")
-        members = count(flags, "members")
+        publisher_count = count(flags, "publishers")
         rotate_publishers = count(flags, "rotate-publishers")
         rotate_subscriber = count(flags, "rotate-subscriber")
         outage_ms = count(flags, "outage-ms")
@@ -561,43 +565,43 @@ class Probe:
         loaded_wait_ms = RAW_LOADED_WAIT_MS if view == "raw" else settle_ms
         if view == "raw" and (rotate_subscriber or flags.reconnect_subscriber):
             raise ValueError(
-                "--rotate-subscriber and --reconnect-subscriber need --view members: the raw view is unsupervised"
+                "--rotate-subscriber and --reconnect-subscriber need --view roots: the raw view is unsupervised"
             )
         if depart_during_outage and not flags.reconnect_subscriber:
             raise ValueError("--depart-during-outage needs --reconnect-subscriber")
-        if depart_during_outage + kill_count + close_count > members:
-            raise ValueError("More departures than --members")
-        if flags.want_generations and members < 1:
-            raise ValueError("--want-generations needs a member p0")
+        if depart_during_outage + kill_count + close_count > publisher_count:
+            raise ValueError("More departures than --publishers")
+        if flags.want_generations and publisher_count < 1:
+            raise ValueError("--want-generations needs a publisher p0")
 
-        def main_joined(member: str, fields: dict[str, Any]) -> None:
-            self.observe("joined", member, fields)
+        def main_joined(root_id: str, fields: dict[str, Any]) -> None:
+            self.observe("joined", root_id, fields)
 
-        def main_raw(type_: str, member: str, generation: str | None) -> None:
-            self.emit(type_, {"id": member} | ({"generation": generation} if generation is not None else {}))
+        def main_raw(type_: str, root_id: str, generation: str | None) -> None:
+            self.emit(type_, {"id": root_id} | ({"generation": generation} if generation is not None else {}))
 
         main_sink = Sink(
-            loaded=lambda ids: self.emit("loaded", {"view": view, "members": ids}),
+            loaded=lambda ids: self.emit("loaded", {"view": view, "roots": ids}),
             joined=main_joined,
-            left=lambda member: self.observe("left", member),
+            left=lambda root_id: self.observe("left", root_id),
             raw=main_raw,
             error=lambda error: self.emit("subscriber-error", {"error": self.relay.describe(error)}),
         )
         main: View | None = None
         connect_to_loaded_ms: float | None = None
-        loaded_members: list[str] | None = None
+        loaded_roots: list[str] | None = None
 
         async def start_subscriber() -> View:
-            nonlocal connect_to_loaded_ms, loaded_members
+            nonlocal connect_to_loaded_ms, loaded_roots
             opened = await self.open_view(main_sink, primary=True)
             loaded = await within(opened.loaded, loaded_wait_ms)
             if loaded is None:
                 self.emit("loaded-missing", {"view": view, "afterMs": loaded_wait_ms})
             else:
-                loaded_members, connect_to_loaded_ms = loaded.ids, loaded.connect_to_loaded_ms
+                loaded_roots, connect_to_loaded_ms = loaded.ids, loaded.connect_to_loaded_ms
             return opened
 
-        async def start_members(n: int) -> list[tuple[Publisher, int]]:
+        async def start_publishers(n: int) -> list[tuple[Publisher, int]]:
             started = []
             for _ in range(n):
                 from_ = len(self.events)
@@ -627,7 +631,7 @@ class Probe:
 
         if not flags.subscriber_after:
             main = await start_subscriber()
-        initial = await start_members(members)
+        initial = await start_publishers(publisher_count)
         if flags.subscriber_after:
             main = await start_subscriber()
         assert main is not None
@@ -663,7 +667,7 @@ class Probe:
 
             want_subscriber.want(
                 "beat",
-                (*self.relay.root, "p0"),
+                (*self.relay.prefix, "p0"),
                 "beat",
                 WantHandlers(
                     on_object=on_object,
@@ -684,7 +688,7 @@ class Probe:
                 publisher.send("rotate")
                 up = await self.expect(
                     f"rotation of {publisher.id}",
-                    lambda e, member=publisher.id: e["type"] == "publisher-up" and e.get("id") == member,
+                    lambda e, root_id=publisher.id: e["type"] == "publisher-up" and e.get("id") == root_id,
                     ROTATION_WAIT * 1000,
                     from_,
                 )
@@ -722,7 +726,7 @@ class Probe:
             from_ = len(self.events)
             self.outage_until = now_ms() + outage_ms
             cut = self.emit("subscriber-reconnect", {"phase": "cut", "outageMs": outage_ms})
-            main.transports[-1].transport.close(0, "probe-members outage")
+            main.transports[-1].transport.close(0, "probe-publishing-roots outage")
             departed = self.pick_departures(depart_during_outage)
             for publisher in departed:
                 self.depart(publisher, "outage-close")
@@ -747,13 +751,13 @@ class Probe:
 
         latency_trials: list[dict[str, Any]] = []
         for trial in range(1, trials + 1):
-            [(publisher, from_)] = await start_members(1)
-            member = publisher.id
-            up = next((e for e in self.events[from_:] if e["type"] == "publisher-up" and e.get("id") == member), None)
-            seen_type = "joined" if view == "members" else "announced"
+            [(publisher, from_)] = await start_publishers(1)
+            root_id = publisher.id
+            up = next((e for e in self.events[from_:] if e["type"] == "publisher-up" and e.get("id") == root_id), None)
+            seen_type = "joined" if view == "roots" else "announced"
             seen = await self.expect(
-                f"{seen_type} {member}",
-                lambda e, seen_type=seen_type, member=member: e["type"] == seen_type and e.get("id") == member,
+                f"{seen_type} {root_id}",
+                lambda e, seen_type=seen_type, root_id=root_id: e["type"] == seen_type and e.get("id") == root_id,
                 settle_ms,
                 from_,
             )
@@ -764,7 +768,7 @@ class Probe:
             fresh.close()
             result = {
                 "trial": trial,
-                "id": member,
+                "id": root_id,
                 "joinMs": round(seen["t"] - up["t"], 1) if up is not None and seen is not None else None,
                 "connectToLoadedMs": loaded.connect_to_loaded_ms if loaded is not None else None,
                 "loadedHasAll": all(p.id in loaded.ids for p in self.alive()) if loaded is not None else None,
@@ -808,12 +812,12 @@ class Probe:
 
         summary: dict[str, Any] = {
             "view": view,
-            "root": list(self.relay.root),
+            "prefix": list(self.relay.prefix),
             "joined": self.counts["joined"],
             "left": self.counts["left"],
             "duplicates": len(self.duplicates),
             "duplicateEvents": self.duplicates,
-            "loadedMembers": loaded_members,
+            "loadedRoots": loaded_roots,
             "connectToLoadedMs": connect_to_loaded_ms,
             "departToLeftMs": [row["departToLeftMs"] for row in departures],
             "departures": departures,

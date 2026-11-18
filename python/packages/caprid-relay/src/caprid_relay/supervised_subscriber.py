@@ -11,8 +11,8 @@ on a re-want, is made before the break instead, as ``switch_to`` makes one (issu
 replacement opens while the current subscription keeps delivering, and ``on_switched`` marks the
 cutover. Before the connection's credential expires, the supervisor rotates to a new connection the
 same way (issue #261): every want's subscription moves to it make-before-break, and a want that
-keeps its target sees no break and no repeat. Member views (:mod:`caprid_relay.members`) follow who is
-present under a root from the same per-connection discovery. See ``spec/behavior.md``, "Supervised
+keeps its target sees no break and no repeat. Publishing-roots views (:mod:`caprid_relay.publishing_roots`)
+follow the roots publishing under a prefix from the same per-connection discovery. See ``spec/behavior.md``, "Supervised
 connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
 
@@ -87,7 +87,7 @@ from .connect_session import (
     TokenProvider,
     validate_timeout,
 )
-from .members import Members, MembersHandlers
+from .publishing_roots import PublishingRoots, PublishingRootsHandlers
 from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _until_predicate
 
 _log = logging.getLogger("caprid_relay")
@@ -168,8 +168,8 @@ class _Connection:
     wakes: dict[tuple[str, ...], _NamespaceWake] = field(default_factory=dict)
     """One watch per fixed namespace a want waits on to be announced again, shared by every want on it."""
     holds: int = 0
-    """Wants with a subscription and member views with a discovery still on this connection; a rotation
-    closes it once none are left."""
+    """Wants with a subscription and publishing-roots views with a discovery still on this connection; a
+    rotation closes it once none are left."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation; resolved whenever ``holds`` drops to zero."""
     rotate_at: float | None = None
@@ -246,7 +246,7 @@ class _Want:
             listener()
 
 
-def _guarded(handlers: WantHandlers | MembersHandlers) -> dict[str, Callable[..., None]]:
+def _guarded(handlers: WantHandlers | PublishingRootsHandlers) -> dict[str, Callable[..., None]]:
     """The primitive's guard on every handler: a declared-async callback is refused, a returned awaitable observed."""
     guarded: dict[str, Callable[..., None]] = {}
     for handler_field in fields(handlers):
@@ -262,7 +262,7 @@ def _guarded(handlers: WantHandlers | MembersHandlers) -> dict[str, Callable[...
 @dataclass(slots=True, eq=False)
 class _State:
     wants: dict[str, _Want] = field(default_factory=dict)
-    views: set[Members] = field(default_factory=set)
+    views: set[PublishingRoots] = field(default_factory=set)
     status: SupervisedStatus = "connecting"
     stopped: bool = False
     current: _Connection | None = None
@@ -429,29 +429,32 @@ class SupervisedSubscriber:
         if state.wake is not None and not state.wake.done():
             state.wake.set_result(None)
 
-    def members(self, root: Sequence[str], handlers: MembersHandlers) -> Members:
-        """Follow who is present under ``root``, across reconnects and rotations, with no roster server.
+    def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
+        """Follow the roots that are publishing now under ``prefix``, across reconnects and rotations, with no
+        roster server.
 
-        Each namespace one field below the root is a member, a supervised publisher's generations
-        under it count as one member, and a member leaves once its last namespace has been withdrawn
-        for 0.1 s (soon after a clean close, at the relay's idle timeout after a crash). The root
-        follows the namespace rules with room for the two fields under it (1 to 30 fields), and the
-        subscriber's token must allow discovering it. Shares the connection's discovery with every
-        want and view under the same prefix tree. Arguments are checked at once; handlers run from a
-        later turn on. See ``spec/behavior.md``, "Members".
+        Publishing means announced, not necessarily sending objects. A root is the field one below the
+        prefix, publishing while its own namespace or one a field below it is announced, and removed once
+        its last namespace has been withdrawn for 0.1 s (soon after a clean close, at the relay's idle
+        timeout after a crash). The layout is a contract: a namespace one field below a root, two below the
+        prefix, is read as that root's generation, so a supervised publisher's generations count as one
+        root, and anything deeper is ignored. The prefix follows the namespace rules with room for the two
+        fields under it (1 to 30 fields), and the subscriber's token must allow discovering it. Shares the
+        connection's discovery with every want and view under the same prefix tree. Arguments are checked
+        at once; handlers run from a later turn on. See ``spec/behavior.md``, "Publishing roots".
         """
-        if not isinstance(handlers, MembersHandlers):
-            raise TypeError("members handlers must be MembersHandlers")
+        if not isinstance(handlers, PublishingRootsHandlers):
+            raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
         guarded = _guarded(handlers)
         on_changed = guarded.get("on_changed")
         if on_changed is None:
             raise TypeError("on_changed must be callable")
-        fields_ = namespace_fields(root)
+        fields_ = namespace_fields(prefix)
         namespace_fields((*fields_, "x", "x"))
         state = self._state
         if state.stopped:
             raise supervisor_closed("subscriber")
-        view = Members(
+        view = PublishingRoots(
             fields_,
             on_changed,
             guarded.get("on_error"),
@@ -463,7 +466,7 @@ class SupervisedSubscriber:
         return view
 
     def close(self) -> None:
-        """Stop reconnecting, cancel every want, close every members view without calling its handlers,
+        """Stop reconnecting, cancel every want, close every publishing-roots view without calling its handlers,
         and close the connection. Idempotent."""
         self._close()
 
@@ -1918,9 +1921,9 @@ def _root_watch(connection: _Connection, root: tuple[str, ...]) -> tuple[_RootWa
 
 
 class _NamespaceWake:
-    """One fixed namespace's announcement, watched on the connection's shared discovery, so a followed root or member
-    view over the namespace serves it. Each change of the namespace is counted, so a waiter compares what came after
-    the moment it marked with :meth:`seen`."""
+    """One fixed namespace's announcement, watched on the connection's shared discovery, so a followed root or
+    publishing-roots view over the namespace serves it. Each change of the namespace is counted, so a waiter compares
+    what came after the moment it marked with :meth:`seen`."""
 
     __slots__ = (
         "_announced_at",
@@ -2021,7 +2024,8 @@ class _NamespaceWake:
 
 def _namespace_wake(connection: _Connection, namespace: tuple[str, ...]) -> tuple[_NamespaceWake, Callable[[], None]]:
     """The connection's watch for the fixed ``namespace``, opened on first use and closed a moment after its last
-    user leaves. It is served by the connection's discovery, so a root's discovery or a member view serves it too."""
+    user leaves. It is served by the connection's discovery, so a root's discovery or a publishing-roots view serves it
+    too."""
     entry = connection.wakes.get(namespace)
     if entry is None:
         created: list[_NamespaceWake] = []

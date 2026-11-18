@@ -21,7 +21,7 @@ from relay_helpers.supervision_fakes import FakeDiscovery, FakePublisher, FakeSu
 
 from caprid_relay import (
     CancellationToken,
-    MembersHandlers,
+    PublishingRootsHandlers,
     RelayError,
     RequestError,
     SubscriptionConnectionClosedError,
@@ -1218,16 +1218,16 @@ async def test_the_watch_moves_under_a_followed_roots_discovery_and_still_wakes(
     await until(lambda: len(v()) == 2, "v woken through the root discovery")
 
 
-async def test_a_member_view_and_a_wake_on_the_namespace_share_one_request(
+async def test_a_publishing_roots_view_and_a_wake_on_the_namespace_share_one_request(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, s = await start_subscriber(cleanup)
     changes: list[tuple[list[str], list[str]]] = []
     errors: list[BaseException] = []
-    subscriber.members(
+    subscriber.publishing_roots(
         ["room"],
-        MembersHandlers(
-            on_changed=lambda change: changes.append(([m.id for m in change.joined], [m.id for m in change.left])),
+        PublishingRootsHandlers(
+            on_changed=lambda change: changes.append(([m.id for m in change.added], [m.id for m in change.removed])),
             on_error=errors.append,
         ),
     )

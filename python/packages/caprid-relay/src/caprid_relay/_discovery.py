@@ -1,4 +1,4 @@
-"""One connection's namespace discovery, shared by every want and member view on it.
+"""One connection's namespace discovery, shared by every want and publishing-roots view on it.
 
 Draft-22 §9.15 allows one SUBSCRIBE_NAMESPACE per prefix tree on a session, so the index keeps open
 requests whose prefixes never overlap. A watch whose prefix an open request covers is served by
@@ -122,7 +122,7 @@ def _place_watch(open_requests: Iterable[_Request], prefix: Namespace) -> _Cover
 
 
 def discovery_ending(error: BaseException | None) -> DiscoveryEnding:
-    """What a watch's ending means for a want or a member view."""
+    """What a watch's ending means for a want or a publishing-roots view."""
     if isinstance(error, SubscriptionConnectionClosedError):
         return "connection"
     if error is None or isinstance(error, SubscriptionOverflowError):

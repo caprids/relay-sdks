@@ -1,4 +1,4 @@
-"""The supervised subscriber's member view."""
+"""The supervised subscriber's publishing-roots view."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from relay_helpers.supervision_fakes import FakeDiscovery, FakeSubscriber, FakeS
 from caprid_relay import (
     CancellationToken,
     ConnectingTransport,
-    Member,
-    Members,
-    MembersChange,
-    MembersHandlers,
+    PublishingRoot,
+    PublishingRoots,
+    PublishingRootsChange,
+    PublishingRootsHandlers,
     RelayError,
     RequestError,
     SubscriptionConnectionClosedError,
@@ -30,7 +30,7 @@ from caprid_relay import (
 )
 from caprid_relay._discovery import DiscoveryIndex
 from caprid_relay._supervision import new_generation
-from caprid_relay.members import (
+from caprid_relay.publishing_roots import (
     _apply_namespace,
     _AwaitConnection,
     _CancelLeave,
@@ -44,7 +44,6 @@ from caprid_relay.members import (
     _Live,
     _Loaded,
     _Loading,
-    _member_field,
     _Namespace,
     _Open,
     _Phase,
@@ -53,6 +52,7 @@ from caprid_relay.members import (
     _Replacing,
     _Retiring,
     _Retry,
+    _root_field,
     _ScheduleLeave,
     _Source,
     _transition,
@@ -61,11 +61,11 @@ from caprid_relay.supervised_subscriber import _supervise_relay_subscriber
 from moq_core.control_messages import encode_namespace, encode_namespace_done, encode_request_ok
 
 FAST = SupervisionBackoff(initial_delay=0, max_delay=0)
-ROOT = ("room", "p")
+PREFIX = ("room", "p")
 
 
 def at(*fields: str) -> tuple[str, ...]:
-    return (*ROOT, *fields)
+    return (*PREFIX, *fields)
 
 
 async def pause(seconds: float = 0.01) -> None:
@@ -114,30 +114,30 @@ async def start(
 
 class Recorder:
     def __init__(self) -> None:
-        self.changes: list[MembersChange] = []
+        self.changes: list[PublishingRootsChange] = []
         self.errors: list[BaseException] = []
-        self.handlers = MembersHandlers(on_changed=self.changes.append, on_error=self.errors.append)
+        self.handlers = PublishingRootsHandlers(on_changed=self.changes.append, on_error=self.errors.append)
 
 
-def quiet() -> MembersHandlers:
-    return MembersHandlers(on_changed=lambda _change: None)
+def quiet() -> PublishingRootsHandlers:
+    return PublishingRootsHandlers(on_changed=lambda _change: None)
 
 
-def ids(members: Sequence[Member]) -> list[str]:
-    return [member.id for member in members]
+def ids(roots: Sequence[PublishingRoot]) -> list[str]:
+    return [root.id for root in roots]
 
 
-def summary(change: MembersChange) -> dict[str, object]:
+def summary(change: PublishingRootsChange) -> dict[str, object]:
     return {
-        "joined": ids(change.joined),
-        "left": ids(change.left),
+        "added": ids(change.added),
+        "removed": ids(change.removed),
         "present": ids(change.present),
         "initial": change.initial,
     }
 
 
-def change(joined: list[str], left: list[str], present: list[str], initial: bool = False) -> dict[str, object]:
-    return {"joined": joined, "left": left, "present": present, "initial": initial}
+def change(added: list[str], removed: list[str], present: list[str], initial: bool = False) -> dict[str, object]:
+    return {"added": added, "removed": removed, "present": present, "initial": initial}
 
 
 def request_error(code: int, reason: str) -> SubscriptionRequestError:
@@ -148,16 +148,16 @@ def connection_lost() -> RelayError:
     return RelayError("idle", code="TRANSPORT_ERROR", phase="connection")
 
 
-async def test_loads_with_every_snapshot_member_in_joined_and_calls_nothing_before(
+async def test_loads_with_every_snapshot_root_in_added_and_calls_nothing_before(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     assert view.loaded is False
     assert view.present == ()
     d = await relay.discovery()
-    assert d.prefix == ROOT
+    assert d.prefix == PREFIX
     d.push("announced", at("alice", new_generation()))
     d.push("announced", at("bob"))
     await pause()
@@ -166,15 +166,15 @@ async def test_loads_with_every_snapshot_member_in_joined_and_calls_nothing_befo
     d.push("loaded")
     await until(lambda: len(r.changes) == 1, "load")
     assert summary(r.changes[0]) == change(["alice", "bob"], [], ["alice", "bob"], initial=True)
-    assert r.changes[0].joined[0].namespace == at("alice")
+    assert r.changes[0].added[0].namespace == at("alice")
     assert view.loaded is True
     assert view.present is r.changes[0].present
 
 
-async def test_loads_an_empty_root_once_with_nobody(cleanup: list[Callable[[], object]]) -> None:
+async def test_loads_an_empty_prefix_once_with_no_root(cleanup: list[Callable[[], object]]) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     (await relay.discovery()).push("loaded")
     await until(lambda: len(r.changes) == 1, "load")
     assert summary(r.changes[0]) == change([], [], [], initial=True)
@@ -182,21 +182,21 @@ async def test_loads_an_empty_root_once_with_nobody(cleanup: list[Callable[[], o
     assert view.present == ()
 
 
-async def test_reports_one_joined_and_one_left_for_a_live_announce_and_withdrawal(
+async def test_reports_one_added_and_one_removed_for_a_live_announce_and_withdrawal(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     d.push("loaded")
     generation = new_generation()
     d.push("announced", at("carol", generation))
-    await until(lambda: len(r.changes) == 2, "join")
+    await until(lambda: len(r.changes) == 2, "addition")
     assert summary(r.changes[1]) == change(["carol"], [], ["carol"])
     assert view.present is r.changes[1].present
     d.push("unannounced", at("carol", generation))
-    await until(lambda: len(r.changes) == 3, "leave")
+    await until(lambda: len(r.changes) == 3, "removal")
     assert summary(r.changes[2]) == change([], ["carol"], [])
 
 
@@ -205,7 +205,7 @@ async def test_reports_nothing_for_a_publisher_rotation_a_relay_repeat_or_a_name
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     old = new_generation(1_000)
     d.push("announced", at("alice", old))
@@ -219,31 +219,31 @@ async def test_reports_nothing_for_a_publisher_rotation_a_relay_repeat_or_a_name
     d.push("announced", at("alice", replacement, "deeper"))
     d.push("announced", at("mallory", new_generation(), "deeper"))
     d.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
     assert r.changes[1].present is not present
 
 
-async def test_follows_an_unsupervised_publisher_one_field_below_the_root_in_and_out(
+async def test_follows_an_unsupervised_publisher_one_field_below_the_prefix_in_and_out(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     d.push("loaded")
     d.push("announced", at("dave"))
-    await until(lambda: len(r.changes) == 2, "join")
+    await until(lambda: len(r.changes) == 2, "addition")
     assert summary(r.changes[1]) == change(["dave"], [], ["dave"])
     d.push("unannounced", at("dave"))
-    await until(lambda: len(r.changes) == 3, "leave")
+    await until(lambda: len(r.changes) == 3, "removal")
     assert summary(r.changes[2]) == change([], ["dave"], [])
 
 
 async def test_reports_nothing_for_rotate(cleanup: list[Callable[[], object]]) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     generation = new_generation()
     first = await relay.discovery()
     first.push("announced", at("alice", generation))
@@ -251,12 +251,12 @@ async def test_reports_nothing_for_rotate(cleanup: list[Callable[[], object]]) -
     await until(lambda: len(r.changes) == 1, "load")
     subscriber.rotate()
     nxt = await relay.discovery(1)
-    assert nxt.prefix == ROOT
+    assert nxt.prefix == PREFIX
     assert "alice" in ids(view.present)
     nxt.push("announced", at("alice", generation))
     nxt.push("loaded")
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join on the new connection")
+    await until(lambda: len(r.changes) == 2, "the marker added on the new connection")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
@@ -265,7 +265,7 @@ async def test_follows_the_old_discovery_through_rotate_until_the_new_one_loads_
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("loaded")
@@ -275,7 +275,7 @@ async def test_follows_the_old_discovery_through_rotate_until_the_new_one_loads_
     await pause()
     assert not relay.connections[0].closed.done()
     first.push("announced", at("bob"))
-    await until(lambda: len(r.changes) == 2, "a join on the old discovery while the new one loads")
+    await until(lambda: len(r.changes) == 2, "an addition on the old discovery while the new one loads")
     assert summary(r.changes[1]) == change(["bob"], [], ["alice", "bob"])
     nxt.push("announced", at("alice"))
     nxt.push("announced", at("bob"))
@@ -290,7 +290,7 @@ async def test_reports_nothing_for_a_rotation_before_the_credential_expires(
     now = datetime.now(UTC)
     subscriber, relay = await start(cleanup, [now + timedelta(seconds=0.6), now + timedelta(hours=1)])
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("loaded")
@@ -300,7 +300,7 @@ async def test_reports_nothing_for_a_rotation_before_the_credential_expires(
     nxt.push("loaded")
     await until(lambda: relay.connections[0].discoveries[0].closed, "the old connection released")
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join on the new connection")
+    await until(lambda: len(r.changes) == 2, "the marker added on the new connection")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
@@ -309,7 +309,7 @@ async def test_holds_the_view_through_a_reconnect_and_reports_nothing_when_the_s
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("announced", at("bob"))
@@ -323,16 +323,16 @@ async def test_holds_the_view_through_a_reconnect_and_reports_nothing_when_the_s
     nxt.push("announced", at("alice"))
     nxt.push("loaded")
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "bob", "zed"])
 
 
-async def test_reports_exactly_the_member_who_left_during_an_outage_once_the_new_discovery_loads(
+async def test_reports_exactly_the_root_removed_during_an_outage_once_the_new_discovery_loads(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("announced", at("bob"))
@@ -355,7 +355,7 @@ async def test_holds_the_view_when_discovery_ends_with_a_retryable_error_and_rel
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("loaded")
@@ -374,7 +374,7 @@ async def test_holds_the_view_when_discovery_ends_with_a_retryable_error_and_rel
 async def test_calls_on_error_and_closes_for_a_refusal_no_wait_fixes(cleanup: list[Callable[[], object]]) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("loaded")
     await until(lambda: len(r.changes) == 1, "load")
@@ -392,15 +392,15 @@ async def test_is_safe_to_close_from_on_changed_nothing_is_delivered_after_it(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
-    changes: list[MembersChange] = []
-    views: list[Members] = []
+    changes: list[PublishingRootsChange] = []
+    views: list[PublishingRoots] = []
 
-    def on_changed(change: MembersChange) -> None:
+    def on_changed(change: PublishingRootsChange) -> None:
         changes.append(change)
         views[0].close()
         views[0].close()
 
-    views.append(subscriber.members(ROOT, MembersHandlers(on_changed=on_changed)))
+    views.append(subscriber.publishing_roots(PREFIX, PublishingRootsHandlers(on_changed=on_changed)))
     d = await relay.discovery()
     d.push("announced", at("alice"))
     d.push("loaded")
@@ -411,18 +411,18 @@ async def test_is_safe_to_close_from_on_changed_nothing_is_delivered_after_it(
     assert ids(views[0].present) == ["alice"]
 
 
-async def test_loads_a_second_view_of_a_root_already_loaded_on_the_connection_never_inside_members(
+async def test_loads_a_second_view_of_a_prefix_already_loaded_on_the_connection_never_inside_publishing_roots(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     first = Recorder()
-    subscriber.members(ROOT, first.handlers)
+    subscriber.publishing_roots(PREFIX, first.handlers)
     d = await relay.discovery()
     d.push("announced", at("alice"))
     d.push("loaded")
     await until(lambda: len(first.changes) == 1, "first load")
     second = Recorder()
-    view = subscriber.members(ROOT, second.handlers)
+    view = subscriber.publishing_roots(PREFIX, second.handlers)
     assert second.changes == []
     assert view.loaded is False
     await until(lambda: len(second.changes) == 1, "second load")
@@ -433,7 +433,7 @@ async def test_loads_a_second_view_of_a_root_already_loaded_on_the_connection_ne
 async def test_ends_silently_when_the_supervisor_closes(cleanup: list[Callable[[], object]]) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     d.push("announced", at("alice"))
     d.push("loaded")
@@ -446,28 +446,28 @@ async def test_ends_silently_when_the_supervisor_closes(cleanup: list[Callable[[
     assert view.loaded is True
     assert ids(view.present) == ["alice"]
     with pytest.raises(RelayError):
-        subscriber.members(ROOT, quiet())
+        subscriber.publishing_roots(PREFIX, quiet())
 
 
 async def test_checks_its_arguments_at_once(cleanup: list[Callable[[], object]]) -> None:
     subscriber, _relay = await start(cleanup)
     with pytest.raises(TypeError):
-        subscriber.members(ROOT, None)  # ty: ignore[invalid-argument-type]
+        subscriber.publishing_roots(PREFIX, None)  # ty: ignore[invalid-argument-type]
     with pytest.raises(TypeError):
-        subscriber.members([], quiet())
+        subscriber.publishing_roots([], quiet())
     with pytest.raises(TypeError):
-        subscriber.members("room", quiet())
+        subscriber.publishing_roots("room", quiet())
     with pytest.raises(ValueError):
-        subscriber.members(["f"] * 31, quiet())
+        subscriber.publishing_roots(["f"] * 31, quiet())
     with pytest.raises(TypeError):
-        MembersHandlers()  # ty: ignore[missing-argument]
+        PublishingRootsHandlers()  # ty: ignore[missing-argument]
 
-    async def on_changed(_change: MembersChange) -> None:
+    async def on_changed(_change: PublishingRootsChange) -> None:
         pass
 
     with pytest.raises(TypeError):
-        subscriber.members(ROOT, MembersHandlers(on_changed=on_changed))  # ty: ignore[invalid-argument-type]
-    subscriber.members(["f"] * 30, quiet()).close()
+        subscriber.publishing_roots(PREFIX, PublishingRootsHandlers(on_changed=on_changed))  # ty: ignore[invalid-argument-type]
+    subscriber.publishing_roots(["f"] * 30, quiet()).close()
 
 
 async def test_reports_nothing_when_a_rotation_withdraws_the_only_generation_just_before_announcing_the_next(
@@ -475,7 +475,7 @@ async def test_reports_nothing_when_a_rotation_withdraws_the_only_generation_jus
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     old = new_generation(1_000)
     d.push("announced", at("alice", old))
@@ -487,7 +487,7 @@ async def test_reports_nothing_when_a_rotation_withdraws_the_only_generation_jus
     d.push("announced", at("alice", new_generation(2_000)))
     await pause(0.15)
     d.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
@@ -496,7 +496,7 @@ async def test_reports_a_withdrawal_with_nothing_after_it_once_after_the_grace(
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     generation = new_generation()
     d.push("announced", at("alice", generation))
@@ -508,22 +508,22 @@ async def test_reports_a_withdrawal_with_nothing_after_it_once_after_the_grace(
     await pause()
     assert len(r.changes) == 1
     assert view.present is r.changes[0].present
-    await until(lambda: len(r.changes) == 2, "leave")
+    await until(lambda: len(r.changes) == 2, "removal")
     assert loop.time() - withdrawn >= 0.09
     assert summary(r.changes[1]) == change([], ["alice"], [])
     await pause(0.15)
     assert len(r.changes) == 2
 
 
-async def test_reports_a_reconnects_joins_and_departures_in_one_change_with_no_grace(
+async def test_reports_a_reconnects_additions_and_removals_in_one_change_with_no_grace(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
-    for member_id in ("alice", "bob", "carol"):
-        first.push("announced", at(member_id))
+    for root_id in ("alice", "bob", "carol"):
+        first.push("announced", at(root_id))
     first.push("loaded")
     await until(lambda: len(r.changes) == 1, "load")
     relay.connections[0].end(connection_lost())
@@ -537,12 +537,12 @@ async def test_reports_a_reconnects_joins_and_departures_in_one_change_with_no_g
     assert len(r.changes) == 2
 
 
-async def test_reports_nothing_for_a_member_the_old_discovery_still_shows_when_the_new_snapshot_misses_its_announce(
+async def test_reports_nothing_for_a_root_the_old_discovery_still_shows_when_the_new_snapshot_misses_its_announce(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("loaded")
@@ -550,23 +550,23 @@ async def test_reports_nothing_for_a_member_the_old_discovery_still_shows_when_t
     subscriber.rotate()
     nxt = await relay.discovery(1)
     first.push("announced", at("bob"))
-    await until(lambda: len(r.changes) == 2, "bob joins on the old discovery")
+    await until(lambda: len(r.changes) == 2, "bob added on the old discovery")
     nxt.push("announced", at("alice"))
     nxt.push("loaded")
     await pause(0.005)
     nxt.push("announced", at("bob"))
     await pause(0.15)
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 3, "the marker join")
+    await until(lambda: len(r.changes) == 3, "the marker added")
     assert summary(r.changes[2]) == change(["zed"], [], ["alice", "bob", "zed"])
 
 
-async def test_reports_a_member_the_old_discovery_still_shows_as_left_after_the_grace_when_the_new_one_never_does(
+async def test_reports_a_root_the_old_discovery_still_shows_as_removed_after_the_grace_when_the_new_one_never_does(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     first.push("announced", at("alice"))
     first.push("announced", at("bob"))
@@ -579,9 +579,9 @@ async def test_reports_a_member_the_old_discovery_still_shows_as_left_after_the_
     loop = asyncio.get_running_loop()
     loaded = loop.time()
     nxt.push("loaded")
-    await until(lambda: len(r.changes) == 2, "the join at the load")
+    await until(lambda: len(r.changes) == 2, "the addition at the load")
     assert summary(r.changes[1]) == change(["carol"], [], ["alice", "bob", "carol"])
-    await until(lambda: len(r.changes) == 3, "the leave")
+    await until(lambda: len(r.changes) == 3, "the removal")
     assert loop.time() - loaded >= 0.09
     assert summary(r.changes[2]) == change([], ["bob"], ["alice", "carol"])
 
@@ -591,7 +591,7 @@ async def test_reports_nothing_when_a_reconnects_snapshot_falls_between_a_rotati
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     old = new_generation(1_000)
     first.push("announced", at("alice", old))
@@ -606,7 +606,7 @@ async def test_reports_nothing_when_a_reconnects_snapshot_falls_between_a_rotati
     nxt.push("announced", at("alice", new_generation(2_000)))
     await pause(0.15)
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
@@ -615,7 +615,7 @@ async def test_holds_a_leave_whose_grace_runs_out_during_an_outage_for_the_new_l
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     first = await relay.discovery()
     old = new_generation(1_000)
     first.push("announced", at("alice", old))
@@ -629,7 +629,7 @@ async def test_holds_a_leave_whose_grace_runs_out_during_an_outage_for_the_new_l
     nxt.push("announced", at("alice", new_generation(2_000)))
     nxt.push("loaded")
     nxt.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
@@ -638,7 +638,7 @@ async def test_holds_a_pending_leave_while_a_covering_request_replaces_the_disco
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     narrow = await relay.discovery()
     old = new_generation(1_000)
     narrow.push("announced", at("alice", old))
@@ -646,23 +646,23 @@ async def test_holds_a_pending_leave_while_a_covering_request_replaces_the_disco
     await until(lambda: len(r.changes) == 1, "load")
     narrow.push("unannounced", at("alice", old))
     await pause(0.02)
-    subscriber.members(["room"], quiet())
+    subscriber.publishing_roots(["room"], quiet())
     covering = await relay.discovery(0, 2)
     assert covering.prefix == ("room",)
     await pause(0.15)
     covering.push("announced", at("alice", new_generation(2_000)))
     covering.push("loaded")
     covering.push("announced", at("zed"))
-    await until(lambda: len(r.changes) == 2, "the marker join")
+    await until(lambda: len(r.changes) == 2, "the marker added")
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
-async def test_starts_a_pending_leave_again_once_the_covering_request_loads_without_the_member(
+async def test_starts_a_pending_leave_again_once_the_covering_request_loads_without_the_root(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     narrow = await relay.discovery()
     generation = new_generation()
     narrow.push("announced", at("alice", generation))
@@ -670,12 +670,12 @@ async def test_starts_a_pending_leave_again_once_the_covering_request_loads_with
     await until(lambda: len(r.changes) == 1, "load")
     narrow.push("unannounced", at("alice", generation))
     await pause(0.02)
-    subscriber.members(["room"], quiet())
+    subscriber.publishing_roots(["room"], quiet())
     covering = await relay.discovery(0, 2)
     await pause(0.15)
     assert len(r.changes) == 1
     covering.push("loaded")
-    await until(lambda: len(r.changes) == 2, "the leave")
+    await until(lambda: len(r.changes) == 2, "the removal")
     assert summary(r.changes[1]) == change([], ["alice"], [])
 
 
@@ -684,7 +684,7 @@ async def test_cancels_a_pending_leave_without_reporting_it_when_the_view_closes
 ) -> None:
     subscriber, relay = await start(cleanup)
     r = Recorder()
-    view = subscriber.members(ROOT, r.handlers)
+    view = subscriber.publishing_roots(PREFIX, r.handlers)
     d = await relay.discovery()
     d.push("announced", at("alice"))
     d.push("loaded")
@@ -720,7 +720,7 @@ async def start_over_wire(cleanup: list[Callable[[], object]]) -> tuple[list[Fak
     subscriber = await _supervise_relay_subscriber(connect, reconnect=FAST)
     cleanup.append(subscriber.close)
     r = Recorder()
-    subscriber.members(ROOT, r.handlers)
+    subscriber.publishing_roots(PREFIX, r.handlers)
     return fakes, r
 
 
@@ -836,11 +836,11 @@ def unauthorized() -> SubscriptionRequestError:
     return request_error(0x1, "token does not allow the room")
 
 
-async def test_serves_a_want_under_a_members_root_from_the_same_request_without_waiting_for_the_load(
+async def test_serves_a_want_under_a_publishing_roots_prefix_from_the_same_request_without_waiting_for_the_load(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
-    view = subscriber.members(ROOT, quiet())
+    view = subscriber.publishing_roots(PREFIX, quiet())
     d = await relay.discovery()
     generation = new_generation()
     d.push("announced", at("alice", generation))
@@ -853,17 +853,17 @@ async def test_serves_a_want_under_a_members_root_from_the_same_request_without_
 
 
 @dataclass
-class WantThenMembers:
+class WantThenRoots:
     subscriber: SupervisedSubscriber
     relay: Relay
     want: WantRecorder
-    members: Recorder
+    roots: Recorder
     covering: FakeDiscovery
     subscription: FakeSubscription
     generation: str
 
 
-async def want_then_members(cleanup: list[Callable[[], object]]) -> WantThenMembers:
+async def want_then_roots(cleanup: list[Callable[[], object]]) -> WantThenRoots:
     subscriber, relay = await start(cleanup)
     want = WantRecorder()
     subscriber.want("alice", at("alice"), "audio", want.handlers, generations=True, retry=FAST)
@@ -875,21 +875,21 @@ async def want_then_members(cleanup: list[Callable[[], object]]) -> WantThenMemb
     subscription = relay.connections[0].subscriptions[0]
     subscription.accept()
     subscription.send_object(0)
-    members = Recorder()
-    subscriber.members(ROOT, members.handlers)
+    roots = Recorder()
+    subscriber.publishing_roots(PREFIX, roots.handlers)
     covering = await relay.discovery(0, 2)
-    assert covering.prefix == ROOT
+    assert covering.prefix == PREFIX
     assert narrow.closed
     subscription.send_object(1)
     await pause()
     assert not subscription.cancelled
-    return WantThenMembers(subscriber, relay, want, members, covering, subscription, generation)
+    return WantThenRoots(subscriber, relay, want, roots, covering, subscription, generation)
 
 
 async def test_a_covering_request_replaces_a_wants_the_want_staying_subscribed_until_the_load_withdraws_it(
     cleanup: list[Callable[[], object]],
 ) -> None:
-    w = await want_then_members(cleanup)
+    w = await want_then_roots(cleanup)
     w.covering.push("loaded")
     await until(lambda: "restarted generation" in w.want.seen, "the withdrawal reported at the load")
     assert w.want.seen == [
@@ -900,16 +900,16 @@ async def test_a_covering_request_replaces_a_wants_the_want_staying_subscribed_u
     ]
     assert w.subscription.cancelled
     assert len(w.relay.connections[0].discoveries) == 2
-    await until(lambda: len(w.members.changes) == 1, "members load")
-    assert summary(w.members.changes[0]) == change([], [], [], initial=True)
+    await until(lambda: len(w.roots.changes) == 1, "publishing-roots load")
+    assert summary(w.roots.changes[0]) == change([], [], [], initial=True)
 
 
-async def test_keeps_a_want_under_the_root_delivering_when_the_covering_members_request_is_refused(
+async def test_keeps_a_want_under_the_prefix_delivering_when_the_covering_publishing_roots_request_is_refused(
     cleanup: list[Callable[[], object]],
 ) -> None:
-    w = await want_then_members(cleanup)
+    w = await want_then_roots(cleanup)
     w.covering.fail(unauthorized())
-    await until(lambda: len(w.members.errors) == 1, "members on_error")
+    await until(lambda: len(w.roots.errors) == 1, "publishing-roots on_error")
     await pause(0.1)
     w.subscription.send_object(2)
     await pause()
@@ -918,12 +918,12 @@ async def test_keeps_a_want_under_the_root_delivering_when_the_covering_members_
     assert not w.subscription.cancelled
 
 
-async def test_keeps_a_want_served_from_a_members_request_delivering_when_that_request_is_refused(
+async def test_keeps_a_want_served_from_a_publishing_roots_request_delivering_when_that_request_is_refused(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
-    members = Recorder()
-    subscriber.members(ROOT, members.handlers)
+    roots = Recorder()
+    subscriber.publishing_roots(PREFIX, roots.handlers)
     wide = await relay.discovery()
     wide.push("announced", at("alice", new_generation()))
     await pause()
@@ -935,17 +935,17 @@ async def test_keeps_a_want_served_from_a_members_request_delivering_when_that_r
     subscription.send_object(0)
     await pause()
     wide.fail(unauthorized())
-    await until(lambda: len(members.errors) == 1, "members on_error")
+    await until(lambda: len(roots.errors) == 1, "publishing-roots on_error")
     await pause(0.1)
     subscription.send_object(1)
     await pause()
     assert want.failures() == []
     assert want.seen[-1] == "object 1"
     assert not subscription.cancelled
-    assert [d.prefix for d in relay.connections[0].discoveries] == [ROOT, at("alice")]
+    assert [d.prefix for d in relay.connections[0].discoveries] == [PREFIX, at("alice")]
 
 
-async def test_never_restarts_a_want_under_the_root_while_the_members_request_is_refused_again_and_again(
+async def test_never_restarts_a_want_under_the_prefix_while_the_publishing_roots_request_is_refused_again_and_again(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, relay = await start(cleanup)
@@ -962,7 +962,7 @@ async def test_never_restarts_a_want_under_the_root_while_the_members_request_is
                 if d.closed or id(d) in served:
                     continue
                 served.add(id(d))
-                if len(d.prefix) == len(ROOT):
+                if len(d.prefix) == len(PREFIX):
                     refusals += 1
                     d.fail(request_error(0x9, "excessive load"))
                 else:
@@ -979,7 +979,7 @@ async def test_never_restarts_a_want_under_the_root_while_the_members_request_is
     server = asyncio.ensure_future(serve())
     cleanup.append(server.cancel)
     await until(lambda: len(relay.connections[0].subscriptions) == 1, "subscribe")
-    subscriber.members(ROOT, quiet())
+    subscriber.publishing_roots(PREFIX, quiet())
     await until(lambda: refusals >= 3, "three refusals", 5.0)
     await pause()
     assert want.failures() == []
@@ -989,31 +989,31 @@ async def test_never_restarts_a_want_under_the_root_while_the_members_request_is
 async def test_reports_nothing_for_a_held_namespace_the_covering_request_confirms(
     cleanup: list[Callable[[], object]],
 ) -> None:
-    w = await want_then_members(cleanup)
+    w = await want_then_roots(cleanup)
     w.covering.push("announced", at("alice", w.generation))
     w.covering.push("loaded")
-    await until(lambda: len(w.members.changes) == 1, "members load")
-    assert summary(w.members.changes[0]) == change(["alice"], [], ["alice"], initial=True)
+    await until(lambda: len(w.roots.changes) == 1, "publishing-roots load")
+    assert summary(w.roots.changes[0]) == change(["alice"], [], ["alice"], initial=True)
     await pause()
     assert w.want.seen == [f"subscribed {'/'.join(at('alice', w.generation))}", "object 0", "object 1"]
     assert not w.subscription.cancelled
     assert len(w.relay.connections[0].subscriptions) == 1
 
 
-def test_maps_a_namespace_to_a_member_and_the_field_it_adds() -> None:
-    assert _member_field(ROOT, at("alice")) == ("alice", "")
-    assert _member_field(ROOT, at("alice", "g1")) == ("alice", "g1")
-    assert _member_field(ROOT, ROOT) is None
-    assert _member_field(ROOT, at("alice", "g1", "x")) is None
+def test_maps_a_namespace_to_a_root_and_the_field_it_adds() -> None:
+    assert _root_field(PREFIX, at("alice")) == ("alice", "")
+    assert _root_field(PREFIX, at("alice", "g1")) == ("alice", "g1")
+    assert _root_field(PREFIX, PREFIX) is None
+    assert _root_field(PREFIX, at("alice", "g1", "x")) is None
 
 
-def test_joins_a_member_on_its_first_field_and_leaves_it_on_its_last() -> None:
+def test_adds_a_root_on_its_first_field_and_removes_it_on_its_last() -> None:
     presence: _Presence = {}
-    assert _apply_namespace(presence, ROOT, "announced", at("alice", "g1")) == ("joined", "alice")
-    assert _apply_namespace(presence, ROOT, "announced", at("alice", "g2")) is None
-    assert _apply_namespace(presence, ROOT, "unannounced", at("alice", "g1")) is None
-    assert _apply_namespace(presence, ROOT, "unannounced", at("alice", "g1")) is None
-    assert _apply_namespace(presence, ROOT, "unannounced", at("alice", "g2")) == ("left", "alice")
+    assert _apply_namespace(presence, PREFIX, "announced", at("alice", "g1")) == ("added", "alice")
+    assert _apply_namespace(presence, PREFIX, "announced", at("alice", "g2")) is None
+    assert _apply_namespace(presence, PREFIX, "unannounced", at("alice", "g1")) is None
+    assert _apply_namespace(presence, PREFIX, "unannounced", at("alice", "g1")) is None
+    assert _apply_namespace(presence, PREFIX, "unannounced", at("alice", "g2")) == ("removed", "alice")
     assert presence == {}
 
 
@@ -1033,18 +1033,18 @@ def opened_source(effects: Sequence[object]) -> _Source:
     return opened.source
 
 
-def emitted(effect: object) -> MembersChange:
+def emitted(effect: object) -> PublishingRootsChange:
     assert isinstance(effect, _Emit)
     return effect.change
 
 
-def loaded(*members: str) -> tuple[StubConnection, _Source, _Phase, tuple[object, ...]]:
+def loaded(*roots: str) -> tuple[StubConnection, _Source, _Phase, tuple[object, ...]]:
     on = StubConnection()
-    phase, effects = _transition(_Loading(), _Connected(on), ROOT)
+    phase, effects = _transition(_Loading(), _Connected(on), PREFIX)
     source = opened_source(effects)
-    for member_id in members:
-        phase = _transition(phase, _Namespace(source, "announced", at(member_id)), ROOT).phase
-    step = _transition(phase, _Loaded(source), ROOT)
+    for root_id in roots:
+        phase = _transition(phase, _Namespace(source, "announced", at(root_id)), PREFIX).phase
+    step = _transition(phase, _Loaded(source), PREFIX)
     return on, source, step.phase, step.effects
 
 
@@ -1058,82 +1058,82 @@ def test_opens_on_a_connection_and_emits_the_load_once() -> None:
     assert len(effects) == 1
     load = emitted(effects[0])
     assert load.initial
-    assert ids(load.joined) == ["alice"]
-    assert _transition(phase, _Loaded(source), ROOT).effects == ()
+    assert ids(load.added) == ["alice"]
+    assert _transition(phase, _Loaded(source), PREFIX).effects == ()
 
 
 def test_ignores_an_input_about_a_source_the_phase_no_longer_holds() -> None:
     _on, _source, phase, _effects = loaded("alice")
     stranger = _Source(StubConnection())
-    step = _transition(phase, _Namespace(stranger, "announced", at("bob")), ROOT)
+    step = _transition(phase, _Namespace(stranger, "announced", at("bob")), PREFIX)
     assert step.phase is phase
     assert step.effects == ()
 
 
-def test_follows_a_rotation_make_before_break_and_a_member_the_new_load_misses_leaves_after_its_grace() -> None:
+def test_follows_a_rotation_make_before_break_and_a_root_the_new_load_misses_is_removed_after_its_grace() -> None:
     on, source, phase, _effects = loaded("alice", "bob")
-    retired = _transition(phase, _Retiring(on, StubConnection()), ROOT)
+    retired = _transition(phase, _Retiring(on, StubConnection()), PREFIX)
     assert isinstance(retired.phase, _Replacing)
     candidate = opened_source(retired.effects)
     assert retired.effects == (_Open(candidate),)
-    replacing = _transition(retired.phase, _Namespace(candidate, "announced", at("alice")), ROOT).phase
-    done = _transition(replacing, _Loaded(candidate), ROOT)
+    replacing = _transition(retired.phase, _Namespace(candidate, "announced", at("alice")), PREFIX).phase
+    done = _transition(replacing, _Loaded(candidate), PREFIX)
     assert isinstance(done.phase, _Live)
     assert done.phase.source is candidate
     assert done.phase.leaving == ("bob",)
     assert done.effects == (_Release(source), _ScheduleLeave("bob"))
-    due = _transition(done.phase, _LeaveDue("bob", following), ROOT)
+    due = _transition(done.phase, _LeaveDue("bob", following), PREFIX)
     assert len(due.effects) == 1
-    left = emitted(due.effects[0])
-    assert (ids(left.joined), ids(left.left)) == ([], ["bob"])
+    removed = emitted(due.effects[0])
+    assert (ids(removed.added), ids(removed.removed)) == ([], ["bob"])
 
 
 def test_settles_every_pending_leave_by_a_new_loads_snapshot_one_it_shows_stays_one_it_does_not_keeps_its_grace() -> (
     None
 ):
     on, source, phase, _effects = loaded("alice", "bob", "carol")
-    for member_id in ("alice", "bob"):
-        phase = _transition(phase, _Namespace(source, "unannounced", at(member_id)), ROOT).phase
-    retired = _transition(phase, _Retiring(on, StubConnection()), ROOT)
+    for root_id in ("alice", "bob"):
+        phase = _transition(phase, _Namespace(source, "unannounced", at(root_id)), PREFIX).phase
+    retired = _transition(phase, _Retiring(on, StubConnection()), PREFIX)
     candidate = opened_source(retired.effects)
     replacing = retired.phase
-    for member_id in ("alice", "carol"):
-        replacing = _transition(replacing, _Namespace(candidate, "announced", at(member_id)), ROOT).phase
-    done = _transition(replacing, _Loaded(candidate), ROOT)
+    for root_id in ("alice", "carol"):
+        replacing = _transition(replacing, _Namespace(candidate, "announced", at(root_id)), PREFIX).phase
+    done = _transition(replacing, _Loaded(candidate), PREFIX)
     assert isinstance(done.phase, _Live)
     assert done.phase.leaving == ("bob",)
     assert done.effects == (_Release(source), _CancelLeave("alice"), _ScheduleLeave("bob"))
-    due = _transition(done.phase, _LeaveDue("bob", following), ROOT)
-    left = emitted(due.effects[-1])
-    assert ids(left.left) == ["bob"]
-    assert ids(left.present) == ["alice", "carol"]
+    due = _transition(done.phase, _LeaveDue("bob", following), PREFIX)
+    removed = emitted(due.effects[-1])
+    assert ids(removed.removed) == ["bob"]
+    assert ids(removed.present) == ["alice", "carol"]
 
 
-def test_a_reconnect_reports_a_member_the_old_discovery_showed_as_left_at_once_and_holds_one_in_its_grace() -> None:
+def test_a_reconnect_reports_a_root_the_old_discovery_showed_as_removed_at_once_and_holds_one_in_its_grace() -> None:
     _on, source, phase, _effects = loaded("alice", "bob")
-    withdrawn = _transition(phase, _Namespace(source, "unannounced", at("bob")), ROOT).phase
-    ended = _transition(withdrawn, _Ended(source, SubscriptionConnectionClosedError(None)), ROOT)
+    withdrawn = _transition(phase, _Namespace(source, "unannounced", at("bob")), PREFIX).phase
+    ended = _transition(withdrawn, _Ended(source, SubscriptionConnectionClosedError(None)), PREFIX)
     assert isinstance(ended.phase, _Replacing)
     assert ended.phase.source is None
-    reopened = _transition(ended.phase, _Connected(StubConnection()), ROOT)
+    reopened = _transition(ended.phase, _Connected(StubConnection()), PREFIX)
     candidate = opened_source(reopened.effects)
-    done = _transition(reopened.phase, _Loaded(candidate), ROOT)
+    done = _transition(reopened.phase, _Loaded(candidate), PREFIX)
     assert isinstance(done.phase, _Live)
     assert done.phase.leaving == ("bob",)
     assert done.effects[0] == _ScheduleLeave("bob")
     assert len(done.effects) == 2
-    left = emitted(done.effects[1])
-    assert (ids(left.joined), ids(left.left)) == ([], ["alice"])
+    removed = emitted(done.effects[1])
+    assert (ids(removed.added), ids(removed.removed)) == ([], ["alice"])
 
 
-def test_holds_a_member_whose_last_namespace_went_until_its_grace_runs_out_and_cancels_it_if_one_comes_back() -> None:
+def test_holds_a_root_whose_last_namespace_went_until_its_grace_runs_out_and_cancels_it_if_one_comes_back() -> None:
     _on, source, phase, _effects = loaded("alice")
-    gone = _transition(phase, _Namespace(source, "unannounced", at("alice")), ROOT)
+    gone = _transition(phase, _Namespace(source, "unannounced", at("alice")), PREFIX)
     assert gone.effects == (_ScheduleLeave("alice"),)
-    back = _transition(gone.phase, _Namespace(source, "announced", at("alice", "g2")), ROOT)
+    back = _transition(gone.phase, _Namespace(source, "announced", at("alice", "g2")), PREFIX)
     assert back.effects == (_CancelLeave("alice"),)
-    assert _transition(back.phase, _LeaveDue("alice", following), ROOT).effects == ()
-    closed = _transition(gone.phase, _Close(), ROOT)
+    assert _transition(back.phase, _LeaveDue("alice", following), PREFIX).effects == ()
+    closed = _transition(gone.phase, _Close(), PREFIX)
     assert closed.effects == (_Release(source), _CancelLeave("alice"))
 
 
@@ -1141,7 +1141,7 @@ def test_waits_for_a_connection_retries_with_backoff_or_fails_by_how_discovery_e
     on, source, phase, _effects = loaded("alice")
 
     def ended(error: BaseException | None) -> tuple[_Phase, tuple[object, ...]]:
-        return _transition(phase, _Ended(source, error), ROOT)
+        return _transition(phase, _Ended(source, error), PREFIX)
 
     _phase, effects = ended(SubscriptionConnectionClosedError(None))
     assert effects == (_Release(source), _AwaitConnection(on))
@@ -1157,7 +1157,7 @@ def test_waits_for_a_connection_retries_with_backoff_or_fails_by_how_discovery_e
 
 def test_does_nothing_once_closed() -> None:
     _on, source, phase, _effects = loaded("alice")
-    closed = _transition(phase, _Close(), ROOT)
+    closed = _transition(phase, _Close(), PREFIX)
     assert closed.effects == (_Release(source),)
-    assert _transition(closed.phase, _Connected(StubConnection()), ROOT).effects == ()
-    assert _transition(closed.phase, _Close(), ROOT).effects == ()
+    assert _transition(closed.phase, _Connected(StubConnection()), PREFIX).effects == ()
+    assert _transition(closed.phase, _Close(), PREFIX).effects == ()

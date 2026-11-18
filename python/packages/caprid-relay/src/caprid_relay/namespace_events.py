@@ -96,7 +96,7 @@ def _is_withdrawn_by_end(events: NamespaceEvents, event: NamespaceEvent) -> bool
 def _is_stopped(events: NamespaceEvents) -> bool:
     """Whether the request has failed or ended, though its reader may not have seen it yet: nothing more arrives.
 
-    The supervised subscriber's discovery reads it so a member's leave grace does not run out on a
+    The supervised subscriber's discovery reads it so a publishing root's leave grace does not run out on a
     stream that is gone.
     """
     marks = events._marks

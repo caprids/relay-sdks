@@ -6,20 +6,21 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
-- `caprid-relay`: `SupervisedSubscriber.members(root, MembersHandlers(on_changed=..., on_error=...))` reports who is
-  present under a root, across reconnects and the subscriber's own rotations, as in the TypeScript SDK (#422). Each
-  namespace one field below the root is a member (`Member`: `id`, `namespace`), and a supervised publisher's
-  generations under it count as one member, so its rotations and reconnects report nothing. The first `on_changed` is
-  the load (`MembersChange.initial` true, everyone present in `joined`, possibly nobody), and `Members.loaded` tells
-  "nobody here" from "not loaded yet". After a reconnect the view reports only who came or went meanwhile, in one call.
-  An application can build a room roster with no roster server. `SupervisedSubscriber.close()` also closes every member
-  view, without calling its handlers.
+- `caprid-relay`: `SupervisedSubscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`
+  reports the roots that are publishing now under a prefix, across reconnects and the subscriber's own rotations, as in
+  the TypeScript SDK (#422). Publishing means announced, not necessarily sending objects. Each namespace one field below
+  the prefix is a root (`PublishingRoot`: `id`, `namespace`), and one a field below a root is read as that root's
+  generation, so a supervised publisher's rotations and reconnects report nothing. The first `on_changed` is the load
+  (`PublishingRootsChange.initial` true, every root publishing in `added`, possibly none), and `PublishingRoots.loaded`
+  tells "no root here" from "not loaded yet". After a reconnect the view reports only the roots added or removed
+  meanwhile, in one call. An application can build a room roster with no roster server.
+  `SupervisedSubscriber.close()` also closes every publishing-roots view, without calling its handlers.
 - `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations, every want waiting for its namespace to be announced again, and every
-  member view. A want under another want's or a view's root no longer fails with `PREFIX_OVERLAP`, and a view refused
-  on its root leaves the wants under it alone. A want waiting on a fixed namespace is still woken by its announcement
-  when a followed root or a member view covers the namespace; before, a followed root closed its watch and the want
-  waited out the whole backoff. Nothing to change in an application.
+  publishing-roots view. A want under another want's root or a view's prefix no longer fails with `PREFIX_OVERLAP`, and
+  a view refused on its prefix leaves the wants under it alone. A want waiting on a fixed namespace is still woken by
+  its announcement when a followed root or a publishing-roots view covers the namespace; before, a followed root
+  closed its watch and the want waited out the whole backoff. Nothing to change in an application.
 - `caprid-relay`: `namespace_events` yields `NamespaceEvent(type="loaded")` once, after the namespaces already announced
   when the relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET`
   (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported.
