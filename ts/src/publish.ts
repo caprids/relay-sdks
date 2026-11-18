@@ -331,6 +331,8 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
         return ownGroups.size;
       },
     };
+    /** Set once the application's close() starts. */
+    let closingByApplication = false;
     /** Set when the namespace was lost while the connection lives: every later operation fails with it. */
     let lost: { error: unknown } | undefined;
     const assertPublished = () => {
@@ -381,7 +383,9 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
           if (live) slot.end(error);
           else slot.disconnect(error);
         }
-        resolveClosed(error === undefined ? {} : { error });
+        // The relay withdrawing the namespace while the application's own close() drains it does not make that close a
+        // withdrawal: `closed` reports the close the application asked for.
+        resolveClosed(error === undefined || (live && closingByApplication) ? {} : { error });
       },
       end: endTracks,
       get drainMs() {
@@ -431,6 +435,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
         close() {
           shutdown ??= (async () => {
             if (ended) return;
+            closingByApplication = true;
             await endTracks();
             abandonAnnounce(
               new RelayError('CLOSED', 'Relay publication closed before its namespace was announced', 'connection'),

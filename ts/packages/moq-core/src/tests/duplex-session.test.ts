@@ -12,7 +12,7 @@ import {
   SETUP_OPTION,
 } from '../protocol/control-messages.js';
 import { createMoqtDuplexSession, type MoqtDuplexSessionConfig } from '../protocol/duplex-session.js';
-import { SESSION_ERROR } from '../protocol/errors.js';
+import { MoqtProtocolError, SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtTransport } from '../protocol/session.js';
 import { createSubgroupWriter } from '../protocol/subgroup-writer.js';
 import { decodeVarint } from '../protocol/varint.js';
@@ -347,5 +347,14 @@ describe('createMoqtDuplexSession', () => {
       expect(solicitation.received.map((m) => m.kind)).toContain('namespace-done');
       expect(publisherClosed).toHaveBeenCalled();
     });
+  });
+  it('ends the publisher cleanly when the transport closes, before its synthetic streams end', async () => {
+    const publisherClosed: { error?: unknown }[] = [];
+    const { pair } = await harness({ publisher: { callbacks: { onClosed: (info) => publisherClosed.push(info) } } });
+
+    pair.server.close({ closeCode: 0, reason: '' });
+    await vi.waitFor(() => expect(publisherClosed).toHaveLength(1));
+    // Not "peer closed its control stream": the driver had ended before its control stream did.
+    expect(publisherClosed[0]!.error).not.toBeInstanceOf(MoqtProtocolError);
   });
 });

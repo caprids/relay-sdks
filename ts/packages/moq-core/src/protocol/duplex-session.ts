@@ -170,13 +170,17 @@ export function createMoqtDuplexSession(
   let deferSubscriberClose = false;
   let destroyed = false;
   const peerRequestIds = new Set<number>();
+  let toPublisherUni!: ReadableStreamDefaultController<ReadableStream<Uint8Array>>;
   let controlTaken = false;
   const publisherView: MoqtTransport = {
     get protocol() {
       return transport.protocol;
     },
     incomingUnidirectionalStreams: new ReadableStream<ReadableStream<Uint8Array>>({
-      start: (controller) => controller.enqueue(publisherControl),
+      start: (controller) => {
+        toPublisherUni = controller;
+        controller.enqueue(publisherControl);
+      },
     }),
     incomingBidirectionalStreams: publisherRequests,
     createUnidirectionalStream(options) {
@@ -237,6 +241,20 @@ export function createMoqtDuplexSession(
     },
   });
   const publisher = createMoqtPublishSession(publisherView, { ...config.publisher, peerRequestIds });
+
+  // Once the transport has closed, end the publish driver's synthetic streams, so none of its reads wait forever. This
+  // handler runs after the driver's own `closed` handler, registered in its constructor, so the driver has already ended
+  // and does not read the closed control stream as the peer closing it.
+  const endSynthetic = () => {
+    for (const end of [() => toPublisherControl.close(), () => toPublisherUni.close()]) {
+      try {
+        end();
+      } catch {
+        // Already closed.
+      }
+    }
+  };
+  void transport.closed.then(endSynthetic, endSynthetic);
 
   void (async () => {
     const reader = transport.incomingBidirectionalStreams.getReader();
