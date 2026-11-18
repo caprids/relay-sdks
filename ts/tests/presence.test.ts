@@ -258,6 +258,23 @@ describe('createPresenceView', () => {
     expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'] }, { joined: ['carol'] }]);
   });
 
+  it('names a member that went stale before the load in stale as well as joined, so resumed follows a stale', () => {
+    const room = fakeRoom();
+    const { changes, handlers } = recorder();
+    createPresenceView(room.subscriber, { prefix: PREFIX, heartbeatMs: 100 }, handlers);
+    room.load('alice', 'carol');
+    room.peer('alice').subscribed();
+    room.peer('alice').object(0, { name: 'Alice' });
+    room.peer('carol').subscribed();
+    vi.advanceTimersByTime(1000);
+    expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'], stale: ['alice'] }]);
+    const [loaded] = changes;
+    expect(loaded!.stale[0]).toBe(loaded!.joined[0]);
+    expect(loaded!.present.get('alice')?.stale).toBe(true);
+    room.peer('alice').object(1, { name: 'Alice' });
+    expect(changes.map(summary).at(-1)).toEqual({ resumed: ['alice'] });
+  });
+
   it('reports a changed document once as updated, and nothing for the same JSON again', () => {
     const { room, view, changes } = liveRoom('alice');
     const alice = room.peer('alice');

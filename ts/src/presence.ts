@@ -135,7 +135,10 @@ export interface PresenceChange<T> {
    * member with a changed document is in `resumed` too.
    */
   readonly updated: readonly PresenceMember<T>[];
-  /** Members that went stale. */
+  /**
+   * Members that went stale. On the first call, the members in `joined` that went stale before the load, so a member
+   * is always in `stale` before it is in `resumed`.
+   */
   readonly stale: readonly PresenceMember<T>[];
   /** Stale members with a new document. */
   readonly resumed: readonly PresenceMember<T>[];
@@ -690,8 +693,11 @@ function gather<T>(
     return { phase: { ...phase, states, waiting }, effects };
   }
   const present = reported(states);
-  const joined = [...present.values()].map((member): Report<T> => ({ event: 'joined', member }));
-  const loaded = changeOf(joined, present, true);
+  const reports = [...present.values()].flatMap((member): Report<T>[] => [
+    { event: 'joined', member },
+    ...(member.stale ? [{ event: 'stale' as const, member }] : []),
+  ]);
+  const loaded = changeOf(reports, present, true);
   return { phase: { kind: 'live', states }, effects: [...effects, { kind: 'emit', change: loaded }] };
 }
 

@@ -1546,6 +1546,8 @@ member, and wants each member's presence track with `generations: true` and subs
   subscription starts a full window. Any other restart leaves it running.
 - *Load.* The roster loads once the publishing-roots view has loaded and every member present then
   has a document, or 1 s after the publishing-roots view loaded. A document that arrives later is a join.
+  The load reports every member on the roster as joined, and a member that went stale before it as
+  stale too, so a member is always reported stale before it is reported resumed.
 - *Changes.* One synchronous `onChanged` reports `joined`, `left`, `updated` (the document's bytes
   changed), `stale` and `resumed`, with `present` and `initial` as in `PublishingRootsChange`. Heartbeats,
   cached copies, publisher rotations, and the listener's own reconnects and rotations report nothing.
