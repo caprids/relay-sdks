@@ -26,6 +26,7 @@ describe('public vocabulary', () => {
       'SubscriptionOverflowError',
       'SubscriptionRequestError',
       'connectRelayPublisher',
+      'connectRelaySession',
       'connectRelaySubscriber',
       'connectSupervisedPublisher',
       'connectSupervisedSubscriber',

@@ -36,6 +36,7 @@ export type {
   PublishProperty,
   RegisterTrackOptions,
   RelayGroupWriter,
+  RelayPublication,
   RelayPublisher,
   RelayTrackWriter,
 } from './publish.js';
@@ -47,6 +48,8 @@ export type {
   PublishingRootsHandlers,
   PublishingRootsOptions,
 } from './publishing-roots.js';
+export type { ConnectRelaySessionOptions, RelaySession } from './relay-session.js';
+export { connectRelaySession } from './relay-session.js';
 export { DEFAULT_ENDPOINT, roomEndpoint } from './room-endpoint.js';
 export type { RelaySubscription, SubscriptionEnd, SubscriptionEndKind } from './subscription.js';
 export type { SubscriptionEvent, SubscriptionEventOptions, SubscriptionEvents } from './subscription-events.js';

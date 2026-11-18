@@ -4,6 +4,7 @@ import {
   type MessageParameters,
   type MoqTrackSource,
   type MoqtObject,
+  type MoqtProtocolId,
   type MoqtSession,
   type MoqtSubscribeOptions,
   type PublishDone,
@@ -184,32 +185,43 @@ export interface RelaySubscriber {
   close(): void;
 }
 
+/** The setup options a connection that subscribes adds to the endpoint's. */
+export const SUBSCRIBER_SETUP_OPTIONS = [
+  // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
+  { type: SETUP_OPTION.SOLICIT, value: 1 },
+  { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
+] as const;
+
 /** Open a Relay connection for subscribing to tracks. The caller owns connection shutdown. */
 export async function connectRelaySubscriber(options: ConnectRelaySubscriberOptions): Promise<RelaySubscriber> {
   // The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
   // the rest before anything connects.
   assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
-  const {
-    session: connected,
-    closed,
-    observeClosed,
-    assertOpen,
-    close,
-    protocol,
-    expiresAt,
-  } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
+  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@caprid/relay',
-      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
-      setupOptions: [
-        ...setupOptions,
-        { type: SETUP_OPTION.SOLICIT, value: 1 },
-        { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
-      ],
+      setupOptions: [...setupOptions, ...SUBSCRIBER_SETUP_OPTIONS],
       requestTimeoutMs: options.requestTimeoutMs,
       callbacks,
     }),
   );
+  return relaySubscriberOf({ ...lifetime, session: lifetime.session });
+}
+
+/** What {@link relaySubscriberOf} needs from an open connection. */
+export interface SubscribingConnection {
+  session: MoqtSession;
+  closed: Promise<{ error?: unknown }>;
+  observeClosed(observer: (error?: unknown) => void): () => void;
+  assertOpen(): void;
+  close(): void;
+  protocol: MoqtProtocolId;
+  expiresAt: Date | undefined;
+}
+
+/** The {@link RelaySubscriber} surface of a connection whose subscribe driver is `connection.session`. */
+export function relaySubscriberOf(connection: SubscribingConnection): RelaySubscriber {
+  const { session: connected, closed, observeClosed, assertOpen, close, protocol, expiresAt } = connection;
 
   /** Prefixes with a namespace request open on this connection (namespace-events.ts, `claimPrefix`). */
   const prefixes = new Set<readonly string[]>();
