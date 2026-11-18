@@ -855,7 +855,7 @@ example runs on:
 - `CatalogService(track, document)` re-sends a document on every relay subscription, and retries a
   failed send while demand remains.
 - `DocumentService(track)` does the same for a document you replace with `update(document)`, such as
-  a media timeline. It also sends each update while the relay is subscribed.
+  a media timeline. It also sends the latest document on each update while the relay is subscribed.
 - `FrameWriter(track)` maps encoded frames onto groups. By default a keyframe opens a group and deltas
   append to it. `grouping="frame"` sends one group per frame. The writer skips frames the relay has
   no subscription for instead of waiting on the deadline, and resumes at the next keyframe after any
