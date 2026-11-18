@@ -670,12 +670,11 @@ connection. Against `ord.relay.mux.global`, a want following generations was rec
 
 ## Discover who is publishing, with no server
 
-A call needs the list of people in it. A dashboard needs the cameras that are up. A worker needs to
-know which devices are sending. The relay already knows which namespaces are announced, so an
-application can read that list from the relay and run no roster server of its own.
-`subscriber.publishing_roots()` reads the list and keeps it right across reconnects and token
-rotations. A room roster is the worked example below, but nothing in the API knows about rooms. The
-prefix is where your application's own structure goes.
+A call needs the list of people in it, and a dashboard needs the list of cameras that are up. The
+relay already knows which namespaces its publishers have announced, so an application can read that
+list from the relay and run no roster server of its own. `subscriber.publishing_roots()` reads the
+list and keeps it correct across reconnects and token rotations. The example below is a room roster,
+but the API has no notion of a room. It follows whatever prefix you give it.
 
 ### The namespace layout
 
@@ -696,10 +695,11 @@ room/standup/ada/0mwmoh58v0da3   a generation: one connection of ada's supervise
   however many generations it has had.
 - An unsupervised publisher (`connect_relay_publisher`) on `[*prefix, id]` announces the root itself.
   It counts too.
-- Anything deeper than a generation is ignored, and so is the prefix itself.
+- The view ignores anything deeper than a generation, and the prefix itself.
 
-Publishing here means announced. A publisher is announced once it has registered its first track,
-before it writes anything. A publisher with no track is not announced, so it is never a root.
+Publishing here means announced. A publisher announces its namespace when it registers its first
+track, before it writes anything. A publisher with no track announces nothing, so it is never a
+root.
 
 ### Follow the roots
 
@@ -772,33 +772,33 @@ changed ['ada']
 
 The view itself has the same state. `roots.loaded` is false until the first `on_changed`, so you can
 tell an empty room from one that has not loaded yet. `roots.present` is the same tuple `on_changed`
-last received. `roots.close()` stops the view. It is idempotent, and nothing is delivered after it.
+last received. `roots.close()` stops the view. It is idempotent, and the view delivers nothing after it.
 `subscriber.close()` closes every view too, without calling its handlers.
 
 Each `root.namespace` is the prefix followed by the root's `id`. Hand it to `want()` with
 `generations=True`, as above, to follow that root's media across its publisher's reconnects and
-rotations. Unwant the key when the root is removed.
+rotations. Unwant the key when the view removes the root.
 
 What the view reports, and when:
 
 - The load comes about one round trip and 0.05 s after the call.
-- A publisher's clean `close()` removes its root about 105 ms later on the same relay, and about
-  210 ms later from another relay of the cluster. The view waits 0.1 s after a root's last namespace
-  is withdrawn before it removes the root.
-- A crashed or frozen publisher stays announced until the relay's idle timeout. Its root is removed
-  10 to 13 s after the crash.
+- A publisher's clean `close()` removes its root about 105 ms later on the same relay, and about 210
+  ms later from another relay of the cluster. The view waits 0.1 s after the relay withdraws a
+  root's last namespace before it removes the root.
+- A crashed or frozen publisher stays announced until the relay's idle timeout. The view removes its
+  root 10 to 13 s after the crash.
 - A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
 - While the subscriber reconnects, the view keeps its last state. Once the new connection has
   loaded, one `on_changed` reports what changed meanwhile, with additions and removals together. A
   root whose removal was already pending when the connection dropped can be removed in a later call.
 
 `on_error` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
-The view is closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
+The view has closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
 
 ### Presence: read the documents with a want
 
 A root tells you that something is announced. It does not tell you who it is, and a frozen publisher
-stays announced for about 10 s. The TypeScript SDK has presence helpers for this: each party
+stays announced for about 10 s. The TypeScript SDK has presence helpers for this. Each party
 publishes a small JSON document on a `presence` track and resends it every 2 s as a heartbeat
 ([TypeScript guide](../ts/GUIDE.md#presence-a-document-and-a-heartbeat-for-each-root)).
 
@@ -806,7 +806,8 @@ The Python SDK has no presence helper. A Python application can still read prese
 track is plain JSON with no added fields. Each object is one party's whole document, in a group of
 its own. Want the `presence` track of each root and keep the newest document. A want can deliver the
 relay's cached copy of an object again after it resubscribes, so count an object only when it is
-newer than the last one: a larger group ID in the same generation, or a newer generation.
+newer than the last one. Newer means a larger group ID in the same generation, or a newer
+generation.
 
 ```python
 import time
@@ -942,8 +943,8 @@ participants = subscriber.publishing_roots(
 )
 ```
 
-The relay filters by prefix, so this view never hears about bots. A label after the id, or inside a
-presence document, would make every viewer discover everything and filter it locally.
+The relay filters by prefix, so it sends this view nothing about bots. A label after the id, or
+inside a presence document, would make every viewer discover everything and filter it locally.
 
 The view's prefix must end one field above the ids. With this layout a view on `["room", room_id]`
 loads empty, because every generation is three fields below it.
@@ -953,10 +954,11 @@ loads empty, because every generation is three fields below it.
 - **An empty list with no error can mean a token problem.** If the subscriber's token does not grant
   the prefix, the relay accepts the request and sends nothing. The view loads empty, and `on_error`
   never runs.
-- **A publisher needs a track to be listed.** A publisher is announced when it registers its first
-  track.
+- **A publisher needs a track to be listed.** A publisher announces its namespace when it registers
+  its first track.
 - **Handlers must be synchronous.** Passing an `async def` as `on_changed` or `on_error` raises
-  `TypeError` from `publishing_roots()`. A handler that raises is logged, and the view carries on.
+  `TypeError` from `publishing_roots()`. The SDK logs a handler that raises, and the view carries
+  on.
 - **A closed subscriber raises.** `publishing_roots()` on a closed subscriber raises `RelayError`
   with code `CLOSED`.
 - **The view includes you.** Your own publisher is a root under the prefix like any other. Skip your
@@ -968,8 +970,8 @@ loads empty, because every generation is three fields below it.
 - **A publisher's own reconnect can look like a leave.** A rotation opens the new connection before
   it closes the old one, so it reports nothing. A reconnect after a lost connection has no old
   connection to overlap with. If the relay sees the old connection close before the new one
-  announces, the root is removed and then added again. Want the root again when it is added, as the
-  samples above do.
+  announces, the view removes the root and then adds it again. Want the root again when the view
+  adds it, as the samples above do.
 
 ## Publishing lifecycle
 
