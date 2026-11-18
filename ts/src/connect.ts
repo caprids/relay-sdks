@@ -185,12 +185,19 @@ export interface RelaySubscriber {
   close(): void;
 }
 
-/** The setup options a connection that subscribes adds to the endpoint's. */
+/**
+ * The setup options a connection that subscribes adds to the endpoint's. A connection that also publishes sends only
+ * SOLICIT: ACTIVE_COUNT would oblige its publishing side to count the NAMESPACE entries it answers the relay's
+ * solicitations with, which the publish session does not do.
+ */
 export const SUBSCRIBER_SETUP_OPTIONS = [
   // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
   { type: SETUP_OPTION.SOLICIT, value: 1 },
   { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
 ] as const;
+
+/** The setup options of a connection that publishes and subscribes: see {@link SUBSCRIBER_SETUP_OPTIONS}. */
+export const SESSION_SETUP_OPTIONS = [{ type: SETUP_OPTION.SOLICIT, value: 1 }] as const;
 
 /** Open a Relay connection for subscribing to tracks. The caller owns connection shutdown. */
 export async function connectRelaySubscriber(options: ConnectRelaySubscriberOptions): Promise<RelaySubscriber> {

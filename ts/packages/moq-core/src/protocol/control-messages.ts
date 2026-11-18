@@ -1286,13 +1286,15 @@ export function encodeRequestUpdate(
 }
 
 /**
- * GOAWAY (§9.2). Clients MUST send a zero-length New Session URI, so the encoder takes only the timeout (milliseconds;
- * 0 = no specific timeout).
+ * GOAWAY (§9.2). `timeout` is in milliseconds (0 = no specific timeout). Clients MUST send a zero-length New Session
+ * URI, the default; `newSessionUri` is for a server, or for replaying a GOAWAY received from one.
  */
-export function encodeGoaway(timeout = 0): Uint8Array {
+export function encodeGoaway(timeout = 0, newSessionUri = ''): Uint8Array {
   const body = new ByteWriter();
+  const uri = utf8Encode(newSessionUri);
 
-  body.writeVarint(0);
+  body.writeVarint(uri.length);
+  body.writeBytes(uri);
   body.writeVarint(timeout);
   return frameMessage(MESSAGE_TYPE.GOAWAY, body);
 }

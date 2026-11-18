@@ -4,7 +4,7 @@
  * subscribes".
  */
 import { createMoqtDuplexSession } from '@caprid/moq-core';
-import { type RelaySubscriber, relaySubscriberOf, SUBSCRIBER_SETUP_OPTIONS } from './connect.js';
+import { type RelaySubscriber, relaySubscriberOf, SESSION_SETUP_OPTIONS } from './connect.js';
 import { assertTimeoutMs, type ConnectRelaySubscriberOptions, openRelaySession } from './connect-session.js';
 import { RelayError } from './errors.js';
 import { createPublishHost, type RelayPublication } from './publish.js';
@@ -51,7 +51,7 @@ export async function connectRelay(options: ConnectRelaySessionOptions): Promise
     const duplex = createMoqtDuplexSession(transport, {
       subscriber: {
         implementationName: '@caprid/relay',
-        setupOptions: [...setupOptions, ...SUBSCRIBER_SETUP_OPTIONS],
+        setupOptions: [...setupOptions, ...SESSION_SETUP_OPTIONS],
         requestTimeoutMs: options.requestTimeoutMs,
         callbacks,
       },

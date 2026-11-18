@@ -1198,8 +1198,10 @@ publishes. MOQT gives a session no fixed role, and moq-relay serves both directi
 when the token grants both: it solicits the session's announces from the token's publish grant
 whatever the session sends in SETUP, and routes its subscriptions as for any subscriber.
 
-- **One session.** The connection sends one SETUP, with the subscriber's options (SOLICIT,
-  ACTIVE_COUNT). The relay's requests to it, the solicitations that carry its announces and the
+- **One session.** The connection sends one SETUP. It declares SOLICIT, as a subscriber
+  connection does, but not MoQ Active Count: that would oblige the publishing side to count the
+  NAMESPACE entries it answers the relay's solicitations with, which it does not do. Its discovery
+  therefore loads by the timing rules, as against every deployed moq-relay. The relay's requests to it, the solicitations that carry its announces and the
   SUBSCRIBEs for its tracks, are served by the publishing side; its own requests and the data they
   receive are the subscribing side's. One token covers both, so it must grant every namespace the
   connection publishes and every one it subscribes to.

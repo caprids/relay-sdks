@@ -165,12 +165,12 @@ describe('createMoqtDuplexSession', () => {
       publisher: { callbacks: { onGoaway: publisherGoaways } },
     });
 
-    await control.write(encodeGoaway(1500));
+    await control.write(encodeGoaway(1500, 'https://relay.example.com/next'));
     await vi.waitFor(() => {
       expect(subscriberGoaways).toHaveBeenCalledTimes(1);
       expect(publisherGoaways).toHaveBeenCalledTimes(1);
     });
-    expect(publisherGoaways.mock.calls[0]![0]).toMatchObject({ timeout: 1500 });
+    expect(publisherGoaways.mock.calls[0]![0]).toEqual(subscriberGoaways.mock.calls[0]![0]);
     session.subscriber.destroy();
   });
 

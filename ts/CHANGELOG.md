@@ -14,7 +14,8 @@ each section says what changed and what to do about it. How to cut a release is 
   The relay does not route a connection's own announcements back to it: its discovery leaves them out, and a
   subscribe to its own track is refused. `@caprid/relay/node` exports it over native QUIC. `connectRelay` was the
   subscriber's name before it became `connectRelaySubscriber`; it now means a connection that does both (see
-  spec/vocabulary.md, "Connections"). `connectRelayPublisher` behaves as before.
+  spec/vocabulary.md, "Connections"). `connectRelayPublisher` behaves as before. The connection does not declare MoQ
+  Active Count, so its `namespaceEvents` loads by the timing rules, as against every deployed moq-relay.
 - `@caprid/moq-core`: `createMoqtDuplexSession(transport, config)` runs the subscribe and publish drivers on one
   transport. `MoqtPublishSession` announces several namespaces: `announce()` now adds a namespace instead of replacing
   the one announced, `withdraw(namespace)` sends NAMESPACE_DONE, and `isSolicited(namespace)` reports coverage for one

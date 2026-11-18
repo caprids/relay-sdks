@@ -224,7 +224,7 @@ export function createMoqtDuplexSession(
       },
       onGoaway: (goaway) => {
         try {
-          toPublisherControl.enqueue(encodeGoaway(goaway.timeout));
+          toPublisherControl.enqueue(encodeGoaway(goaway.timeout, goaway.newSessionUri));
         } catch {
           // The publish driver's control stream is gone with the session.
         }

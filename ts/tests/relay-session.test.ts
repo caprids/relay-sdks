@@ -113,9 +113,10 @@ describe('connectRelay', () => {
     );
     await vi.waitFor(() => expect(payloads).toEqual(['hello']));
     expect(seen.subscribes).toEqual(['room/p/bob:video']);
-    expect(seen.setupOptions.map(({ type }) => type)).toEqual(
-      expect.arrayContaining([SETUP_OPTION.SOLICIT, SETUP_OPTION.ACTIVE_COUNT]),
-    );
+    // SOLICIT, but not ACTIVE_COUNT: the publishing side sends no counts.
+    const declared = seen.setupOptions.map(({ type }) => type);
+    expect(declared).toContain(SETUP_OPTION.SOLICIT);
+    expect(declared).not.toContain(SETUP_OPTION.ACTIVE_COUNT);
   });
 
   it('announces several namespaces and closes one publication without the other', async () => {
