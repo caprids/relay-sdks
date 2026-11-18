@@ -16,6 +16,7 @@ import {
   deferred,
   type FakePublisher,
   type FakeSubscriber,
+  type FakeSubscription,
   fakePublisher,
   fakeSubscriber,
   until,
@@ -2072,6 +2073,85 @@ describe('rotation before the credential expires (#261)', () => {
     connections[1]!.subscriptions[0]!.object(4); // already delivered
     connections[1]!.subscriptions[0]!.object(5);
     expect(seen).toEqual(['subscribed', 'object 4', 'object 5']);
+  });
+
+  describe('a rotation whose old connection delivers every group first (#430)', () => {
+    const sendEnd = (subscription: FakeSubscription, groupId: number) =>
+      subscription.handlers.onSubgroupEnd?.({ groupId, subgroupId: 0, endOfGroup: true });
+    const sendGroup = (subscription: FakeSubscription, groupId: number) => {
+      subscription.object(groupId);
+      sendEnd(subscription, groupId);
+    };
+
+    async function rotated() {
+      const { subscriber, connections, statuses } = await subscribers();
+      const seen: string[] = [];
+      subscriber.want(
+        'video',
+        { namespace: ['room'], track: 'video', retry: fast },
+        {
+          onSubscribed: () => seen.push('subscribed'),
+          onObject: (object) => seen.push(`object ${object.groupId}.${object.objectId}`),
+          onSubgroupEnd: (info) => seen.push(`end ${info.groupId}`),
+          onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+          onSwitched: () => seen.push('switched'),
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const old = connections[0]!.subscriptions[0]!;
+      old.accept();
+      sendGroup(old, 1);
+      let oldClosed = false;
+      void connections[0]!.closed.then(() => {
+        oldClosed = true;
+      });
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe on the new connection');
+      const replacement = connections[1]!.subscriptions[0]!;
+      replacement.accept();
+      return { connections, statuses, seen, old, replacement, oldClosed: () => oldClosed };
+    }
+
+    it('closes the old connection well before the overlap, with nothing repeated or missing', async () => {
+      const { connections, statuses, seen, old, replacement, oldClosed } = await rotated();
+      for (const groupId of [2, 3, 4]) {
+        sendGroup(old, groupId);
+        sendGroup(replacement, groupId);
+      }
+      await until(oldClosed, 'old connection closed well within the 10 s overlap', 1_000);
+      sendGroup(replacement, 5);
+      expect(seen).toEqual([
+        'subscribed',
+        ...[1, 2, 3, 4, 5].flatMap((groupId) => [`object ${groupId}.0`, `end ${groupId}`]),
+      ]);
+      expect(statuses).toEqual(['live']);
+      expect(connections).toHaveLength(2);
+    });
+
+    it('skips what the old connection delivered when the replacement is groups behind it', async () => {
+      const { seen, old, replacement, oldClosed } = await rotated();
+      sendGroup(old, 2);
+      sendGroup(old, 3);
+      old.object(4);
+      sendGroup(replacement, 2);
+      await until(oldClosed, 'old connection closed at the first object', 1_000);
+      sendGroup(replacement, 3);
+      replacement.object(4);
+      replacement.object(4, 1);
+      sendEnd(replacement, 4);
+      expect(seen).toEqual([
+        'subscribed',
+        'object 1.0',
+        'end 1',
+        'object 2.0',
+        'end 2',
+        'object 3.0',
+        'end 3',
+        'object 4.0',
+        'object 4.1',
+        'end 4',
+      ]);
+    });
   });
 
   it('rotates the subscriber on its own before the credential expires', async () => {

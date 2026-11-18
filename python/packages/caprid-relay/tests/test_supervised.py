@@ -2046,6 +2046,87 @@ async def test_rotation_carries_on_to_the_replacement_when_the_old_connection_en
     assert seen == ["subscribed", "object 4", "object 5"]
 
 
+def _send_end(subscription: FakeSubscription, group_id: int) -> None:
+    assert subscription.handlers.on_subgroup_end is not None
+    subscription.handlers.on_subgroup_end(SubgroupEnd(group_id=group_id, subgroup_id=0, end_of_group=True))
+
+
+def _send_group(subscription: FakeSubscription, group_id: int) -> None:
+    subscription.send_object(group_id)
+    _send_end(subscription, group_id)
+
+
+async def _rotated_want(
+    cleanup: list[Callable[[], object]],
+) -> tuple[ExpiringSubscribers, list[str], FakeSubscription, FakeSubscription]:
+    """A want rotated to a second connection (#430): what it reported, the old subscription and the replacement."""
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    subscriber.want(
+        "video",
+        ["room"],
+        "video",
+        WantHandlers(
+            on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
+            on_object=lambda obj: seen.append(f"object {obj.group_id}.{obj.object_id}"),
+            on_subgroup_end=lambda info: seen.append(f"end {info.group_id}"),
+            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+            on_switched=lambda _info: seen.append("switched"),
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    _send_group(old, 1)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    return s, seen, old, replacement
+
+
+async def test_rotation_closes_the_old_connection_well_before_the_overlap_when_it_delivers_every_group_first(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    s, seen, old, replacement = await _rotated_want(cleanup)
+    for group_id in (2, 3, 4):
+        _send_group(old, group_id)
+        _send_group(replacement, group_id)
+    await until(lambda: s.first.closed.done(), "old connection closed well within the 10 s overlap", timeout=1)
+    _send_group(replacement, 5)
+    assert seen == ["subscribed", *(event for g in range(1, 6) for event in (f"object {g}.0", f"end {g}"))]
+    assert s.statuses == ["live"]
+    assert len(s.connections) == 2
+
+
+async def test_rotation_skips_what_the_old_connection_delivered_when_the_replacement_is_groups_behind_it(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    s, seen, old, replacement = await _rotated_want(cleanup)
+    _send_group(old, 2)
+    _send_group(old, 3)
+    old.send_object(4)
+    _send_group(replacement, 2)
+    await until(lambda: s.first.closed.done(), "old connection closed at the first object", timeout=1)
+    _send_group(replacement, 3)
+    replacement.send_object(4)
+    replacement.send_object(4, 1)
+    _send_end(replacement, 4)
+    assert seen == [
+        "subscribed",
+        "object 1.0",
+        "end 1",
+        "object 2.0",
+        "end 2",
+        "object 3.0",
+        "end 3",
+        "object 4.0",
+        "object 4.1",
+        "end 4",
+    ]
+
+
 async def test_subscriber_rotates_on_its_own_before_the_credential_expires(
     cleanup: list[Callable[[], object]],
 ) -> None:
