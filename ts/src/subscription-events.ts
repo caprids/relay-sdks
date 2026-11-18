@@ -56,8 +56,11 @@ export function createSubscriptionEvents(
 
 /** Where a producer delivers into a bounded iterator. */
 export interface BoundedEventSink<E> {
-  /** One event; past the capacity the iterator ends with `SubscriptionOverflowError`. */
-  event(event: E): void;
+  /**
+   * One event; past the capacity the iterator ends with `SubscriptionOverflowError`. `counted: false` queues an event
+   * the producer yields at most once, which takes no capacity.
+   */
+  event(event: E, counted?: boolean): void;
   /**
    * The producer ended: `undefined` finishes the iterator cleanly, anything else is thrown from `next()`. Either way
    * the queue is discarded.
@@ -86,7 +89,9 @@ export function createBoundedEvents<E>(
 ): BoundedEvents<E> {
   if (typeof capacity !== 'number') throw new TypeError('capacity must be a number');
   if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new RangeError('capacity must be a positive integer');
-  let queue: E[] = [];
+  // Each event with whether it takes capacity; `counted` is how many queued events do.
+  let queue: { event: E; counted: boolean }[] = [];
+  let counted = 0;
   let pending: { resolve: (result: IteratorResult<E>) => void; reject: (error: unknown) => void } | undefined;
   let ended = false;
   let failure: unknown;
@@ -96,6 +101,7 @@ export function createBoundedEvents<E>(
     ended = true;
     failure = error;
     queue = [];
+    counted = 0;
     signal?.removeEventListener('abort', abort);
     request?.cancel(error);
     const read = pending;
@@ -105,14 +111,17 @@ export function createBoundedEvents<E>(
   };
   const abort = () => finish(signal?.reason ?? new DOMException('Subscription aborted', 'AbortError'));
   const sink: BoundedEventSink<E> = {
-    event(event) {
+    event(event, takesCapacity = true) {
       if (ended) return;
       if (pending) {
         const read = pending;
         pending = undefined;
         read.resolve({ done: false, value: event });
-      } else if (queue.length === capacity) finish(new SubscriptionOverflowError());
-      else queue.push(event);
+      } else if (takesCapacity && counted === capacity) finish(new SubscriptionOverflowError());
+      else {
+        queue.push({ event, counted: takesCapacity });
+        if (takesCapacity) counted += 1;
+      }
     },
     ended(error) {
       // An ending this iterator started (close, return, abort, overflow) echoes back here.
@@ -123,8 +132,10 @@ export function createBoundedEvents<E>(
       if (ended) return;
       // A pending read only exists while the queue is empty, so finishing settles it as done.
       const rest = queue;
+      const restCounted = counted;
       finish();
       queue = rest;
+      counted = restCounted;
     },
   };
   if (signal?.aborted) abort();
@@ -147,7 +158,11 @@ export function createBoundedEvents<E>(
     next() {
       if (pending) return Promise.reject(new Error('Only one pending subscription read is supported'));
       // Events left by a clean completion are read before the end.
-      if (queue.length > 0) return Promise.resolve({ done: false, value: queue.shift() as E });
+      const next = queue.shift();
+      if (next) {
+        if (next.counted) counted -= 1;
+        return Promise.resolve({ done: false, value: next.event });
+      }
       if (ended)
         return failure === undefined ? Promise.resolve({ done: true, value: undefined }) : Promise.reject(failure);
       return new Promise((resolve, reject) => {
@@ -157,10 +172,12 @@ export function createBoundedEvents<E>(
     close: () => {
       finish();
       queue = [];
+      counted = 0;
     },
     async return() {
       finish();
       queue = [];
+      counted = 0;
       return { done: true, value: undefined };
     },
   };

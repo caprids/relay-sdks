@@ -397,6 +397,38 @@ describe("'loaded' with MoQ Active Count", () => {
     expect(seen).toEqual([announced('room', 'alice'), announced('room', 'bob'), LOADED, announced('room', 'carol')]);
   });
 
+  it("yields 'loaded' after a snapshot that fills the capacity, and still bounds the namespaces", async () => {
+    const outcome = (events: NamespaceEvents) =>
+      events.next().then(
+        (result) => result.value,
+        (error: unknown) => error,
+      );
+    const { fake, connection } = await setup({ serverSetup: [ACTIVE_COUNT] });
+    const full = connection.namespaceEvents({ prefix: ['room'], capacity: 2 });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk({ activeCount: 2 }));
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespace(['bob']));
+    await delivered();
+    expect([await outcome(full), await outcome(full), await outcome(full)]).toEqual([
+      announced('room', 'alice'),
+      announced('room', 'bob'),
+      LOADED,
+    ]);
+    full.close();
+
+    const over = connection.namespaceEvents({ prefix: ['room'], capacity: 2 });
+    const next = await fake.nextRequestStream();
+    await next.firstMessage;
+    await next.send(encodeRequestOk({ activeCount: 2 }));
+    await next.send(encodeNamespace(['alice']));
+    await next.send(encodeNamespace(['bob']));
+    await next.send(encodeNamespace(['carol']));
+    await delivered();
+    expect(await outcome(over)).toBeInstanceOf(SubscriptionOverflowError);
+  });
+
   it("yields 'loaded' at once on a count of 0", async () => {
     const { fake, connection } = await setup({ serverSetup: [ACTIVE_COUNT] });
     const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
