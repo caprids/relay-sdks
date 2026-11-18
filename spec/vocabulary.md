@@ -29,6 +29,7 @@ without a row here is a bug.
 | Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` (`NamespaceEventOptions`) returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
+| The relay's initial snapshot of a namespace request is complete | `{ type: 'loaded' }`; `SNAPSHOT_QUIET_MS`, `SNAPSHOT_LIMIT_MS` | not yet (TypeScript only) |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` (`RegisterTrackOptions`, each track property a `PublishProperty`) returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
@@ -66,6 +67,9 @@ without a row here is a bug.
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
+| Follow the roots publishing under a prefix, across reconnects and rotations | `subscriber.publishingRoots(PublishingRootsOptions, PublishingRootsHandlers)` (`prefix`) returns `PublishingRoots` (`loaded`, `present`, `close()`) | not yet (TypeScript only) |
+| One root publishing under a prefix | `PublishingRoot` (`id`, `namespace`) | not yet (TypeScript only) |
+| A publishing-roots view loaded, or roots were added or removed | `onChanged(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `onError(error)` | not yet (TypeScript only) |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | `subscriber.catch_up(key)`; `on_restarted` reason `"catch-up"` |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
@@ -77,7 +81,9 @@ without a row here is a bug.
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
-returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb.
+returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb. A
+standing request reports through synchronous handlers instead, as `subscribe`, `want` and
+`publishingRoots` do.
 
 ## Connection roles: `connectRelaySubscriber`, `connectRelayPublisher`
 
@@ -290,11 +296,50 @@ The iterator ends with the subscription error classes (`SubscriptionRequestError
 subscription in the draft's terms, and a second set of classes with the same meanings would only
 add names. The prefix is a namespace prefix, matched field by field, never a string prefix.
 
+`loaded` marks the end of the relay's initial snapshot: the namespaces announced when the request was
+accepted have all been yielded, so an empty set means nobody is there, not that nothing has arrived.
+It is an event in the stream, not a promise, so it is ordered with the entries it ends. Not adopted:
+`synced` (MoQ Active Count's word, which promises an exact count that the quiet-window estimate
+cannot); `ready` (the connection's word for its SETUP); `snapshot` (it names what came before the
+marker, not the marker).
+
 Not adopted: `announcements()` (CONTEXT.md keeps "announcement" out because it names the act and
 the relay's state interchangeably); `watchNamespaces()` (a verb, where every other iterator is named
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
+
+## Publishing roots: `publishingRoots`, `PublishingRoot`, `onChanged`
+
+`subscriber.publishingRoots({ prefix }, { onChanged })` reports the roots that are publishing now
+under a prefix ([behavior.md](behavior.md#publishing-roots)). A root is the namespace one field
+below the prefix that a publisher announces at or one field under, as CONTEXT.md defines it, and
+publishing means announced, not necessarily sending objects. The name says what the relay knows, a root with
+something announced, and claims nothing about who is behind it. The option is `prefix`, as on
+`namespaceEvents`. The call is a noun for what it keeps, as `want` is, because it is a standing
+request on the supervisor, not a single request: it outlives connections and reports through
+synchronous handlers, as a want does. `onChanged` takes one `PublishingRootsChange` (`added`,
+`removed`, `present`, `initial`), so the load and every later change go through one handler: a
+caller that acts on "this root is publishing" has one place to do it, and cannot forget the roots
+already there. `added` and `removed` describe a set changing, and leave `joined` and `left` to the
+presence helper, whose roster is people. `present` and `loaded` on the returned `PublishingRoots`
+are state, read as properties.
+
+Names considered for the call and not adopted: `members` (room-coupled, and `PresenceMember` in the
+presence helper is a different member, one with a document); `peers` (rejected by the operator);
+`publishers` (reads as the `RelayPublisher` and `SupervisedPublisher` handles); `publisherRoots`
+(asserts one publisher per entry, where a root is whatever announced under it); `children` and
+`nodes` (too generic); `feeds` (rejected); `announcers` (the runner-up: accurate, but it names the
+actor where the entries are namespaces).
+
+Also not adopted: an iterator returning coalesced changes (it suits a consumer that awaits per root,
+but it reads the set one async hop behind the want handlers it would drive, and the supervised
+layer reports through handlers); separate `onLoaded`, `onAdded` and `onRemoved` (two entry points
+for one fact, and forgetting `onLoaded` silently drops every root already there); `presence` (the
+per-participant document a later helper adds on top); `roster` (the application's list, which may
+hold more than the relay knows); `watch…()` and `follow…()` (CONTEXT.md lists "watch" and "follow"
+among the words to avoid for a standing request); a `depth` option (no caller needs a root deeper
+than one field, and it can be added without breaking this shape).
 
 ## Room-rooted endpoints: `roomEndpoint`
 

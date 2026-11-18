@@ -5,6 +5,42 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
+  are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
+  announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field
+  below a root is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
+  first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
+  `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
+  only the roots added or removed meanwhile, in one call. A root whose removal was already pending, or that the old
+  connection still showed, is removed in a later call once the new discovery has shown it nothing for 100 ms. An
+  application can build a room roster with no roster server.
+- `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
+  between every want that follows generations, every want waiting for its namespace to be announced again (0.4.0),
+  and every publishing-roots view. A want under another want's root or a view's prefix no longer fails with
+  `PREFIX_OVERLAP`, and a view refused on its prefix leaves the wants under it alone. A want waiting on a fixed
+  namespace is still woken by its announcement when a followed root or a publishing-roots view covers the namespace;
+  before, a followed root closed its watch and the want waited out the whole backoff. Nothing to change in an
+  application.
+- `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
+  relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
+  (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported. `loaded`
+  takes no `capacity`, so a snapshot that fills the queue still loads. **Breaking:** `NamespaceEvent` is now a union, and `loaded` has no `namespace`. TypeScript that reads
+  `event.namespace` without checking `event.type` no longer compiles, and JavaScript gets `undefined` on `loaded`; check
+  `event.type` first.
+- `@caprid/relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
+  error. It did when the stream failed before the connection's end was seen, which made a lost connection read as
+  everyone leaving. Every error ending still means every namespace is withdrawn, and a clean end still yields
+  `unannounced` for each one first. `@caprid/moq-core`'s `onNamespaceDone` gains a second argument,
+  `{ requestEnded }`, true for the withdrawals the session reports itself when a request ends.
+- `@caprid/moq-core`: MoQ Active Count (draft-lcurley-moq-active-count): `SETUP_OPTION.ACTIVE_COUNT`,
+  `PARAMETER_TYPE.ACTIVE_COUNT` and `MessageParameters.activeCount` (decoded only on REQUEST_OK). A session that
+  declared the option and whose peer declared it too passes the count to `NamespaceSubscriptionHandlers.onOk({
+  activeCount })` and calls the new `onSynced()` after the counted NAMESPACE messages; the session closes with
+  PROTOCOL_VIOLATION when the peer breaks the extension's rules. `@caprid/relay`'s subscriber connection declares it.
+  No deployed moq-relay does, so nothing changes against them.
+
 ## 0.4.1
 
 - `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a

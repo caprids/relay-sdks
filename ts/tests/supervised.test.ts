@@ -593,7 +593,7 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
     expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
   });
 
-  it('lets an overlapping root replace one whose last want just went away', async () => {
+  it('serves a want on a narrower root from the request its last want left behind', async () => {
     const { subscriber, connections } = await start();
     const errors: unknown[] = [];
     subscriber.want('a', { namespace: ['room'], track: 'v', generations: true }, { onError: (e) => errors.push(e) });
@@ -603,8 +603,12 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
       { namespace: ['room', 'alice'], track: 'v', generations: true },
       { onError: (e) => errors.push(e) },
     );
-    await until(() => connections[0]!.discoveries.length === 2, 'second discovery');
-    expect(connections[0]!.discoveries[0]!.closed).toBe(true);
+    const generation = newGeneration();
+    connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice', generation] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe under the new root');
+    expect(connections[0]!.subscriptions[0]!.options.namespace).toEqual(['room', 'alice', generation]);
+    expect(connections[0]!.discoveries).toHaveLength(1);
+    expect(connections[0]!.discoveries[0]!.closed).toBe(false);
     expect(errors).toEqual([]);
   });
 
@@ -1207,7 +1211,7 @@ describe('waking on the namespace announced again', () => {
     await until(() => of('b').length === 2, 'b woken by a later return');
   });
 
-  it('closes an unused overlapping watch kept for reuse rather than go without one', async () => {
+  it('waits on the watch kept for reuse when it covers the namespace, rather than go without one', async () => {
     const { subscriber, connections } = await start();
     const fake = () => connections[0]!;
     const of = (track: string) => fake().subscriptions.filter((s) => s.options.track === track);
@@ -1225,9 +1229,11 @@ describe('waking on the namespace announced again', () => {
     await until(() => of('y').length === 1, 'y subscribed');
     of('y')[0]!.accept();
     done(of('y')[0]!, 0);
-    await until(() => fake().discoveries.length === 2, 'y watches its namespace');
-    expect(fake().discoveries[0]!.closed).toBe(true);
-    expect(fake().discoveries[1]!.prefix).toEqual(['room', 'alice']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake().discoveries).toHaveLength(1);
+    expect(fake().discoveries[0]!.closed).toBe(false);
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => of('y').length === 2, 'y woken by the shared watch');
   });
 
   it('falls back to the backoff when the watch fails', async () => {
@@ -1242,7 +1248,7 @@ describe('waking on the namespace announced again', () => {
     await until(() => fake().subscriptions.length === 2, 'resubscribed after the backoff');
   });
 
-  it("gives way to a followed root's discovery: the overlapping watch closes and that want is not refused", async () => {
+  it("moves under a followed root's discovery: the overlapping watch is replaced and that want still wakes", async () => {
     const { subscriber, connections } = await start();
     const errors: unknown[] = [];
     subscriber.want('v', { namespace: ['room', 'alice'], track: 'v', retry: slow });
@@ -1260,6 +1266,49 @@ describe('waking on the namespace announced again', () => {
     expect(fake().discoveries[0]!.closed).toBe(true);
     expect(fake().discoveries[1]!.prefix).toEqual(['room']);
     expect(errors).toEqual([]);
+    const v = () => fake().subscriptions.filter((s) => s.options.track === 'v');
+    fake().discoveries[1]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => v().length === 2, 'v woken through the root discovery');
+  });
+
+  it("shares one request with a publishing-roots view over the namespace: the view and the want's wake both work", async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const changes: { added: string[]; removed: string[] }[] = [];
+    const errors: unknown[] = [];
+    subscriber.publishingRoots(
+      { prefix: ['room'] },
+      {
+        onChanged: (change) =>
+          changes.push({ added: change.added.map((m) => m.id), removed: change.removed.map((m) => m.id) }),
+        onError: (error) => errors.push(error),
+      },
+    );
+    await until(() => fake().discoveries.length === 1, 'the view discovers the root');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    fake().discoveries[0]!.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'the view loads');
+    subscriber.want('v', { namespace: ['room', 'alice'], track: 'v', retry: slow });
+    const v = () => fake().subscriptions.filter((s) => s.options.track === 'v');
+    await until(() => v().length === 1, 'subscribed');
+    v()[0]!.accept();
+    v()[0]!.done(); // TRACK_ENDED
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake().discoveries).toHaveLength(1);
+    expect(v()).toHaveLength(1);
+    fake().discoveries[0]!.push({ type: 'unannounced', namespace: ['room', 'alice'] });
+    await until(() => changes.length === 2, 'alice leaves');
+    expect(v()).toHaveLength(1);
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => v().length === 2, 'v woken by the return');
+    await until(() => changes.length === 3, 'alice returns');
+    expect(changes).toEqual([
+      { added: ['alice'], removed: [] },
+      { added: [], removed: ['alice'] },
+      { added: ['alice'], removed: [] },
+    ]);
+    expect(errors).toEqual([]);
+    expect(fake().discoveries[0]!.closed).toBe(false);
   });
 });
 

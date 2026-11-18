@@ -20,6 +20,8 @@ describe('public vocabulary', () => {
     expect(Object.keys(relay).sort()).toEqual([
       'DEFAULT_ENDPOINT',
       'RelayError',
+      'SNAPSHOT_LIMIT_MS',
+      'SNAPSHOT_QUIET_MS',
       'SubscriptionConnectionClosedError',
       'SubscriptionOverflowError',
       'SubscriptionRequestError',

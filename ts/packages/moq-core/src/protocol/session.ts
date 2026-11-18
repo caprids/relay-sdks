@@ -285,8 +285,18 @@ export interface MoqtSubscribeNamespaceOptions {
  * suffix relative to the requested prefix; an empty suffix is the prefix itself.
  */
 export interface NamespaceSubscriptionHandlers {
-  /** REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream. */
-  onOk?(): void;
+  /**
+   * REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream. `activeCount` is MoQ
+   * Active Count's promise, how many NAMESPACE messages come before the first change; absent when the session did not
+   * negotiate the extension.
+   */
+  onOk?(info: { activeCount?: number }): void;
+  /**
+   * MoQ Active Count only: the `activeCount` NAMESPACE messages REQUEST_OK promised have all been passed to
+   * `onNamespace`, repeats included, so the peer's view as of its answer is complete. Called right after the last of
+   * them, or right after `onOk` on a count of 0. Never called when `onOk` had no `activeCount`.
+   */
+  onSynced?(): void;
   /** The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
   /**
@@ -296,10 +306,10 @@ export interface NamespaceSubscriptionHandlers {
   onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
   /**
    * NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available. Also called for each namespace still
-   * active when the accepted request ends (§9.15), just before `onEnd`. One for a namespace never named closes the
-   * session with PROTOCOL_VIOLATION (§9.15).
+   * active when the accepted request ends (§9.15), just before `onEnd`, with `requestEnded` true. One for a namespace
+   * never named closes the session with PROTOCOL_VIOLATION (§9.15).
    */
-  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
+  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace, info: { requestEnded: boolean }): void;
   /**
    * The accepted request ended: the peer finished its side of the stream (no `error`), or the stream failed (`error`
    * is the transport's). No entry follows. Not called for a local cancel or the session ending.
@@ -512,6 +522,48 @@ interface NamespaceSubscriptionRecord extends RequestRecordBase {
   accepted?: boolean;
   /** Suffixes named by NAMESPACE and not yet withdrawn, keyed by their JSON. */
   active: Map<string, TrackNamespace>;
+  owed: number;
+}
+
+function declares(options: readonly KeyValuePair[], type: number): boolean {
+  return options.some((option) => option.type === type);
+}
+
+type RequestKind = 'subscribe' | 'fetch' | 'track-status' | 'subscribe-namespace';
+
+function activeCountViolation(
+  answers: RequestKind,
+  negotiated: boolean,
+  parameters: MessageParameters
+): string | undefined {
+  const carried = parameters.activeCount !== undefined;
+
+  if (answers !== 'subscribe-namespace') {
+    return carried ? `ACTIVE_COUNT on a REQUEST_OK answering ${answers}` : undefined;
+  }
+
+  if (negotiated && !carried) return 'REQUEST_OK omits ACTIVE_COUNT, which the session negotiated';
+  if (!negotiated && carried) return 'REQUEST_OK carries ACTIVE_COUNT, which the session did not negotiate';
+  return undefined;
+}
+
+type CountedInput = 'namespace' | 'namespace-done' | 'goaway' | 'fin' | 'stream-failed';
+
+function countedStep(owed: number, input: CountedInput): { owed: number; synced: boolean } | { violation: string } {
+  if (owed === 0) return { owed, synced: false };
+
+  switch (input) {
+    case 'namespace':
+      return { owed: owed - 1, synced: owed === 1 };
+    case 'namespace-done':
+      return { violation: 'NAMESPACE_DONE inside the ACTIVE_COUNT set' };
+    case 'goaway':
+      return { violation: 'GOAWAY inside the ACTIVE_COUNT set' };
+    case 'fin':
+      return { violation: 'subscribe-namespace stream finished inside the ACTIVE_COUNT set' };
+    case 'stream-failed':
+      return { owed, synced: false };
+  }
 }
 
 interface AliasWaiter {
@@ -549,6 +601,7 @@ class MoqtSessionImpl implements MoqtSession {
   #receivedServerSetup = false;
   /** The server's SETUP declared SETUP_OPTION.MAX_AGE. */
   #maxAgeSupported = false;
+  #activeCountNegotiated = false;
   #receivedControlGoaway = false;
   #destroyed = false;
 
@@ -762,6 +815,7 @@ class MoqtSessionImpl implements MoqtSession {
     );
 
     void this.#openRequest(
+      'subscribe',
       message,
       record,
       (msg) => this.#handleSubscriptionMessage(record, msg),
@@ -811,6 +865,7 @@ class MoqtSessionImpl implements MoqtSession {
     };
 
     void this.#openRequest(
+      'fetch',
       encodeFetch(request, this.#protocol),
       record,
       (msg) => this.#handleFetchMessage(record, msg),
@@ -846,6 +901,7 @@ class MoqtSessionImpl implements MoqtSession {
     );
 
     void this.#openRequest(
+      'track-status',
       message,
       record,
       (msg) => {
@@ -879,6 +935,7 @@ class MoqtSessionImpl implements MoqtSession {
       cancelled: false,
       settled: false,
       active: new Map(),
+      owed: 0,
     };
     const message = encodeSubscribeNamespace(
       {
@@ -893,17 +950,19 @@ class MoqtSessionImpl implements MoqtSession {
 
     // Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
     const end = (error?: unknown) => {
+      if (this.#count(record, error === undefined ? 'fin' : 'stream-failed') === undefined) return;
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
       // A failed stream is dropped here: session teardown only reaches the records it still holds.
       if (error !== undefined) record.stream?.cancel(error);
       // §9.15: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
       const active = [...record.active.values()];
       record.active.clear();
-      for (const suffix of active) handlers.onNamespaceDone?.(suffix);
+      for (const suffix of active) handlers.onNamespaceDone?.(suffix, { requestEnded: true });
       handlers.onEnd?.(error === undefined ? {} : { error });
     };
 
     void this.#openRequest(
+      'subscribe-namespace',
       message,
       record,
       (msg) => this.#handleNamespaceMessage(record, msg),
@@ -945,6 +1004,7 @@ class MoqtSessionImpl implements MoqtSession {
    * are ignored, except that a FIN calls `onEnd` and a stream error calls `onSettledError` when given.
    */
   async #openRequest(
+    kind: RequestKind,
     message: Uint8Array,
     record: RequestRecordBase,
     onMessage: (message: ControlMessage) => void,
@@ -991,7 +1051,15 @@ class MoqtSessionImpl implements MoqtSession {
       stream,
       message,
       {
-        onMessage,
+        onMessage: (msg) => {
+          const violation =
+            msg.kind === 'request-ok'
+              ? activeCountViolation(kind, this.#activeCountNegotiated, msg.parameters)
+              : undefined;
+
+          if (violation === undefined) onMessage(msg);
+          else this.#fatal(new MoqtProtocolError(violation));
+        },
         onFin: () => {
           if (!record.settled) {
             fail(streamFailure('request stream closed before a response'));
@@ -1142,7 +1210,11 @@ class MoqtSessionImpl implements MoqtSession {
 
         this.#settleRequest(record);
         record.accepted = true;
-        record.handlers.onOk?.();
+        record.owed = message.parameters.activeCount ?? 0;
+        record.handlers.onOk?.(
+          message.parameters.activeCount === undefined ? {} : { activeCount: message.parameters.activeCount }
+        );
+        if (message.parameters.activeCount === 0 && !record.cancelled) record.handlers.onSynced?.();
         break;
       case 'request-error':
         // After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
@@ -1157,7 +1229,7 @@ class MoqtSessionImpl implements MoqtSession {
         record.stream?.finWrite().catch(() => {});
         break;
       case 'namespace':
-      case 'namespace-done':
+      case 'namespace-done': {
         // Entries follow REQUEST_OK (§9.15); one before it, or after REQUEST_ERROR, is outside the
         // stream's grammar.
         if (!record.accepted) {
@@ -1167,11 +1239,15 @@ class MoqtSessionImpl implements MoqtSession {
           return;
         }
 
+        const synced = this.#count(record, message.kind);
+        if (synced === undefined) return;
+
         if (message.kind === 'namespace') {
           record.active.set(JSON.stringify(message.trackNamespaceSuffix), message.trackNamespaceSuffix);
           record.handlers.onNamespace?.(message.trackNamespaceSuffix);
+          if (synced && !record.cancelled) record.handlers.onSynced?.();
         } else if (record.active.delete(JSON.stringify(message.trackNamespaceSuffix))) {
-          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix, { requestEnded: false });
         } else {
           // §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
           this.#fatal(
@@ -1179,12 +1255,26 @@ class MoqtSessionImpl implements MoqtSession {
           );
         }
         break;
+      }
       case 'goaway':
+        if (this.#count(record, 'goaway') === undefined) return;
         record.handlers.onGoaway?.(message);
         break;
       default:
         this.#fatal(new MoqtProtocolError(`unexpected ${message.kind} on a subscribe-namespace request stream`));
     }
+  }
+
+  #count(record: NamespaceSubscriptionRecord, input: CountedInput): boolean | undefined {
+    const step = countedStep(record.owed, input);
+
+    if ('violation' in step) {
+      this.#fatal(new MoqtProtocolError(step.violation));
+      return undefined;
+    }
+
+    record.owed = step.owed;
+    return step.synced;
   }
 
   #cancelSubscription(record: SubscriptionRecord, reason?: unknown): void {
@@ -1300,7 +1390,10 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#receivedServerSetup = true;
     // The option's value is reserved and ignored on receipt: its presence is the declaration.
-    this.#maxAgeSupported = setup.options.some((option) => option.type === SETUP_OPTION.MAX_AGE);
+    this.#maxAgeSupported = declares(setup.options, SETUP_OPTION.MAX_AGE);
+    this.#activeCountNegotiated =
+      declares(this.#config.setupOptions ?? [], SETUP_OPTION.ACTIVE_COUNT) &&
+      declares(setup.options, SETUP_OPTION.ACTIVE_COUNT);
     this.#resolveReady();
     this.#callbacks.onReady?.(setup.options);
 

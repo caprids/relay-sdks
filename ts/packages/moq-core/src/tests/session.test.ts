@@ -9,6 +9,7 @@ import {
   ControlMessageDeframer,
   decodeControlMessage,
   encodeFetchOk,
+  encodeGoaway,
   encodeNamespace,
   encodeNamespaceDone,
   encodePublish,
@@ -1342,7 +1343,7 @@ describe('createMoqtSession', () => {
         harness.session.subscribeNamespace(
           { trackNamespacePrefix: ['room'] },
           {
-            onNamespaceDone: (suffix) => calls.push(['done', suffix]),
+            onNamespaceDone: (suffix, { requestEnded }) => calls.push(['done', suffix, requestEnded]),
             onEnd: (info) => calls.push(['end', 'error' in info]),
           }
         );
@@ -1358,8 +1359,8 @@ describe('createMoqtSession', () => {
 
         await vi.waitFor(() => expect(calls).toHaveLength(3));
         expect(calls).toEqual([
-          ['done', ['bob']],
-          ['done', ['alice']],
+          ['done', ['bob'], false],
+          ['done', ['alice'], true],
           ['end', ending === 'reset'],
         ]);
         harness.session.destroy();
@@ -1904,5 +1905,189 @@ describe('subscriber max age (MAX_AGE)', () => {
     expect(caller).toEqual({ maxAge: 500, subscriberPriority: 16 });
     expect(update).toEqual({ maxAge: 900 });
     harness.session.destroy();
+  });
+});
+
+describe('MoQ Active Count (ACTIVE_COUNT)', () => {
+  const ACTIVE_COUNT: KeyValuePair = { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 };
+
+  async function activeCountHarness({ client = true, server = true } = {}) {
+    const fake = createFakeTransport();
+    const session = createMoqtSession(fake.transport, { setupOptions: client ? [ACTIVE_COUNT] : [] });
+
+    fake.sendServerSetup(server ? [ACTIVE_COUNT] : []);
+    await session.ready;
+    return { ...fake, session };
+  }
+
+  async function recordNamespaces(harness: Awaited<ReturnType<typeof activeCountHarness>>) {
+    const events: unknown[] = [];
+
+    harness.session.subscribeNamespace(
+      { trackNamespacePrefix: ['room'] },
+      {
+        onOk: (info) => events.push(['ok', info]),
+        onSynced: () => events.push('synced'),
+        onNamespace: (suffix) => events.push(['namespace', suffix]),
+        onNamespaceDone: (suffix) => events.push(['done', suffix]),
+        onEnd: (info) => events.push(['end', 'error' in info]),
+      }
+    );
+    const request = await harness.nextRequestStream();
+
+    await request.firstMessage;
+    return { events, request };
+  }
+
+  it('reports the count on REQUEST_OK and syncs right after the Count-th NAMESPACE, a repeat counted', async () => {
+    const harness = await activeCountHarness();
+    const { events, request } = await recordNamespaces(harness);
+
+    await request.send(encodeRequestOk({ activeCount: 2 }));
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespace(['bob']));
+    await request.send(encodeNamespaceDone(['bob']));
+
+    await vi.waitFor(() => expect(events).toHaveLength(6));
+    expect(events).toEqual([
+      ['ok', { activeCount: 2 }],
+      ['namespace', ['alice']],
+      ['namespace', ['alice']],
+      'synced',
+      ['namespace', ['bob']],
+      ['done', ['bob']],
+    ]);
+    expect(harness.getCloseInfo()).toBeUndefined();
+    harness.session.destroy();
+  });
+
+  it('syncs right after REQUEST_OK on a count of 0, and a FIN after it is a clean end', async () => {
+    const harness = await activeCountHarness();
+    const { events, request } = await recordNamespaces(harness);
+
+    await request.send(encodeRequestOk({ activeCount: 0 }));
+    await request.fin();
+
+    await vi.waitFor(() => expect(events).toHaveLength(3));
+    expect(events).toEqual([['ok', { activeCount: 0 }], 'synced', ['end', false]]);
+    expect(harness.getCloseInfo()).toBeUndefined();
+    harness.session.destroy();
+  });
+
+  it.each([
+    { name: 'only this session declares it', client: true, server: false },
+    { name: 'only the server declares it', client: false, server: true },
+  ])('reports no count and never syncs when $name', async ({ client, server }) => {
+    const harness = await activeCountHarness({ client, server });
+    const { events, request } = await recordNamespaces(harness);
+
+    await request.send(encodeRequestOk());
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespaceDone(['alice']));
+
+    await vi.waitFor(() => expect(events).toHaveLength(3));
+    expect(events).toEqual([
+      ['ok', {}],
+      ['namespace', ['alice']],
+      ['done', ['alice']],
+    ]);
+    expect(harness.getCloseInfo()).toBeUndefined();
+    harness.session.destroy();
+  });
+
+  it.each([
+    {
+      name: 'REQUEST_OK omits the count while negotiated',
+      server: true,
+      script: [encodeRequestOk()],
+    },
+    {
+      name: 'REQUEST_OK carries the count while not negotiated',
+      server: false,
+      script: [encodeRequestOk({ activeCount: 0 })],
+    },
+    {
+      name: 'a NAMESPACE_DONE comes inside the counted set',
+      server: true,
+      script: [encodeRequestOk({ activeCount: 2 }), encodeNamespace(['alice']), encodeNamespaceDone(['alice'])],
+    },
+    {
+      name: 'a GOAWAY comes inside the counted set',
+      server: true,
+      script: [encodeRequestOk({ activeCount: 1 }), encodeGoaway()],
+    },
+    {
+      name: 'the stream finishes inside the counted set',
+      server: true,
+      script: [encodeRequestOk({ activeCount: 2 }), encodeNamespace(['alice']), 'fin' as const],
+    },
+  ])('closes the session with PROTOCOL_VIOLATION when $name', async ({ server, script }) => {
+    const harness = await activeCountHarness({ server });
+    const { events, request } = await recordNamespaces(harness);
+
+    for (const step of script) {
+      if (step === 'fin') await request.fin();
+      else await request.send(step);
+    }
+
+    await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+    expect(events).not.toContain('synced');
+    expect(events.some((event) => Array.isArray(event) && event[0] === 'end')).toBe(false);
+  });
+
+  it('ends the request without closing the session when the stream resets inside the counted set', async () => {
+    const harness = await activeCountHarness();
+    const { events, request } = await recordNamespaces(harness);
+
+    await request.send(encodeRequestOk({ activeCount: 2 }));
+    await request.send(encodeNamespace(['alice']));
+    request.reset(new Error('gone'));
+
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(events).toEqual([
+      ['ok', { activeCount: 2 }],
+      ['namespace', ['alice']],
+      ['done', ['alice']],
+      ['end', true],
+    ]);
+    expect(harness.getCloseInfo()).toBeUndefined();
+    harness.session.destroy();
+  });
+
+  it.each([{ negotiated: true }, { negotiated: false }])(
+    'closes the session when a REQUEST_OK answering TRACK_STATUS carries the count (negotiated: $negotiated)',
+    async ({ negotiated }) => {
+      const harness = await activeCountHarness({ server: negotiated });
+      const onOk = vi.fn();
+
+      harness.session.trackStatus({ trackNamespace: ['room'], trackName: 'video' }, { onOk });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk({ activeCount: 0 }));
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      expect(onOk).not.toHaveBeenCalled();
+    }
+  );
+
+  it("closes the session when REQUEST_UPDATE's REQUEST_OK carries the count, and accepts one without it", async () => {
+    const harness = await activeCountHarness();
+    const onUpdateOk = vi.fn();
+    const subscription = harness.session.subscribe({ trackNamespace: ['room'], trackName: 'video' }, { onUpdateOk });
+    const request = await harness.nextRequestStream();
+
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(7));
+    subscription.update({ forward: 1 });
+    await request.send(encodeRequestOk());
+    await vi.waitFor(() => expect(onUpdateOk).toHaveBeenCalledTimes(1));
+
+    subscription.update({ forward: 0 });
+    await request.send(encodeRequestOk({ activeCount: 0 }));
+
+    await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+    expect(onUpdateOk).toHaveBeenCalledTimes(1);
   });
 });

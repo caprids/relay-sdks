@@ -10,17 +10,66 @@ import { RelayError } from './errors.js';
 import { CLOSURE_GRACE_MS, SubscriptionConnectionClosedError, SubscriptionRequestError } from './subscription.js';
 import { type BoundedEventSink, createBoundedEvents, type SubscriptionEventOptions } from './subscription-events.js';
 
-/** One change in which namespaces under the prefix are announced. */
-export interface NamespaceEvent {
-  /**
-   * `announced`: a publisher announced the namespace, or it was already announced when the request
-   * was accepted. `unannounced`: its announce was withdrawn. Each namespace alternates between the
-   * two; the relay's repeats are not passed on.
-   */
-  type: 'announced' | 'unannounced';
-  /** The full namespace: the prefix's fields followed by the rest, without splitting or joining. */
-  namespace: string[];
+/** One change in which namespaces under the prefix are announced, or the end of the relay's initial snapshot. */
+export type NamespaceEvent =
+  | {
+      /**
+       * `announced`: a publisher announced the namespace, or it was already announced when the request
+       * was accepted. `unannounced`: its announce was withdrawn. Each namespace alternates between the
+       * two; the relay's repeats are not passed on.
+       */
+      type: 'announced' | 'unannounced';
+      /** The full namespace: the prefix's fields followed by the rest, without splitting or joining. */
+      namespace: string[];
+    }
+  | {
+      /**
+       * Every namespace announced when the relay accepted the request has been yielded: an application that tracks
+       * the announced set now holds the relay's view, and an empty set means nothing is announced. Yielded once, before
+       * any later change, and never once the request has ended. With MoQ Active Count negotiated it follows the
+       * NAMESPACE messages the relay counted (at once on a count of 0). Otherwise it is the SDK's estimate: the relay
+       * accepted the request, then {@link SNAPSHOT_QUIET_MS} passed without an entry, and never later than
+       * {@link SNAPSHOT_LIMIT_MS} after the relay accepted it.
+       */
+      type: 'loaded';
+    };
+
+/**
+ * Without MoQ Active Count, how long the request's stream stays quiet after the relay accepts it before the relay's
+ * snapshot counts as loaded. Each entry restarts it, so an empty prefix loads this long after acceptance. Provisional:
+ * moq-relay 0.17.x wrote 60 entries within 0.94 ms of REQUEST_OK, cross-relay, a 50x margin (2026-11-03,
+ * https://github.com/muxinc/relay-sdks/issues/422#issuecomment-6599550554).
+ */
+export const SNAPSHOT_QUIET_MS = 50;
+
+/** Without MoQ Active Count, the latest `loaded` comes after the relay accepts, so a busy prefix still loads. */
+export const SNAPSHOT_LIMIT_MS = 1_000;
+
+const withdrawnByEnd = new WeakSet<NamespaceEvent>();
+
+/**
+ * Whether `event` is one of the withdrawals a clean end yields, not one the relay sent. The supervised subscriber's
+ * discovery reads them as the request's end, so a narrower root it moves keeps what it saw.
+ */
+export function isWithdrawnByEnd(event: NamespaceEvent): boolean {
+  return withdrawnByEnd.has(event);
 }
+
+const stopped = new WeakSet<NamespaceEvents>();
+
+/**
+ * Whether the request's stream has failed and its ending waits out the closure grace: nothing more arrives. The
+ * supervised subscriber's discovery reads it so a publishing root's 100 ms does not run out on a stream that is gone.
+ */
+export function isStopped(events: NamespaceEvents): boolean {
+  return stopped.has(events);
+}
+
+type Snapshot =
+  | { kind: 'unanswered' }
+  | { kind: 'counted' }
+  | { kind: 'quiet'; quiet: ReturnType<typeof setTimeout>; limit: ReturnType<typeof setTimeout> }
+  | { kind: 'loaded' };
 
 /** Options for `namespaceEvents`: the prefix, the iterator's queue bound and its own cancellation. */
 export interface NamespaceEventOptions extends SubscriptionEventOptions {
@@ -72,13 +121,18 @@ export function createNamespaceEvents(
   prefix: string[],
   options: SubscriptionEventOptions,
 ): NamespaceEvents {
-  return createBoundedEvents<NamespaceEvent>((sink) => openNamespaceRequest(deps, prefix, sink), options);
+  const events = createBoundedEvents<NamespaceEvent>(
+    (sink) => openNamespaceRequest(deps, prefix, sink, () => stopped.add(events)),
+    options,
+  );
+  return events;
 }
 
 function openNamespaceRequest(
   deps: NamespaceRequestDependencies,
   prefix: string[],
   sink: BoundedEventSink<NamespaceEvent>,
+  onStopped: () => void,
 ): { cancel(reason?: unknown): void } {
   let ended = false;
   let core: { cancel(reason?: unknown): void } | undefined;
@@ -87,6 +141,25 @@ function openNamespaceRequest(
   const releasePrefix = claimPrefix(deps.prefixes, prefix);
   // Keyed by the suffix's JSON: a field may hold any character, a separator could collide.
   const announced = new Set<string>();
+  let snapshot: Snapshot = { kind: 'unanswered' };
+
+  const stopTimers = () => {
+    if (snapshot.kind !== 'quiet') return;
+    clearTimeout(snapshot.quiet);
+    clearTimeout(snapshot.limit);
+  };
+  const load = () => {
+    if (ended || snapshot.kind === 'loaded') return;
+    stopTimers();
+    snapshot = { kind: 'loaded' };
+    // It comes once per request, so it takes no capacity and a snapshot that fills the queue still loads.
+    sink.event({ type: 'loaded' }, false);
+  };
+  const heard = () => {
+    if (snapshot.kind !== 'quiet') return;
+    clearTimeout(snapshot.quiet);
+    snapshot.quiet = setTimeout(load, SNAPSHOT_QUIET_MS);
+  };
 
   const finish = (error?: unknown) => {
     if (ended) return;
@@ -94,6 +167,7 @@ function openNamespaceRequest(
     releasePrefix();
     removeClosed();
     cancelGrace();
+    stopTimers();
     core?.cancel(error);
     // A clean end keeps what is queued: the withdrawals the core reports for it come just before.
     if (error === undefined) sink.complete();
@@ -110,15 +184,18 @@ function openNamespaceRequest(
       queueMicrotask(reject);
       return;
     }
+    onStopped();
     const grace = setTimeout(reject, CLOSURE_GRACE_MS);
     cancelGrace = () => clearTimeout(grace);
   };
-  const change = (type: NamespaceEvent['type'], suffix: string[]) => {
+  const change = (type: 'announced' | 'unannounced', suffix: string[], byEnd = false) => {
     if (ended) return;
     const key = JSON.stringify(suffix);
     if (type === 'announced' ? announced.has(key) : !announced.delete(key)) return;
     if (type === 'announced') announced.add(key);
-    sink.event({ type, namespace: [...prefix, ...suffix] });
+    const event: NamespaceEvent = { type, namespace: [...prefix, ...suffix] };
+    if (byEnd) withdrawnByEnd.add(event);
+    sink.event(event);
   };
 
   removeClosed = deps.observeClosed((error) => finish(new SubscriptionConnectionClosedError(error)));
@@ -127,13 +204,34 @@ function openNamespaceRequest(
       core = deps.subscribeNamespace(
         { trackNamespacePrefix: prefix },
         {
-          onNamespace: (suffix) => change('announced', suffix),
-          onNamespaceDone: (suffix) => change('unannounced', suffix),
+          onOk: ({ activeCount }) => {
+            snapshot =
+              activeCount === undefined
+                ? {
+                    kind: 'quiet',
+                    quiet: setTimeout(load, SNAPSHOT_QUIET_MS),
+                    limit: setTimeout(load, SNAPSHOT_LIMIT_MS),
+                  }
+                : { kind: 'counted' };
+          },
+          onSynced: load,
+          onNamespace: (suffix) => {
+            change('announced', suffix);
+            heard();
+          },
+          onNamespaceDone: (suffix, { requestEnded }) => {
+            if (requestEnded) return;
+            change('unannounced', suffix);
+            heard();
+          },
           onError: (error) => fail(error, isStreamFailure(error) && error.errorCode !== REQUEST_ERROR_CODE.TIMEOUT),
           onEnd: ({ error }) => {
+            stopTimers();
             // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
-            if (error === undefined) finish();
-            else {
+            if (error === undefined) {
+              for (const key of [...announced]) change('unannounced', JSON.parse(key), true);
+              finish();
+            } else {
               const reason = error instanceof Error ? error.message : 'namespace request stream failed';
               fail({ errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR, retryInterval: 0, reason }, true);
             }
