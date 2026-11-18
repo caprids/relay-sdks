@@ -249,7 +249,8 @@ class _NamespaceRequest:
             return
         self._stop_timers()
         self._snapshot = "loaded"
-        self._sink.event(NamespaceEvent("loaded"))
+        # Once per request, so it takes no capacity: a snapshot that fills the queue still loads.
+        self._sink.event(NamespaceEvent("loaded"), counted=False)
 
     def _heard(self) -> None:
         if self._ended:
@@ -318,10 +319,11 @@ class NamespaceEvents(BoundedEvents[NamespaceEvent]):
     """Single-consumer iterator owning one namespace request, never the shared connection.
 
     Create one with :meth:`caprid_relay.RelaySubscriber.namespace_events` and use ``async with`` around
-    ``async for``. At most ``capacity`` events are retained; overflow discards the queue, cancels the
-    request and raises :class:`SubscriptionOverflowError` on reads. A relay rejection raises
-    :class:`SubscriptionRequestError`, the connection ending :class:`SubscriptionConnectionClosedError`;
-    a relay that finishes the request, ``close()``, or ``break`` ends iteration cleanly.
+    ``async for``. At most ``capacity`` events are retained, not counting the one ``loaded``; overflow
+    discards the queue, cancels the request and raises :class:`SubscriptionOverflowError` on reads. A
+    relay rejection raises :class:`SubscriptionRequestError`, the connection ending
+    :class:`SubscriptionConnectionClosedError`; a relay that finishes the request, ``close()``, or
+    ``break`` ends iteration cleanly.
     """
 
     def __init__(

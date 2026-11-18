@@ -505,6 +505,35 @@ class TestLoadedWithActiveCount:
             ]
         connection.close()
 
+    async def test_yields_loaded_after_a_snapshot_that_fills_the_capacity_and_still_bounds_the_namespaces(
+        self,
+    ) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        async with connection.namespace_events(["room"], capacity=2) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=2)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            await settle()
+            assert [await anext(events), await anext(events), await anext(events)] == [
+                _announced("room", "alice"),
+                _announced("room", "bob"),
+                LOADED,
+            ]
+
+        async with connection.namespace_events(["room"], capacity=2) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=2)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            await request.send(encode_namespace(["carol"]))
+            assert await asyncio.wait_for(request.client_end, 1) == "reset"
+            with pytest.raises(SubscriptionOverflowError):
+                await anext(events)
+        connection.close()
+
     async def test_yields_loaded_at_once_on_a_count_of_0(self) -> None:
         fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
         loop = asyncio.get_running_loop()

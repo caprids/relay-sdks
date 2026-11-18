@@ -23,9 +23,10 @@ is in [docs/releasing.md](../docs/releasing.md).
   closed its watch and the want waited out the whole backoff. Nothing to change in an application.
 - `caprid-relay`: `namespace_events` yields `NamespaceEvent(type="loaded")` once, after the namespaces already announced
   when the relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET`
-  (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported.
-  **Breaking (types):** `NamespaceEvent.namespace` is now `tuple[str, ...] | None`, `None` for `loaded`; check
-  `event.type` before reading it.
+  (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported. `loaded`
+  takes no `capacity`, so a snapshot that fills the queue still loads. **Breaking (types):**
+  `NamespaceEvent.namespace` is now `tuple[str, ...] | None`, `None` for `loaded`; check `event.type` before reading
+  it.
 - `caprid-relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
   error, which made a lost connection read as everyone leaving. Every error ending still means every namespace is
   withdrawn, and a clean end still yields `unannounced` for each one first.
