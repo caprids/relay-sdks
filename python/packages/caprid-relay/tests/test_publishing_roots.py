@@ -610,6 +610,50 @@ async def test_reports_nothing_when_a_reconnects_snapshot_falls_between_a_rotati
     assert summary(r.changes[1]) == change(["zed"], [], ["alice", "zed"])
 
 
+async def test_reports_nothing_for_a_settled_root_when_a_reconnects_snapshot_falls_inside_its_rotations_gap(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, relay = await start(cleanup)
+    r = Recorder()
+    subscriber.publishing_roots(PREFIX, r.handlers)
+    first = await relay.discovery()
+    first.push("announced", at("alice", new_generation(1_000)))
+    first.push("loaded")
+    await until(lambda: len(r.changes) == 1, "load")
+    relay.connections[0].end(connection_lost())
+    nxt = await relay.discovery(1)
+    nxt.push("loaded")
+    await pause(0.001)
+    nxt.push("announced", at("alice", new_generation(2_000)))
+    await pause(0.15)
+    nxt.push("announced", at("zed"))
+    await until(lambda: len(r.changes) >= 2, "the marker added")
+    assert [summary(c) for c in r.changes[1:]] == [change(["zed"], [], ["alice", "zed"])]
+
+
+async def test_reports_nothing_for_a_settled_root_when_a_rotations_old_connection_ends_before_a_snapshot_in_its_gap(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, relay = await start(cleanup)
+    r = Recorder()
+    subscriber.publishing_roots(PREFIX, r.handlers)
+    first = await relay.discovery()
+    first.push("announced", at("alice", new_generation(1_000)))
+    first.push("loaded")
+    await until(lambda: len(r.changes) == 1, "load")
+    subscriber.rotate()
+    nxt = await relay.discovery(1)
+    relay.connections[0].end(connection_lost())
+    await pause()
+    nxt.push("loaded")
+    await pause(0.001)
+    nxt.push("announced", at("alice", new_generation(2_000)))
+    await pause(0.15)
+    nxt.push("announced", at("zed"))
+    await until(lambda: len(r.changes) >= 2, "the marker added")
+    assert [summary(c) for c in r.changes[1:]] == [change(["zed"], [], ["alice", "zed"])]
+
+
 async def test_holds_a_leave_whose_grace_runs_out_during_an_outage_for_the_new_load_to_settle(
     cleanup: list[Callable[[], object]],
 ) -> None:

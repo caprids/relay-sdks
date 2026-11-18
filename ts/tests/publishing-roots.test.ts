@@ -538,6 +538,50 @@ describe('a root being removed', () => {
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
+  it("reports nothing for a settled root when a reconnect's snapshot falls inside its rotation's gap", async () => {
+    const { connections, subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.publishingRoots({ prefix: PREFIX }, handlers);
+    const first = await discovery();
+    first.push({ type: 'announced', namespace: at('alice', newGeneration(1_000)) });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
+    const next = await discovery(1);
+    next.push({ type: 'loaded' });
+    await pause(1);
+    next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
+    await pause(150);
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length >= 2, 'the marker added');
+    expect(changes.slice(1).map(summary)).toEqual([
+      { added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false },
+    ]);
+  });
+
+  it("reports nothing for a settled root when a rotation's old connection ends before the new snapshot, taken inside the root's rotation gap", async () => {
+    const { connections, subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.publishingRoots({ prefix: PREFIX }, handlers);
+    const first = await discovery();
+    first.push({ type: 'announced', namespace: at('alice', newGeneration(1_000)) });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    subscriber.rotate();
+    const next = await discovery(1);
+    connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
+    await pause();
+    next.push({ type: 'loaded' });
+    await pause(1);
+    next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
+    await pause(150);
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length >= 2, 'the marker added');
+    expect(changes.slice(1).map(summary)).toEqual([
+      { added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false },
+    ]);
+  });
+
   it('holds a leave whose grace runs out during an outage for the new load to settle', async () => {
     const { connections, subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
