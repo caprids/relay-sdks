@@ -7,28 +7,30 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
-- `@caprid/relay`: `SupervisedSubscriber.members({ root }, { onChanged, onError })` reports who is present under a
-  root, across reconnects and the subscriber's own rotations (#422). Each namespace one field below the root is a
-  member, and a supervised publisher's generations under it count as one member, so its rotations and reconnects
-  report nothing. The first `onChanged` is the load (`initial: true`, everyone present in `joined`, possibly nobody),
-  and `Members.loaded` tells "nobody here" from "not loaded yet". After a reconnect or rotation the view reports only
-  who came or went meanwhile, in one call. A member whose leave was already pending, or whom the old connection still
-  showed, leaves in a later call once the new discovery has shown it nothing for 100 ms. An application can build a
-  room roster with no roster server.
+- `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
+  are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
+  announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and a second field
+  under it is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
+  first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
+  `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
+  only the roots added or removed meanwhile, in one call. A root whose removal was already pending, or that the old
+  connection still showed, is removed in a later call once the new discovery has shown it nothing for 100 ms. An
+  application can build a room roster with no roster server.
 - `@caprid/relay/media`: presence, a live room roster with no roster server (#422). Each participant calls
   `publishPresence(publisher, document)` on its supervised publisher: the document (JSON) goes out on every relay
   subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls
-  `createPresenceView(subscriber, { root }, { onChanged })`, which reports each member once its document arrives,
+  `createPresenceView(subscriber, { prefix }, { onChanged })`, which reports each member once its document arrives,
   with `joined`, `left`, `updated`, `stale` (no new document for three heartbeats, before the relay's ~10 s
   withdrawal of a frozen publisher) and `resumed`. A publisher's rotations and the subscriber's own reconnects and
   rotations report nothing. A publisher's reconnect is not make-before-break, so it can show as `left` then `joined`,
   or as `stale` then `resumed`. The track convention is in spec/media-layer.md, "Presence track".
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations, every want waiting for its namespace to be announced again (0.4.0),
-  and every member view. A want under another want's or a view's root no longer fails with `PREFIX_OVERLAP`, and a
-  view refused on its root leaves the wants under it alone. A want waiting on a fixed namespace is still woken by its
-  announcement when a followed root or a member view covers the namespace; before, a followed root closed its watch
-  and the want waited out the whole backoff. Nothing to change in an application.
+  and every publishing-roots view. A want under another want's root or a view's prefix no longer fails with
+  `PREFIX_OVERLAP`, and a view refused on its prefix leaves the wants under it alone. A want waiting on a fixed
+  namespace is still woken by its announcement when a followed root or a publishing-roots view covers the namespace;
+  before, a followed root closed its watch and the want waited out the whole backoff. Nothing to change in an
+  application.
 - `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
   relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
   (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported.

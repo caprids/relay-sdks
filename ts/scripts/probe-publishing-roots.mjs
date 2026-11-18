@@ -1,28 +1,29 @@
-// Opt-in live probe of member discovery (issue #422): who is present under a namespace root, from the subscriber's
-// side, across publisher rotations, crashes, clean departures and the subscriber's own rotations and reconnects. Run
-// after `pnpm build` and `pnpm --filter @caprid/relay-quic build:native`.
+// Opt-in live probe of publishing-roots discovery (issue #422): which roots are publishing under a namespace prefix,
+// from the subscriber's side, across publisher rotations, crashes, clean departures and the subscriber's own rotations
+// and reconnects. Run after `pnpm build` and `pnpm --filter @caprid/relay-quic build:native`.
 //
-// Each member p0..p{N-1} is a child process (this script with --publisher-child) running a supervised publisher on
-// [...root, id] with one track, `beat`, written every 100 ms. The subscriber runs here, in one of two views:
-//   --view members  SupervisedSubscriber.members({ root }): joins and leaves as the SDK reports them.
-//   --view raw      connectRelaySubscriber + namespaceEvents on the root, unsupervised; the probe folds the
-//                   generation namespaces into members itself (a member joins on its first namespace and leaves on its
+// Each root p0..p{N-1} is a child process (this script with --publisher-child) running a supervised publisher on
+// [...prefix, id] with one track, `beat`, written every 100 ms. The subscriber runs here, in one of two views:
+//   --view roots    SupervisedSubscriber.publishingRoots({ prefix }): additions and removals as the SDK reports them,
+//                   logged as `joined` and `left`.
+//   --view raw      connectRelaySubscriber + namespaceEvents on the prefix, unsupervised; the probe folds the
+//                   generation namespaces into roots itself (a root joins on its first namespace and leaves on its
 //                   last). Works without the `loaded` event, which it waits for only briefly.
 // Every event is one JSON line on stdout with `t`, ms since the probe started; the last line is {"summary":{...}}.
-// `duplicates` counts the joins and leaves the ground truth does not explain: a join for a member already present, a
-// second join (no publisher here ever restarts), a leave for a member not present or whose publisher is still up,
+// `duplicates` counts the joins and leaves the ground truth does not explain: a join for a root already present, a
+// second join (no publisher here ever restarts), a leave for a root not present or whose publisher is still up,
 // and any event for an id with no publisher. The exit code is 0 unless the probe itself fails.
 //
 // Flags:
-//   --view members|raw (default members)    --members N (default 5)     --root a/b (default <uuid>/p)
+//   --view roots|raw (default roots)        --publishers N (default 5)  --prefix a/b (default <uuid>/p)
 //   --subscriber-after                       start the subscriber once every publisher is up (default: before)
 //   --rotate-publishers K                    rotate every publisher K times, one at a time
-//   --rotate-subscriber K                    SupervisedSubscriber.rotate() K times (members view)
+//   --rotate-subscriber K                    SupervisedSubscriber.rotate() K times (roots view)
 //   --reconnect-subscriber                   close the subscriber's QUIC transport and refuse dials for --outage-ms
 //   --outage-ms MS (default 3000)            --depart-during-outage M   M publishers close during the outage
 //   --kill-publisher M                       SIGKILL M publishers        --close-publisher M   M publishers close
-//   --want-generations                       want [...root, 'p0'] track `beat` with generations: true
-//   --latency --trials T (default 5)         T new publishers: generation-up to joined (members) or announced (raw),
+//   --want-generations                       want [...prefix, 'p0'] track `beat` with generations: true
+//   --latency --trials T (default 5)         T new publishers: generation-up to joined (roots) or announced (raw),
 //                                            and a fresh subscriber's connect-to-loaded per trial
 //   --settle-ms MS (default 15000)           how long to wait for each expected join or leave
 //   --end close|keep (default close)         close every remaining publisher and wait for its leave, or not
@@ -30,7 +31,7 @@
 //
 // Presence (the media presence helper): with --presence each publisher runs publishPresence with the document
 // { name: 'Member <id>', joinedAt, host } instead of the `beat` track, and every listener is a presence view on the
-// root. Its events are presence-loaded (members with documents), presence-joined (initial: true at the load),
+// prefix. Its events are presence-loaded (members with documents), presence-joined (initial: true at the load),
 // presence-left, presence-updated, presence-stale and presence-resumed, each tagged with its listener: node0 (the
 // primary, which --rotate-subscriber and --reconnect-subscriber act on), node1.., and browser. `duplicates` then
 // counts the presence events the ground truth does not explain: a join for a member already present or with a document
@@ -54,8 +55,8 @@
 // Environment: RELAY_URL (a room-rooted endpoint), RELAY_SUB_URL (default RELAY_URL), RELAY_TOKEN or RELAY_ANONYMOUS=1,
 // RELAY_CERTIFICATE_HASH (hex SHA-256 of a local relay's certificate).
 //
-//   RELAY_URL=https://ord.relay.mux.global/mattypoo node scripts/probe-members.mjs --members 5 --rotate-publishers 3
-//   RELAY_URL=... node scripts/probe-members.mjs --presence --members 3 --host p0 --listeners 2 --browser
+//   RELAY_URL=https://ord.relay.mux.global/mattypoo node scripts/probe-publishing-roots.mjs --publishers 5 --rotate-publishers 3
+//   RELAY_URL=... node scripts/probe-publishing-roots.mjs --presence --publishers 3 --host p0 --listeners 2 --browser
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -83,9 +84,9 @@ const ROTATION_UPDATE_MS = 2000;
 const { values: flags } = parseArgs({
   options: {
     'publisher-child': { type: 'string' },
-    view: { type: 'string', default: 'members' },
-    members: { type: 'string', default: '5' },
-    root: { type: 'string' },
+    view: { type: 'string', default: 'roots' },
+    publishers: { type: 'string', default: '5' },
+    prefix: { type: 'string' },
     'subscriber-after': { type: 'boolean', default: false },
     'rotate-publishers': { type: 'string', default: '0' },
     'rotate-subscriber': { type: 'string', default: '0' },
@@ -129,7 +130,7 @@ const trust = certificateHash
   ? { serverCertificateHashes: [{ algorithm: 'sha-256', value: Buffer.from(certificateHash, 'hex') }] }
   : {};
 const getToken = token ? () => token : undefined;
-const root = flags.root ? flags.root.split('/').filter(Boolean) : [randomUUID(), 'p'];
+const prefix = flags.prefix ? flags.prefix.split('/').filter(Boolean) : [randomUUID(), 'p'];
 const redact = (value) => (token ? String(value).replaceAll(token, '[redacted]') : String(value));
 const describe = (error) => redact(error?.code ? `${error.code}: ${error.message}` : String(error));
 const children = new Set();
@@ -170,7 +171,7 @@ async function runPublisher(id) {
     url,
     getToken,
     ...trust,
-    namespace: [...root, id],
+    namespace: [...prefix, id],
     onGeneration: ({ generation }) => send({ type: 'generation-up', generation, at: at() }),
     onStatus: (status, error) => send({ type: 'status', status, ...(error ? { error: describe(error) } : {}) }),
   });
@@ -198,9 +199,9 @@ async function runPublisher(id) {
 
 async function runProbe() {
   const view = flags.view;
-  if (!['members', 'raw'].includes(view)) throw new Error('--view must be members or raw');
+  if (!['roots', 'raw'].includes(view)) throw new Error('--view must be roots or raw');
   if (!['close', 'keep'].includes(flags.end)) throw new Error('--end must be close or keep');
-  const members = count('members');
+  const publisherCount = count('publishers');
   const rotatePublishers = count('rotate-publishers');
   const rotateSubscriber = count('rotate-subscriber');
   const outageMs = count('outage-ms');
@@ -219,7 +220,7 @@ async function runProbe() {
   const unsupervised = presence ? presenceView === 'hand' : view === 'raw';
   const loadedWaitMs = unsupervised ? RAW_LOADED_WAIT_MS : settleMs;
   if (!['helper', 'hand'].includes(presenceView)) throw new Error('--presence-view must be helper or hand');
-  if (presence && view !== 'members') throw new Error('--presence replaces --view');
+  if (presence && view !== 'roots') throw new Error('--presence replaces --view');
   const presenceOnly = ['presence-view', 'listeners', 'browser', 'host', 'update-member', 'freeze-publisher'];
   if (!presence && presenceOnly.some((name) => process.argv.includes(`--${name}`))) {
     throw new Error(`${presenceOnly.map((name) => `--${name}`).join(', ')} need --presence`);
@@ -241,10 +242,10 @@ async function runProbe() {
   if (departDuringOutage && !flags['reconnect-subscriber']) {
     throw new Error('--depart-during-outage needs --reconnect-subscriber');
   }
-  if (departDuringOutage + killCount + closeCount + freezeCount > members)
-    throw new Error('More departures than --members');
-  if (updateCount > members) throw new Error('More updates than --members');
-  if (flags['want-generations'] && members < 1) throw new Error('--want-generations needs a member p0');
+  if (departDuringOutage + killCount + closeCount + freezeCount > publisherCount)
+    throw new Error('More departures than --publishers');
+  if (updateCount > publisherCount) throw new Error('More updates than --publishers');
+  if (flags['want-generations'] && publisherCount < 1) throw new Error('--want-generations needs a publisher p0');
 
   const start = performance.now();
   const sinceStart = (ms) => Math.round((ms - start) * 10) / 10;
@@ -286,7 +287,7 @@ async function runProbe() {
   const startPublisher = () => {
     const id = `p${nextIndex++}`;
     const document = presence ? { name: `Member ${id}`, joinedAt: Date.now(), host: hosts.has(id) } : undefined;
-    const args = ['--publisher-child', id, '--root', root.join('/')];
+    const args = ['--publisher-child', id, '--prefix', prefix.join('/')];
     if (presence) args.push('--presence-document', JSON.stringify(document));
     const child = fork(process.argv[1], args, { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
     const publisher = {
@@ -420,7 +421,7 @@ async function runProbe() {
     const createTransport = (transportUrl, protocols) => {
       if (primary && performance.now() < outageUntil) {
         emit('subscriber-dial', { refused: true });
-        throw new Error('probe-members outage: dial refused');
+        throw new Error('probe-publishing-roots outage: dial refused');
       }
       const opened = dial(transportUrl, protocols);
       transports.push(opened);
@@ -449,7 +450,7 @@ async function runProbe() {
       const supervised = await connectSupervised();
       const room = media.createPresenceView(
         supervised,
-        { root },
+        { prefix },
         {
           onChanged(change) {
             if (change.initial) resolveLoaded(change.joined.map((member) => member.id));
@@ -468,23 +469,23 @@ async function runProbe() {
         },
       };
     }
-    if (view === 'members') {
+    if (view === 'roots') {
       const supervised = await connectSupervised();
-      if (typeof supervised.members !== 'function') {
+      if (typeof supervised.publishingRoots !== 'function') {
         supervised.close();
-        throw new Error('SupervisedSubscriber.members() is not in this build; use --view raw');
+        throw new Error('SupervisedSubscriber.publishingRoots() is not in this build; use --view raw');
       }
-      const membersView = supervised.members(
-        { root },
+      const rootsView = supervised.publishingRoots(
+        { prefix },
         {
-          onChanged({ joined, left, initial }) {
+          onChanged({ added, removed, initial }) {
             if (initial) {
-              const ids = joined.map((member) => member.id);
+              const ids = added.map((root) => root.id);
               resolveLoaded(ids);
               sink.loaded?.(ids);
             }
-            for (const member of joined) sink.joined?.(member.id, initial ? { initial: true } : {});
-            for (const member of left) sink.left?.(member.id);
+            for (const root of added) sink.joined?.(root.id, initial ? { initial: true } : {});
+            for (const root of removed) sink.left?.(root.id);
           },
           onError: (error) => sink.error?.(error),
         },
@@ -494,13 +495,13 @@ async function runProbe() {
         transports,
         loaded,
         close: () => {
-          membersView.close();
+          rootsView.close();
           supervised.close();
         },
       };
     }
     const subscriber = await connectRelaySubscriber({ url: subUrl, getToken, createTransport });
-    const namespaces = subscriber.namespaceEvents({ prefix: root });
+    const namespaces = subscriber.namespaceEvents({ prefix });
     const generations = new Map();
     void (async () => {
       for await (const event of namespaces) {
@@ -510,7 +511,7 @@ async function runProbe() {
           sink.loaded?.(ids);
           continue;
         }
-        const [id, generation, ...rest] = event.namespace.slice(root.length);
+        const [id, generation, ...rest] = event.namespace.slice(prefix.length);
         if (id === undefined || rest.length > 0) continue;
         sink.raw?.(event.type, id, generation);
         const held = generations.get(id) ?? new Set();
@@ -538,7 +539,7 @@ async function runProbe() {
   // its first object. A member joins on its first document and leaves with its last generation.
   const openHandPresence = async (createTransport, transports, sink, resolveLoaded, loaded) => {
     const subscriber = await connectRelaySubscriber({ url: subUrl, getToken, createTransport });
-    const namespaces = subscriber.namespaceEvents({ prefix: root });
+    const namespaces = subscriber.namespaceEvents({ prefix });
     const generations = new Map();
     const present = new Map();
     let isLoaded = false;
@@ -577,7 +578,7 @@ async function runProbe() {
           report({ initial: true, joined: [...present.values()] });
           continue;
         }
-        const [id, generation, ...rest] = event.namespace.slice(root.length);
+        const [id, generation, ...rest] = event.namespace.slice(prefix.length);
         if (id === undefined || generation === undefined || rest.length > 0) continue;
         const held = generations.get(id) ?? new Set();
         if (event.type === 'announced') {
@@ -637,7 +638,7 @@ async function runProbe() {
       await page.goto(`http://127.0.0.1:${server.address().port}/`);
       await page.evaluate(`window.plainChange = ${plainChange.toString()}`);
       await page.evaluate(
-        async ({ url, token, root }) => {
+        async ({ url, token, prefix }) => {
           const { connectSupervisedSubscriber } = await import('/sdk/index.js');
           const { createPresenceView } = await import('/sdk/media.js');
           const subscriber = await connectSupervisedSubscriber({
@@ -648,14 +649,14 @@ async function runProbe() {
           });
           createPresenceView(
             subscriber,
-            { root },
+            { prefix },
             {
               onChanged: (change) => window.reportPresence(window.plainChange(change)),
               onError: (error) => window.reportBrowser({ error: String(error?.message ?? error) }),
             },
           );
         },
-        { url: subUrl, token, root },
+        { url: subUrl, token, prefix },
       );
     } catch (error) {
       await close();
@@ -671,7 +672,7 @@ async function runProbe() {
   const mainSink = presence
     ? presenceSink(PRIMARY)
     : {
-        loaded: (ids) => emit('loaded', { view, members: ids }),
+        loaded: (ids) => emit('loaded', { view, roots: ids }),
         joined: (id, fields) => observe('joined', id, fields),
         left: (id) => observe('left', id),
         raw: (type, id, generation) => emit(type, { id, generation }),
@@ -681,7 +682,7 @@ async function runProbe() {
   let others = [];
   const listeners = [];
   let connectToLoadedMs = null;
-  let loadedMembers = null;
+  let loadedRoots = null;
   const waitLoaded = async (opened, listener) => {
     const loaded = await Promise.race([opened.loaded, sleep(loadedWaitMs).then(() => undefined)]);
     if (!loaded) emit('loaded-missing', { view, ...(presence ? { listener } : {}), afterMs: loadedWaitMs });
@@ -700,7 +701,7 @@ async function runProbe() {
     [main, ...others] = await Promise.all(opening);
     listeners.push(...opening.map((_, n) => `node${n}`));
     const loaded = await waitLoaded(main, PRIMARY);
-    if (loaded) ({ ids: loadedMembers, connectToLoadedMs } = loaded);
+    if (loaded) ({ ids: loadedRoots, connectToLoadedMs } = loaded);
     await Promise.all(others.map((other, n) => waitLoaded(other, `node${n + 1}`)));
     if (browser) {
       const opened = await browser;
@@ -711,7 +712,7 @@ async function runProbe() {
       }
     }
   };
-  const startMembers = async (n) => {
+  const startPublishers = async (n) => {
     const started = Array.from({ length: n }, () => ({ publisher: startPublisher(), from: events.length }));
     await Promise.all(
       started.map(({ publisher, from }) =>
@@ -739,7 +740,7 @@ async function runProbe() {
     );
 
   if (!flags['subscriber-after']) await startSubscriber();
-  const initial = await startMembers(members);
+  const initial = await startPublishers(publisherCount);
   if (flags['subscriber-after']) await startSubscriber();
   await awaitJoined(initial);
 
@@ -749,7 +750,7 @@ async function runProbe() {
     wantSubscriber = main.supervised ?? (await connectSupervisedSubscriber({ url: subUrl, getToken, ...trust }));
     wantSubscriber.want(
       'beat',
-      { namespace: [...root, 'p0'], track: 'beat', generations: true },
+      { namespace: [...prefix, 'p0'], track: 'beat', generations: true },
       {
         onObject: () => {
           want.objects += 1;
@@ -849,7 +850,7 @@ async function runProbe() {
     const from = events.length;
     outageUntil = performance.now() + outageMs;
     const cut = emit('subscriber-reconnect', { phase: 'cut', outageMs });
-    main.transports.at(-1).transport.close({ closeCode: 0, reason: 'probe-members outage' });
+    main.transports.at(-1).transport.close({ closeCode: 0, reason: 'probe-publishing-roots outage' });
     const departed = pickDepartures(departDuringOutage);
     for (const publisher of departed) depart(publisher, 'outage-close');
     const live = await expect(
@@ -914,10 +915,10 @@ async function runProbe() {
 
   const latencyTrials = [];
   for (let trial = 1; trial <= trials; trial++) {
-    const [started] = await startMembers(1);
+    const [started] = await startPublishers(1);
     const { publisher, from } = started;
     const up = events.slice(from).find((e) => e.type === 'publisher-up' && e.id === publisher.id);
-    const seenType = presence ? JOINED : view === 'members' ? 'joined' : 'announced';
+    const seenType = presence ? JOINED : view === 'roots' ? 'joined' : 'announced';
     const seen = await expect(`${seenType} ${publisher.id}`, primaryEvent(seenType, publisher.id), settleMs, from);
     const fresh = await openView({ error: (error) => emit('trial-subscriber-error', { error: describe(error) }) });
     const loaded = await Promise.race([fresh.loaded, sleep(loadedWaitMs).then(() => undefined)]);
@@ -1058,12 +1059,12 @@ async function runProbe() {
   const primaryCount = (type) => events.filter((e) => e.type === type && e.listener === PRIMARY).length;
   const summary = {
     view: presence ? 'presence' : view,
-    root,
+    prefix,
     joined: presence ? primaryCount(JOINED) : counts.joined,
     left: presence ? primaryCount(LEFT) : counts.left,
     duplicates: duplicates.length,
     duplicateEvents: duplicates,
-    loadedMembers,
+    loadedRoots,
     connectToLoadedMs,
     departToLeftMs: departures.map(({ departToLeftMs }) => departToLeftMs),
     departures,

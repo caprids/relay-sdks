@@ -23,7 +23,6 @@ export type {
 } from './connect.js';
 export { connectRelaySubscriber, webTransport } from './connect.js';
 export { RelayError, type RelayErrorCode, type RelayErrorPhase } from './errors.js';
-export type { Member, Members, MembersChange, MembersHandlers, MembersOptions } from './members.js';
 export {
   type NamespaceEvent,
   type NamespaceEventOptions,
@@ -41,6 +40,13 @@ export type {
   RelayTrackWriter,
 } from './publish.js';
 export { connectRelayPublisher } from './publish.js';
+export type {
+  PublishingRoot,
+  PublishingRoots,
+  PublishingRootsChange,
+  PublishingRootsHandlers,
+  PublishingRootsOptions,
+} from './publishing-roots.js';
 export { DEFAULT_ENDPOINT, roomEndpoint } from './room-endpoint.js';
 export type { RelaySubscription, SubscriptionEnd, SubscriptionEndKind } from './subscription.js';
 export type { SubscriptionEvent, SubscriptionEventOptions, SubscriptionEvents } from './subscription-events.js';

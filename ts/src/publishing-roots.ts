@@ -2,97 +2,101 @@ import { type DiscoveryIndex, type DiscoveryWatch, discoveryEnding, refusedForGo
 import { SubscriptionConnectionClosedError } from './subscription.js';
 import { backoffDelay, RESUBSCRIBE_BACKOFF, sleep, whenAborted } from './supervision.js';
 
-/** One participant under a root: a supervised publisher's root, or an unsupervised publisher's namespace. */
-export interface Member {
-  /** The field one below the root, as the participant's publisher chose it. */
+/**
+ * A root under the prefix: the namespace one field below it that a publisher announced, either a supervised
+ * publisher's root or an unsupervised publisher's namespace (depth 1).
+ */
+export interface PublishingRoot {
+  /** The field one below the prefix, as the root's publisher chose it. */
   readonly id: string;
-  /** The root followed by `id`. Want it with `generations: true` to follow the member's supervised publisher. */
+  /** The prefix followed by `id`. Want it with `generations: true` to follow the root's supervised publisher. */
   readonly namespace: readonly string[];
 }
 
-/** What `onChanged` receives: who joined and who left since the last call, and who is present now. */
-export interface MembersChange {
+/** What `onChanged` receives: which roots were added and removed since the last call, and which are publishing now. */
+export interface PublishingRootsChange {
   /**
-   * Members who arrived. On the first call (`initial`), everyone present when the view loaded, possibly no one.
+   * Roots that started publishing. On the first call (`initial`), every root publishing when the view loaded, possibly
+   * none.
    */
-  readonly joined: readonly Member[];
-  /** Members who went. Empty on the first call. */
-  readonly left: readonly Member[];
-  /** Everyone present after this change, by id, in the order the view first saw them. The same map as `present`. */
-  readonly present: ReadonlyMap<string, Member>;
-  /** True on the first call only: the view has just loaded. A UI that announces joins skips this one. */
+  readonly added: readonly PublishingRoot[];
+  /** Roots that stopped publishing. Empty on the first call. */
+  readonly removed: readonly PublishingRoot[];
+  /** Every root publishing after this change, by id, in the order the view first saw them. The same map as `present`. */
+  readonly present: ReadonlyMap<string, PublishingRoot>;
+  /** True on the first call only: the view has just loaded. A UI that announces arrivals skips this one. */
   readonly initial: boolean;
 }
 
-/** What a members view follows. */
-export interface MembersOptions {
+/** What a publishing-roots view follows. */
+export interface PublishingRootsOptions {
   /**
-   * The root whose members to follow: each namespace one field below it is a member, and one field further is that
-   * member's generation. Same rules as a namespace, with room for the two fields under it. The subscriber's token must
+   * The prefix whose roots to follow: each namespace one field below it is a root, and one field further is that
+   * root's generation. Same rules as a namespace, with room for the two fields under it. The subscriber's token must
    * allow discovering it.
    */
-  root: readonly string[];
+  prefix: readonly string[];
 }
 
-/** The callbacks a members view delivers to. Like `WantHandlers`, they must be synchronous. */
-export interface MembersHandlers {
+/** The callbacks a publishing-roots view delivers to. Like `WantHandlers`, they must be synchronous. */
+export interface PublishingRootsHandlers {
   /**
-   * The view loaded, or members joined or left. The first call is the load and runs once, even for an empty root;
-   * every later call names at least one member in `joined` or `left`. A member whose last namespace is withdrawn
-   * leaves once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
-   * announce calls nothing. A member's generations changing, the relay repeating an announce, and the subscriber's
+   * The view loaded, or roots were added or removed. The first call is the load and runs once, even for an empty
+   * prefix; every later call names at least one root in `added` or `removed`. A root whose last namespace is withdrawn
+   * is removed once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
+   * announce calls nothing. A root's generations changing, the relay repeating an announce, and the subscriber's
    * reconnects and rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
-   * discovery shows, if there is one, joins and departures together. The exception is a member the new discovery misses
-   * but the old one still showed, or was giving its 100 ms: it leaves in a later call, once the new discovery has shown
-   * it nothing for 100 ms.
+   * discovery shows, if there is one, additions and removals together. The exception is a root the new discovery misses
+   * but the old one still showed, or was giving its 100 ms: it is removed in a later call, once the new discovery has
+   * shown it nothing for 100 ms.
    */
-  onChanged?(change: MembersChange): void;
+  onChanged?(change: PublishingRootsChange): void;
   /**
    * A discovery failure no wait fixes: the relay refusing the request with a REQUEST_ERROR that does not invite a
-   * retry, such as NOT_SUPPORTED from a relay without namespace discovery. The view is closed. A root outside the
-   * token's grant is not one: moq-relay accepts the request and sends nothing, so the roster loads empty and this is
-   * never called. An empty roster with no error can therefore mean the token does not grant the root.
+   * retry, such as NOT_SUPPORTED from a relay without namespace discovery. The view is closed. A prefix outside the
+   * token's grant is not one: moq-relay accepts the request and sends nothing, so the view loads empty and this is
+   * never called. An empty view with no error can therefore mean the token does not grant the prefix.
    */
   onError?(error: unknown): void;
 }
 
-/** A live view of who is present under a root. Create one with `SupervisedSubscriber.members`. */
-export interface Members {
+/** A live view of the roots publishing under a prefix. Create one with `SupervisedSubscriber.publishingRoots`. */
+export interface PublishingRoots {
   /**
-   * False until the root's first discovery has reported everything announced under it; then `present` is empty only
-   * when nobody is there. Stays true across reconnects, while the last settled view is held.
+   * False until the prefix's first discovery has reported everything announced under it; then `present` is empty only
+   * when no root is publishing. Stays true across reconnects, while the last settled view is held.
    */
   readonly loaded: boolean;
   /**
-   * Who is present, by id: empty until loaded, and the last settled view while a reconnect's discovery loads. A member
-   * whose last namespace went stays until it is reported as left. The same map until the next `onChanged`, so a UI can
-   * compare it by identity.
+   * The roots publishing, by id: empty until loaded, and the last settled view while a reconnect's discovery loads. A
+   * root whose last namespace went stays until it is reported as removed. The same map until the next `onChanged`, so
+   * a UI can compare it by identity.
    */
-  readonly present: ReadonlyMap<string, Member>;
-  /** Stop following the root. Idempotent; nothing is delivered after it, even when called from `onChanged`. */
+  readonly present: ReadonlyMap<string, PublishingRoot>;
+  /** Stop following the prefix. Idempotent; nothing is delivered after it, even when called from `onChanged`. */
   close(): void;
 }
 
 export type Presence = Map<string, Set<string>>;
 
-export function memberField(
-  root: readonly string[],
+export function rootField(
+  prefix: readonly string[],
   namespace: readonly string[],
 ): { id: string; field: string } | undefined {
-  const id = namespace[root.length];
+  const id = namespace[prefix.length];
   if (id === undefined) return undefined;
-  if (namespace.length === root.length + 1) return { id, field: '' };
-  if (namespace.length === root.length + 2) return { id, field: namespace[root.length + 1] as string };
+  if (namespace.length === prefix.length + 1) return { id, field: '' };
+  if (namespace.length === prefix.length + 2) return { id, field: namespace[prefix.length + 1] as string };
   return undefined;
 }
 
 export function applyNamespace(
   presence: Presence,
-  root: readonly string[],
+  prefix: readonly string[],
   type: 'announced' | 'unannounced',
   namespace: readonly string[],
-): { kind: 'joined' | 'left'; id: string } | undefined {
-  const at = memberField(root, namespace);
+): { kind: 'added' | 'removed'; id: string } | undefined {
+  const at = rootField(prefix, namespace);
   if (!at) return undefined;
   const fields = presence.get(at.id);
   if (type === 'announced') {
@@ -101,42 +105,42 @@ export function applyNamespace(
       return undefined;
     }
     presence.set(at.id, new Set([at.field]));
-    return { kind: 'joined', id: at.id };
+    return { kind: 'added', id: at.id };
   }
   if (!fields?.delete(at.field) || fields.size > 0) return undefined;
   presence.delete(at.id);
-  return { kind: 'left', id: at.id };
+  return { kind: 'removed', id: at.id };
 }
 
-function member(root: readonly string[], id: string): Member {
-  return Object.freeze({ id, namespace: Object.freeze([...root, id]) });
+function publishingRoot(prefix: readonly string[], id: string): PublishingRoot {
+  return Object.freeze({ id, namespace: Object.freeze([...prefix, id]) });
 }
 
-export function diffMembers(
-  settled: ReadonlyMap<string, Member>,
+export function diffRoots(
+  settled: ReadonlyMap<string, PublishingRoot>,
   loaded: Presence,
-  root: readonly string[],
-): { joined: Member[]; left: Member[] } {
-  const joined = [...loaded.keys()].filter((id) => !settled.has(id)).map((id) => member(root, id));
-  const left = [...settled.values()].filter((known) => !loaded.has(known.id));
-  return { joined, left };
+  prefix: readonly string[],
+): { added: PublishingRoot[]; removed: PublishingRoot[] } {
+  const added = [...loaded.keys()].filter((id) => !settled.has(id)).map((id) => publishingRoot(prefix, id));
+  const removed = [...settled.values()].filter((known) => !loaded.has(known.id));
+  return { added, removed };
 }
 
-export interface MembersConnection {
+export interface PublishingRootsConnection {
   readonly discovery: DiscoveryIndex;
   readonly signal: AbortSignal;
   readonly retiring: AbortSignal;
 }
 
 export interface Source {
-  readonly connection: MembersConnection;
+  readonly connection: PublishingRootsConnection;
   readonly presence: Presence;
 }
 
-type Settled = ReadonlyMap<string, Member>;
+type Settled = ReadonlyMap<string, PublishingRoot>;
 type Leaving = ReadonlySet<string>;
 
-export type MembersPhase =
+export type PublishingRootsPhase =
   | { readonly kind: 'loading'; readonly candidate: Source | undefined; readonly failures: number }
   | { readonly kind: 'live'; readonly settled: Settled; readonly leaving: Leaving; readonly source: Source }
   | {
@@ -149,9 +153,13 @@ export type MembersPhase =
     }
   | { readonly kind: 'closed'; readonly settled: Settled | undefined };
 
-export type MembersInput =
-  | { readonly kind: 'connection'; readonly connection: MembersConnection }
-  | { readonly kind: 'retiring'; readonly connection: MembersConnection; readonly next: MembersConnection | undefined }
+export type PublishingRootsInput =
+  | { readonly kind: 'connection'; readonly connection: PublishingRootsConnection }
+  | {
+      readonly kind: 'retiring';
+      readonly connection: PublishingRootsConnection;
+      readonly next: PublishingRootsConnection | undefined;
+    }
   | {
       readonly kind: 'namespace';
       readonly source: Source;
@@ -163,38 +171,43 @@ export type MembersInput =
   | { readonly kind: 'leave-due'; readonly id: string; readonly following: (source: Source) => boolean }
   | { readonly kind: 'close' };
 
-export type MembersEffect =
+export type PublishingRootsEffect =
   | { readonly kind: 'open'; readonly source: Source }
   | { readonly kind: 'release'; readonly source: Source }
-  | { readonly kind: 'emit'; readonly change: MembersChange }
+  | { readonly kind: 'emit'; readonly change: PublishingRootsChange }
   | { readonly kind: 'schedule-leave'; readonly id: string }
   | { readonly kind: 'cancel-leave'; readonly id: string }
-  | { readonly kind: 'await-connection'; readonly after: MembersConnection }
+  | { readonly kind: 'await-connection'; readonly after: PublishingRootsConnection }
   | { readonly kind: 'retry'; readonly attempt: number }
   | { readonly kind: 'error'; readonly error: unknown };
 
-type Step = { phase: MembersPhase; effects: MembersEffect[] };
-type Loading = Extract<MembersPhase, { kind: 'loading' }>;
-type Live = Extract<MembersPhase, { kind: 'live' }>;
-type Replacing = Extract<MembersPhase, { kind: 'replacing' }>;
-type Arrival = Exclude<MembersInput, { kind: 'close' }>;
+type Step = { phase: PublishingRootsPhase; effects: PublishingRootsEffect[] };
+type Loading = Extract<PublishingRootsPhase, { kind: 'loading' }>;
+type Live = Extract<PublishingRootsPhase, { kind: 'live' }>;
+type Replacing = Extract<PublishingRootsPhase, { kind: 'replacing' }>;
+type Arrival = Exclude<PublishingRootsInput, { kind: 'close' }>;
 
 const NOBODY_LEAVING: Leaving = new Set();
-const stay = (phase: MembersPhase): Step => ({ phase, effects: [] });
-const sourceOn = (connection: MembersConnection): Source => ({ connection, presence: new Map() });
-const open = (source: Source): MembersEffect => ({ kind: 'open', source });
-const release = (source: Source): MembersEffect => ({ kind: 'release', source });
-const cancelLeave = (id: string): MembersEffect => ({ kind: 'cancel-leave', id });
-const emit = (joined: Member[], left: Member[], present: Settled, initial = false): MembersEffect => ({
+const stay = (phase: PublishingRootsPhase): Step => ({ phase, effects: [] });
+const sourceOn = (connection: PublishingRootsConnection): Source => ({ connection, presence: new Map() });
+const open = (source: Source): PublishingRootsEffect => ({ kind: 'open', source });
+const release = (source: Source): PublishingRootsEffect => ({ kind: 'release', source });
+const cancelLeave = (id: string): PublishingRootsEffect => ({ kind: 'cancel-leave', id });
+const emit = (
+  added: PublishingRoot[],
+  removed: PublishingRoot[],
+  present: Settled,
+  initial = false,
+): PublishingRootsEffect => ({
   kind: 'emit',
-  change: { joined, left, present, initial },
+  change: { added, removed, present, initial },
 });
 
-function settledOf(phase: MembersPhase): Settled | undefined {
+function settledOf(phase: PublishingRootsPhase): Settled | undefined {
   return phase.kind === 'loading' ? undefined : phase.settled;
 }
 
-function sourcesOf(phase: MembersPhase): Source[] {
+function sourcesOf(phase: PublishingRootsPhase): Source[] {
   switch (phase.kind) {
     case 'loading':
       return phase.candidate ? [phase.candidate] : [];
@@ -207,12 +220,15 @@ function sourcesOf(phase: MembersPhase): Source[] {
   }
 }
 
-function abandon(phase: MembersPhase): MembersEffect[] {
+function abandon(phase: PublishingRootsPhase): PublishingRootsEffect[] {
   const leaving = phase.kind === 'live' || phase.kind === 'replacing' ? [...phase.leaving] : [];
   return [...sourcesOf(phase).map(release), ...leaving.map(cancelLeave)];
 }
 
-function retiredTo(source: Source, input: Extract<MembersInput, { kind: 'retiring' }>): MembersConnection | undefined {
+function retiredTo(
+  source: Source,
+  input: Extract<PublishingRootsInput, { kind: 'retiring' }>,
+): PublishingRootsConnection | undefined {
   if (source.connection !== input.connection || input.next === input.connection) return undefined;
   return input.next;
 }
@@ -220,13 +236,13 @@ function retiredTo(source: Source, input: Extract<MembersInput, { kind: 'retirin
 function follow(
   phase: Live | Replacing,
   source: Source,
-  input: Extract<MembersInput, { kind: 'namespace' }>,
-  root: readonly string[],
+  input: Extract<PublishingRootsInput, { kind: 'namespace' }>,
+  prefix: readonly string[],
 ): Step {
-  const change = applyNamespace(source.presence, root, input.type, input.namespace);
+  const change = applyNamespace(source.presence, prefix, input.type, input.namespace);
   if (!change) return stay(phase);
   const { id } = change;
-  if (change.kind === 'left') {
+  if (change.kind === 'removed') {
     return { phase: { ...phase, leaving: new Set(phase.leaving).add(id) }, effects: [{ kind: 'schedule-leave', id }] };
   }
   if (phase.leaving.has(id)) {
@@ -234,9 +250,9 @@ function follow(
     leaving.delete(id);
     return { phase: { ...phase, leaving }, effects: [cancelLeave(id)] };
   }
-  const joined = member(root, id);
-  const settled = new Map(phase.settled).set(id, joined);
-  return { phase: { ...phase, settled }, effects: [emit([joined], [], settled)] };
+  const added = publishingRoot(prefix, id);
+  const settled = new Map(phase.settled).set(id, added);
+  return { phase: { ...phase, settled }, effects: [emit([added], [], settled)] };
 }
 
 function leaveDue(phase: Live | Replacing, id: string, followed: Presence): Step {
@@ -250,13 +266,13 @@ function leaveDue(phase: Live | Replacing, id: string, followed: Presence): Step
 }
 
 function resume(phase: Live | Replacing): Step {
-  return { phase, effects: [...phase.leaving].map((id): MembersEffect => ({ kind: 'schedule-leave', id })) };
+  return { phase, effects: [...phase.leaving].map((id): PublishingRootsEffect => ({ kind: 'schedule-leave', id })) };
 }
 
 function afterEnded(
   phase: Loading | Replacing,
-  ended: Extract<MembersInput, { kind: 'ended' }>,
-  effects: MembersEffect[],
+  ended: Extract<PublishingRootsInput, { kind: 'ended' }>,
+  effects: PublishingRootsEffect[],
 ): Step {
   switch (discoveryEnding(ended.error)) {
     case 'connection':
@@ -274,7 +290,7 @@ function afterEnded(
   }
 }
 
-function fromLoading(phase: Loading, input: Arrival, root: readonly string[]): Step {
+function fromLoading(phase: Loading, input: Arrival, prefix: readonly string[]): Step {
   const { candidate } = phase;
   switch (input.kind) {
     case 'connection': {
@@ -289,11 +305,11 @@ function fromLoading(phase: Loading, input: Arrival, root: readonly string[]): S
       return { phase: { ...phase, candidate: next }, effects: [release(candidate), open(next)] };
     }
     case 'namespace':
-      if (input.source === candidate) applyNamespace(candidate.presence, root, input.type, input.namespace);
+      if (input.source === candidate) applyNamespace(candidate.presence, prefix, input.type, input.namespace);
       return stay(phase);
     case 'loaded': {
       if (!candidate || input.source !== candidate) return stay(phase);
-      const settled: Settled = new Map([...candidate.presence.keys()].map((id) => [id, member(root, id)]));
+      const settled: Settled = new Map([...candidate.presence.keys()].map((id) => [id, publishingRoot(prefix, id)]));
       return {
         phase: { kind: 'live', settled, leaving: NOBODY_LEAVING, source: candidate },
         effects: [emit([...settled.values()], [], settled, true)],
@@ -307,11 +323,11 @@ function fromLoading(phase: Loading, input: Arrival, root: readonly string[]): S
   }
 }
 
-function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
+function fromLive(phase: Live, input: Arrival, prefix: readonly string[]): Step {
   const { source } = phase;
   switch (input.kind) {
     case 'namespace':
-      return input.source === source ? follow(phase, source, input, root) : stay(phase);
+      return input.source === source ? follow(phase, source, input, prefix) : stay(phase);
     case 'leave-due':
       return input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
     case 'loaded':
@@ -345,20 +361,20 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
 }
 
 /**
- * A member the new snapshot misses leaves at once only when nothing else shows it. One the old discovery still shows,
+ * A root the new snapshot misses is removed at once only when nothing else shows it. One the old discovery still shows,
  * or one already in its grace, may have announced just after the snapshot was taken, so it gets the grace against the
  * new discovery instead.
  */
-function adopt(phase: Replacing, candidate: Source, root: readonly string[]): Step {
-  const { joined, left: missing } = diffMembers(phase.settled, candidate.presence, root);
+function adopt(phase: Replacing, candidate: Source, prefix: readonly string[]): Step {
+  const { added, removed: missing } = diffRoots(phase.settled, candidate.presence, prefix);
   const doubtful = (id: string) => phase.leaving.has(id) || (phase.source?.presence.has(id) ?? false);
-  const left = missing.filter((gone) => !doubtful(gone.id));
+  const removed = missing.filter((gone) => !doubtful(gone.id));
   const leaving: Leaving = new Set(missing.filter((gone) => doubtful(gone.id)).map((gone) => gone.id));
   let settled = phase.settled;
-  if (joined.length > 0 || left.length > 0) {
+  if (added.length > 0 || removed.length > 0) {
     const next = new Map(phase.settled);
-    for (const gone of left) next.delete(gone.id);
-    for (const arrived of joined) next.set(arrived.id, arrived);
+    for (const gone of removed) next.delete(gone.id);
+    for (const arrived of added) next.set(arrived.id, arrived);
     settled = next;
   }
   return {
@@ -366,13 +382,13 @@ function adopt(phase: Replacing, candidate: Source, root: readonly string[]): St
     effects: [
       ...(phase.source ? [release(phase.source)] : []),
       ...[...phase.leaving].filter((id) => !leaving.has(id)).map(cancelLeave),
-      ...[...leaving].map((id): MembersEffect => ({ kind: 'schedule-leave', id })),
-      ...(settled === phase.settled ? [] : [emit(joined, left, settled)]),
+      ...[...leaving].map((id): PublishingRootsEffect => ({ kind: 'schedule-leave', id })),
+      ...(settled === phase.settled ? [] : [emit(added, removed, settled)]),
     ],
   };
 }
 
-function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]): Step {
+function fromReplacing(phase: Replacing, input: Arrival, prefix: readonly string[]): Step {
   const { source, candidate } = phase;
   switch (input.kind) {
     case 'connection': {
@@ -392,15 +408,15 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
     }
     case 'namespace': {
       if (candidate && input.source === candidate) {
-        applyNamespace(candidate.presence, root, input.type, input.namespace);
+        applyNamespace(candidate.presence, prefix, input.type, input.namespace);
         return stay(phase);
       }
-      return source && input.source === source ? follow(phase, source, input, root) : stay(phase);
+      return source && input.source === source ? follow(phase, source, input, prefix) : stay(phase);
     }
     case 'leave-due':
       return source && input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
     case 'loaded':
-      if (candidate && input.source === candidate) return adopt(phase, candidate, root);
+      if (candidate && input.source === candidate) return adopt(phase, candidate, prefix);
       return source && input.source === source ? resume(phase) : stay(phase);
     case 'ended': {
       if (candidate && input.source === candidate) {
@@ -413,21 +429,21 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
   }
 }
 
-export function transition(phase: MembersPhase, input: MembersInput, root: readonly string[]): Step {
+export function transition(phase: PublishingRootsPhase, input: PublishingRootsInput, prefix: readonly string[]): Step {
   if (phase.kind === 'closed') return stay(phase);
   if (input.kind === 'close') return { phase: { kind: 'closed', settled: settledOf(phase) }, effects: abandon(phase) };
   switch (phase.kind) {
     case 'loading':
-      return fromLoading(phase, input, root);
+      return fromLoading(phase, input, prefix);
     case 'live':
-      return fromLive(phase, input, root);
+      return fromLive(phase, input, prefix);
     case 'replacing':
-      return fromReplacing(phase, input, root);
+      return fromReplacing(phase, input, prefix);
   }
 }
 
 /**
- * How long a member stays after its last namespace is withdrawn live before it is reported as left; a newly loaded
+ * How long a root stays after its last namespace is withdrawn live before it is reported as removed; a newly loaded
  * discovery's snapshot needs none. It counts only while the followed discovery delivers: one that runs out while the
  * request is replaced or its stream has failed waits for the next load, which settles it or starts it again. The relay
  * orders nothing across two sessions: with no demand on the rotating publisher, the old generation's withdrawal
@@ -436,35 +452,39 @@ export function transition(phase: MembersPhase, input: MembersInput, root: reado
  */
 const LEAVE_GRACE_MS = 100;
 
-export interface MembersDependencies {
-  liveConnection(scope: AbortSignal): Promise<MembersConnection | undefined>;
-  current(): MembersConnection | undefined;
+export interface PublishingRootsDependencies {
+  liveConnection(scope: AbortSignal): Promise<PublishingRootsConnection | undefined>;
+  current(): PublishingRootsConnection | undefined;
   /** Keep `connection` open through a rotation until the returned release runs. */
-  hold(connection: MembersConnection): () => void;
+  hold(connection: PublishingRootsConnection): () => void;
   onClosed(): void;
 }
 
-const NOBODY: ReadonlyMap<string, Member> = new Map();
+const NOBODY: ReadonlyMap<string, PublishingRoot> = new Map();
 
 function deliver(name: string, call: () => void): void {
   try {
     call();
   } catch (error) {
     // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
-    console.error(new Error(`${name} threw; the members view carries on`, { cause: error }));
+    console.error(new Error(`${name} threw; the publishing-roots view carries on`, { cause: error }));
   }
 }
 
-export function openMembers(deps: MembersDependencies, root: readonly string[], handlers: MembersHandlers): Members {
-  let phase: MembersPhase = { kind: 'loading', candidate: undefined, failures: 0 };
-  const inbox: MembersInput[] = [];
+export function openPublishingRoots(
+  deps: PublishingRootsDependencies,
+  prefix: readonly string[],
+  handlers: PublishingRootsHandlers,
+): PublishingRoots {
+  let phase: PublishingRootsPhase = { kind: 'loading', candidate: undefined, failures: 0 };
+  const inbox: PublishingRootsInput[] = [];
   let draining = false;
   const scope = new AbortController();
   const opened = new Map<Source, { watch: DiscoveryWatch; detach(): void }>();
   const leaves = new Map<string, ReturnType<typeof setTimeout>>();
   const following = (source: Source) => opened.get(source)?.watch.following ?? false;
 
-  const feed = (input: MembersInput, first = false) => {
+  const feed = (input: PublishingRootsInput, first = false) => {
     if (first) inbox.unshift(input);
     else inbox.push(input);
     if (draining) return;
@@ -472,7 +492,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
     try {
       for (let next = inbox.shift(); next; next = inbox.shift()) {
         const was = phase;
-        const step = transition(phase, next, root);
+        const step = transition(phase, next, prefix);
         phase = step.phase;
         if (phase.kind === 'closed' && was.kind !== 'closed') {
           scope.abort();
@@ -495,7 +515,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
     const { connection } = source;
     let held: DiscoveryWatch;
     try {
-      held = connection.discovery.watch(root, {
+      held = connection.discovery.watch(prefix, {
         onAnnounced: (namespace) => feed({ kind: 'namespace', source, type: 'announced', namespace }),
         onUnannounced: (namespace) => feed({ kind: 'namespace', source, type: 'unannounced', namespace }),
         onLoaded: () => feed({ kind: 'loaded', source }),
@@ -525,7 +545,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
     if (connection.retiring.aborted) retiring();
   };
 
-  const run = (effect: MembersEffect) => {
+  const run = (effect: PublishingRootsEffect) => {
     switch (effect.kind) {
       case 'open':
         watch(effect.source);
