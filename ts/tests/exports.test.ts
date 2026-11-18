@@ -112,14 +112,18 @@ describe('media vocabulary', () => {
   it('exports factories for the frame writer, the frame reader, the latest-value reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
     const media = await import('../src/media.js');
     expect(Object.keys(media).sort()).toEqual([
+      'PRESENCE_HEARTBEAT_MS',
+      'PRESENCE_TRACK',
       'createCatalogService',
       'createDocumentService',
       'createFrameReader',
       'createFrameWriter',
       'createLatestValueReader',
+      'createPresenceView',
       'createReplaceableTrack',
       'mediaSubscribeParameters',
       'mediaTrackProperties',
+      'publishPresence',
     ]);
     expect(relay).not.toHaveProperty('createFrameWriter');
   });

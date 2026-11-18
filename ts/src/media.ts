@@ -6,7 +6,9 @@
  * frame reader reads a subscription as frames in decode order, and a latest-value reader reads a latest-wins track as its
  * newest values. They know no format: a frame carries its own object
  * properties, a document is bytes, and the reader drives a sequencer it is given, so they pair with `@caprid/moq-media`'s
- * LOC and MSF helpers and its `FrameSequencer` without depending on them.
+ * LOC and MSF helpers and its `FrameSequencer` without depending on them. Presence is a JSON convention of its own:
+ * `publishPresence` serves a participant's document with a heartbeat, and `createPresenceView` follows everyone's under
+ * a prefix as a live roster.
  *
  * ```ts
  * import { createCatalogService, createFrameWriter, mediaTrackProperties } from '@caprid/relay/media';
@@ -58,6 +60,19 @@ export {
   mediaSubscribeParameters,
   mediaTrackProperties,
 } from './media-track-properties.js';
+export {
+  createPresenceView,
+  PRESENCE_HEARTBEAT_MS,
+  PRESENCE_TRACK,
+  type PresenceChange,
+  type PresenceMember,
+  type PresencePublisher,
+  type PresenceView,
+  type PresenceViewHandlers,
+  type PresenceViewOptions,
+  type PublishPresenceOptions,
+  publishPresence,
+} from './presence.js';
 export {
   createReplaceableTrack,
   type ReplaceableTrack,

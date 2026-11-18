@@ -158,14 +158,18 @@ for (const name of Object.keys(sdkExports)) {
 // The media entry point exports only the media policy, which the root leaves out (#263, #303).
 const mediaPolicy = await import('../dist/media.js');
 assert.deepEqual(Object.keys(mediaPolicy).sort(), [
+  'PRESENCE_HEARTBEAT_MS',
+  'PRESENCE_TRACK',
   'createCatalogService',
   'createDocumentService',
   'createFrameReader',
   'createFrameWriter',
   'createLatestValueReader',
+  'createPresenceView',
   'createReplaceableTrack',
   'mediaSubscribeParameters',
   'mediaTrackProperties',
+  'publishPresence',
 ]);
 // The core's wire entry point exports the codec a test relay drives a session with, and only that (#367).
 assert.deepEqual(core.exports['./wire'], { types: './dist/wire.d.ts', import: './dist/wire.js' });
