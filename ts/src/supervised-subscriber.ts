@@ -29,7 +29,12 @@ import {
   refusedForGood,
 } from './discovery.js';
 import { RelayError } from './errors.js';
-import { type Members, type MembersHandlers, type MembersOptions, openMembers } from './members.js';
+import {
+  openPublishingRoots,
+  type PublishingRoots,
+  type PublishingRootsHandlers,
+  type PublishingRootsOptions,
+} from './publishing-roots.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
 import { SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
@@ -223,15 +228,16 @@ export interface SupervisedSubscriber {
    */
   rotate(): void;
   /**
-   * Follow who is present under a root, across reconnects and rotations, with no roster server: each namespace one
-   * field below the root is a member, a supervised publisher's generations under it count as one member, and a member
-   * leaves once its last namespace has been withdrawn for 100 ms (soon after a clean close, at the relay's idle timeout
-   * after a crash).
+   * Follow the roots that are publishing now under a prefix, across reconnects and rotations, with no roster server.
+   * Publishing means announced, not necessarily sending objects. Each namespace one field below the prefix is a root,
+   * and a root is removed once its last namespace has been withdrawn for 100 ms (soon after a clean close, at the
+   * relay's idle timeout after a crash). The layout is a contract: a second field under a root is read as that root's
+   * generation, so a supervised publisher's generations count as one root, and anything deeper is ignored.
    * Shares the connection's discovery with every want and view under the same prefix tree. Arguments are checked at
    * once; handlers run from the next turn on.
    */
-  members(options: MembersOptions, handlers?: MembersHandlers): Members;
-  /** Stop reconnecting, cancel every want, close every members view and close the connection. Idempotent. */
+  publishingRoots(options: PublishingRootsOptions, handlers?: PublishingRootsHandlers): PublishingRoots;
+  /** Stop reconnecting, cancel every want, close every publishing-roots view and close the connection. Idempotent. */
   close(): void;
 }
 
@@ -261,7 +267,7 @@ interface Connection {
   /** One watch per fixed namespace a want waits on to be announced again, shared by every want on it. */
   wakes: Map<string, NamespaceWake & { users: number; linger?: ReturnType<typeof setTimeout> | undefined }>;
   /**
-   * Wants with a subscription and member views with a discovery still on this connection; a rotation closes it once
+   * Wants with a subscription and publishing-roots views with a discovery still on this connection; a rotation closes it once
    * none are left.
    */
   holds: number;
@@ -344,7 +350,7 @@ export async function superviseRelaySubscriber(
   signal?.throwIfAborted();
 
   const wants = new Map<string, Want>();
-  const views = new Set<Members>();
+  const views = new Set<PublishingRoots>();
   let status: SupervisedStatus = 'connecting';
   let stopped = false;
   let current: Connection | undefined;
@@ -739,17 +745,17 @@ export async function superviseRelaySubscriber(
       if (typeof key !== 'string') throw new TypeError('want key must be a string');
       wants.get(key)?.catchUp?.();
     },
-    members(membersOptions, handlers = {}) {
-      if (typeof membersOptions !== 'object' || membersOptions === null) {
-        throw new TypeError('members takes an options object');
+    publishingRoots(rootsOptions, handlers = {}) {
+      if (typeof rootsOptions !== 'object' || rootsOptions === null) {
+        throw new TypeError('publishingRoots takes an options object');
       }
-      const safeHandlers = guard(handlers, 'members');
-      const root = namespaceFields(membersOptions.root);
-      namespaceFields([...root, 'x', 'x']);
+      const safeHandlers = guard(handlers, 'publishingRoots');
+      const prefix = namespaceFields(rootsOptions.prefix);
+      namespaceFields([...prefix, 'x', 'x']);
       if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
-      const view: Members = openMembers(
+      const view: PublishingRoots = openPublishingRoots(
         { liveConnection, current: () => current, hold, onClosed: () => views.delete(view) },
-        root,
+        prefix,
         safeHandlers,
       );
       views.add(view);
@@ -1788,7 +1794,7 @@ interface NamespaceWake {
 
 /**
  * The connection's watch for the fixed `namespace`, opened on first use and closed a moment after its last user leaves.
- * It is served by the connection's discovery, so a root's discovery or a member view over the namespace serves it too.
+ * It is served by the connection's discovery, so a root's discovery or a publishing-roots view over the namespace serves it too.
  */
 function namespaceWake(connection: Connection, namespace: string[]): { watch: NamespaceWake; release(): void } {
   const key = JSON.stringify(namespace);
