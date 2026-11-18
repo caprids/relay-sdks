@@ -21,6 +21,9 @@ each section says what changed and what to do about it. How to cut a release is 
   namespace. Each namespace announces once a track in it is registered. `onAnnounced` runs once per namespace,
   `onAnnounceEnded` gets the `namespace` it lost, and `onTrackBinding` and `onSubscribeFailed` carry `trackNamespace`.
   Code that called `announce()` twice to move to another namespace must `withdraw()` the first.
+- `@caprid/moq-core`, `@caprid/relay`: a subscriber connection ends at once when the relay stops its control stream
+  (§6.3: the control stream lives as long as the session), as a publisher connection already did, instead of carrying
+  on until the transport's own close.
 - `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
   are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
   announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field

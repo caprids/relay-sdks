@@ -262,4 +262,17 @@ describe('createMoqtDuplexSession', () => {
     expect(decodeControlMessage(frame!).kind).toBe('subscribe-ok');
     session.destroy();
   });
+  it('ends the session when the peer stops this endpoint’s control stream (§6.3)', async () => {
+    const pair = createTransportPair();
+    const closed: { error?: unknown }[] = [];
+    createMoqtDuplexSession(pair.client, { subscriber: { callbacks: { onClosed: (info) => closed.push(info) } } });
+    const control = (await pair.server.createUnidirectionalStream()).getWriter();
+    await control.write(encodeSetup([]));
+
+    const { value: clientControl } = await pair.server.incomingUnidirectionalStreams.getReader().read();
+    await clientControl!.cancel(new Error('stop'));
+
+    await vi.waitFor(() => expect(closed).toHaveLength(1));
+    expect(closed[0]!.error).toBeDefined();
+  });
 });

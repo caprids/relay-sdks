@@ -504,6 +504,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   #peerRequestIds: Set<number>;
   /** The namespaces to announce, by {@link namespaceKey}. */
   #announces = new Map<string, AnnounceRecord>();
+  /** NAMESPACE_DONE writes `withdraw()` started; an orderly close drains them with its own retractions. */
+  #pendingWithdrawals = new Set<Promise<void>>();
   /** Namespaces with at least one registered track, by {@link namespaceKey}: an announce waits for its first. */
   #trackNamespaces = new Set<string>();
   #receivedNamespaceSolicitation = false;
@@ -657,7 +659,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#endTrack(track);
     }
 
-    const writes: Promise<unknown>[] = [];
+    const writes: Promise<unknown>[] = [...this.#pendingWithdrawals];
 
     for (const track of this.#tracks.values()) {
       if (track.doneFlushed) writes.push(track.doneFlushed);
@@ -762,7 +764,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
       const [entry] = stream.announced.splice(index, 1);
       // A failed write means the carrier is dead, which its own failure path reports.
-      void stream.writer.write(encodeNamespaceDone(entry!)).catch(() => {});
+      const write = stream.writer.write(encodeNamespaceDone(entry!)).catch(() => {});
+      this.#pendingWithdrawals.add(write);
+      void write.then(() => this.#pendingWithdrawals.delete(write));
     }
   }
 

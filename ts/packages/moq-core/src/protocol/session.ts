@@ -662,6 +662,10 @@ class MoqtSessionImpl implements MoqtSession {
       const control = await this.#transport.createUnidirectionalStream();
 
       this.#controlWriter = control.getWriter();
+      // A control stream MUST stay open for the session's lifetime (§6.3): a peer stopping it has ended the session, as
+      // the publish driver also treats it. A clean local close resolves the writer instead, and #fatal no-ops once
+      // #handleClosed has run.
+      void this.#controlWriter.closed.catch((error: unknown) => this.#fatal(error));
       const options: KeyValuePair[] = [
         {
           type: SETUP_OPTION.MOQT_IMPLEMENTATION,
