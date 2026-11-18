@@ -2017,6 +2017,63 @@ async def test_rotation_moves_a_want_to_the_new_connection_with_no_callback_and_
     assert subscriber.status == "live"
 
 
+async def _rotated_silent_want(
+    cleanup: list[Callable[[], object]],
+) -> tuple[ExpiringSubscribers, list[str], FakeSubscription, FakeSubscription]:
+    """A want whose track has delivered nothing (#524), rotated: the replacement is not accepted yet."""
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    subscriber.want(
+        "silent",
+        ["room"],
+        "silent",
+        WantHandlers(
+            on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
+            on_object=lambda obj: seen.append(f"object {obj.group_id}"),
+            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+            on_switched=lambda _info: seen.append("switched"),
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    return s, seen, old, s.connections[1].subscriptions[0]
+
+
+async def test_rotation_closes_the_old_connection_at_the_acceptance_of_a_want_whose_track_delivered_nothing(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    s, seen, old, replacement = await _rotated_silent_want(cleanup)
+    assert not old.cancelled
+    replacement.accept()
+    assert old.cancelled
+    await until(lambda: s.first.closed.done(), "old connection closed well within the 10 s overlap", timeout=1)
+    # The relay sends the track's first object on both subscriptions.
+    old.send_object(0)
+    replacement.send_object(0)
+    replacement.send_object(1)
+    assert seen == ["subscribed", "object 0", "object 1"]
+    assert s.statuses == ["live"]
+    assert len(s.connections) == 2
+
+
+async def test_rotation_waits_for_the_first_object_when_the_old_subscription_delivered_one_before_the_acceptance(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _s, seen, old, replacement = await _rotated_silent_want(cleanup)
+    old.send_object(0)
+    replacement.accept()
+    assert not old.cancelled
+    old.send_object(1)
+    replacement.send_object(1)
+    assert old.cancelled
+    replacement.send_object(2)
+    assert seen == ["subscribed", "object 0", "object 1", "object 2"]
+
+
 async def test_rotation_carries_on_to_the_replacement_when_the_old_connection_ends_before_it_delivered(
     cleanup: list[Callable[[], object]],
 ) -> None:
@@ -2576,7 +2633,7 @@ async def test_takes_up_a_rotate_made_during_the_overlap_once_the_overlap_ends(
     s.first.subscriptions[0].accept()
     subscriber.rotate()
     await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
-    subscriber.rotate()  # during the overlap: the silent old subscription still holds it open
+    subscriber.rotate()  # during the overlap: the unaccepted replacement still holds it open
     await asyncio.sleep(0.02)
     assert len(s.connections) == 2
     s.first.end()

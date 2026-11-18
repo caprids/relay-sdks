@@ -1125,8 +1125,9 @@ function targetKey(namespace: readonly string[], track: string, parameters: Mess
  * The want's subscriptions from the first SUBSCRIBE on `connection` to whatever ends the attempt. A move (a newer
  * generation, or a re-want with another track or parameters) is made before the break: the replacement opens pending
  * while the active subscription keeps delivering, and takes over once one of its objects passes `until`. A rotation is
- * a move to the next connection: with the target unchanged, the replacement takes over at its first object, delivers
- * only what the active one had not, and no callback marks it.
+ * a move to the next connection: with the target unchanged, the replacement takes over at its first object, or at its
+ * acceptance when the active one has delivered nothing. It delivers only what the active one had not, and no callback
+ * marks it.
  */
 async function follow(
   want: Want,
@@ -1290,8 +1291,11 @@ async function follow(
     if (on.signal.aborted) closed();
   };
 
-  /** `slot` takes over at `object`, which is delivered unless the old subscription delivered it (`repeated`). */
-  const cutover = (slot: Slot, object: MoqtObject, repeated = false) => {
+  /**
+   * `slot` takes over at `object`, which is delivered unless the old subscription delivered it (`repeated`). A
+   * rotation's replacement for a track that has delivered nothing takes over at its acceptance, with no object.
+   */
+  const cutover = (slot: Slot, object?: MoqtObject, repeated = false) => {
     const from = active;
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
@@ -1326,9 +1330,11 @@ async function follow(
       );
     } else from.subscription.cancel();
     releaseUnused();
-    slot.firstGroup = object.groupId;
-    // A replacement that starts behind the old subscription still drains through what that one delivered.
-    slot.largestGroup = Math.max(object.groupId, slot.skipThrough?.groupId ?? object.groupId);
+    if (object) {
+      slot.firstGroup = object.groupId;
+      // A replacement that starts behind the old subscription still drains through what that one delivered.
+      slot.largestGroup = Math.max(object.groupId, slot.skipThrough?.groupId ?? object.groupId);
+    }
     lastObjectAt = performance.now();
     if (!silent) {
       try {
@@ -1346,7 +1352,7 @@ async function follow(
     }
     // Later groups that reached the replacement early, out of order, follow the object that cut over. Each delivery
     // is isolated, so one throwing callback loses neither the rest nor the held events.
-    const replay = heldAfter(slot.held, object);
+    const replay = object ? heldAfter(slot.held, object) : slot.held;
     slot.held = [];
     const deliver = (call: () => void) => {
       try {
@@ -1357,7 +1363,7 @@ async function follow(
       }
     };
     // A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-    if (!repeated) {
+    if (object && !repeated) {
       delivered(slot, object);
       if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
     }
@@ -1473,6 +1479,13 @@ async function follow(
         onSubscribed: (info) => {
           if (!slot || over()) return;
           slot.accepted = info;
+          // A rotation's replacement for a track that has delivered nothing has no first object to wait for, and
+          // waiting would hold the old connection for the whole overlap. It takes over once accepted: the relay
+          // sends the track's first object on both subscriptions (measured on ord, #524).
+          if (slot === pending && rotating(slot) && !active.latest && !active.skipThrough) {
+            cutover(slot);
+            return;
+          }
           if (slot !== active) return;
           // Accepted: the watch that waited for the namespace to be announced again is done with.
           releaseWake(want);

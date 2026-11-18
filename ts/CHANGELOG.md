@@ -8,6 +8,11 @@ each section says what changed and what to do about it. How to cut a release is 
 ## Unreleased
 
 - `@caprid/relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when a want's track has delivered nothing, such as an interrupt or transcript track before its first object (#524).
+  Such a want now moves when the replacement's SUBSCRIBE is accepted. On ord the old connection closed 10.1 s after
+  `rotate()` before, in 12 of 12 rotations, and 0.13 to 0.15 s after (median 0.14 s, 12 rotations). A first object
+  written during the rotation was delivered once in 82 of 82 trials. Nothing to change in an application.
+- `@caprid/relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
   when the old connection delivers every object first (#430). A want whose target is unchanged now cuts over at the
   replacement's first object, not at the first object the old subscription had not delivered. Both connections
   receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once each, and a subgroup

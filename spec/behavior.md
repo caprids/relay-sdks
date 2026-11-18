@@ -796,9 +796,13 @@ taken over.
     never take over, holding the old connection for the whole overlap. No callback marks the cutover, no `onSwitched`, `onRestarted` or `onSubscribed`,
     and nothing is lost or repeated, so decoders keep their state. The old subscription is
     cancelled, not drained. Once any of the want's subscriptions has heard `PUBLISH_DONE`, nothing
-    is dropped: a restarted publisher numbers its groups from 0 again. A want whose track sends
-    nothing and has no group cached at the relay has no first object, and keeps the old connection
-    open until the overlap ends.
+    is dropped: a restarted publisher numbers its groups from 0 again.
+  - **Same target, nothing delivered yet**: a want whose track has delivered no object has no
+    first object to wait for, and waiting would hold the old connection for the whole overlap. Its
+    replacement cuts over when its SUBSCRIBE is accepted, with no callback, and the old subscription
+    is cancelled. This relies on the relay sending the track's first object on both subscriptions
+    when it is published around that moment. The draft does not promise that. Relay did it in every
+    trial measured on ord (#524).
   - **Another target**, a newer generation announced on the new connection or a re-want: an
     ordinary move, with `until`, the drain and `onSwitched`.
   - The old connection closing under the old subscription leaves the replacement to carry on, and

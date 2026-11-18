@@ -2050,6 +2050,61 @@ describe('rotation before the credential expires (#261)', () => {
     expect(subscriber.status).toBe('live');
   });
 
+  describe('a rotation of a want whose track has delivered nothing (#524)', () => {
+    async function silentWant() {
+      const { subscriber, connections, statuses } = await subscribers();
+      const seen: string[] = [];
+      subscriber.want(
+        'silent',
+        { namespace: ['room'], track: 'silent', retry: fast },
+        {
+          onSubscribed: () => seen.push('subscribed'),
+          onObject: (object) => seen.push(`object ${object.groupId}`),
+          onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+          onSwitched: () => seen.push('switched'),
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const old = connections[0]!.subscriptions[0]!;
+      old.accept();
+      let oldClosed = false;
+      void connections[0]!.closed.then(() => {
+        oldClosed = true;
+      });
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe on the new connection');
+      const replacement = connections[1]!.subscriptions[0]!;
+      return { connections, statuses, seen, old, replacement, oldClosed: () => oldClosed };
+    }
+
+    it("closes the old connection at the replacement's acceptance, and delivers the first object once", async () => {
+      const { connections, statuses, seen, old, replacement, oldClosed } = await silentWant();
+      expect(old.cancelled).toBe(false);
+      replacement.accept();
+      expect(old.cancelled).toBe(true);
+      await until(oldClosed, 'old connection closed well within the 10 s overlap', 1_000);
+      // The relay sends the track's first object on both subscriptions.
+      old.object(0);
+      replacement.object(0);
+      replacement.object(1);
+      expect(seen).toEqual(['subscribed', 'object 0', 'object 1']);
+      expect(statuses).toEqual(['live']);
+      expect(connections).toHaveLength(2);
+    });
+
+    it('waits for the first object when the old subscription delivered one before the acceptance', async () => {
+      const { seen, old, replacement } = await silentWant();
+      old.object(0);
+      replacement.accept();
+      expect(old.cancelled).toBe(false);
+      old.object(1);
+      replacement.object(1);
+      expect(old.cancelled).toBe(true);
+      replacement.object(2);
+      expect(seen).toEqual(['subscribed', 'object 0', 'object 1', 'object 2']);
+    });
+  });
+
   it('carries on to the replacement when the old connection ends before it delivered', async () => {
     const { subscriber, connections } = await subscribers();
     const seen: string[] = [];
@@ -2545,7 +2600,7 @@ describe('rotation before the credential expires (#261)', () => {
       connections[0]!.subscriptions[0]!.accept();
       subscriber.rotate();
       await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
-      subscriber.rotate(); // during the overlap: the silent old subscription still holds it open
+      subscriber.rotate(); // during the overlap: the unaccepted replacement still holds it open
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(connections).toHaveLength(2);
       connections[0]!.end();

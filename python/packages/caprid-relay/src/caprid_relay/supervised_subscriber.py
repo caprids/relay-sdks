@@ -1240,8 +1240,9 @@ async def _follow(
     A move (a newer generation, or a re-want with another track or parameters) is made before the
     break: the replacement opens pending while the active subscription keeps delivering, and takes
     over once one of its objects passes ``until``. A rotation is a move to the next connection: with
-    the target unchanged, the replacement takes over at its first object, delivers only what the active
-    one had not, and no callback marks it.
+    the target unchanged, the replacement takes over at its first object, or at its acceptance when the
+    active one has delivered nothing. It delivers only what the active one had not, and no callback
+    marks it.
     """
     loop = asyncio.get_running_loop()
     # The followed root's discovery on the active subscription's connection.
@@ -1408,9 +1409,10 @@ async def _follow(
         if on.ended.cancelled:
             closed()
 
-    def cutover(slot: _Slot, obj: MoqtObject, repeated: bool = False) -> None:
+    def cutover(slot: _Slot, obj: MoqtObject | None = None, repeated: bool = False) -> None:
         """``slot`` takes over at ``obj``, which is delivered unless the old subscription delivered it
-        (``repeated``)."""
+        (``repeated``). A rotation's replacement for a track that has delivered nothing takes over at its
+        acceptance, with no object."""
         nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch
         nonlocal unwatch_next
         previous = active
@@ -1445,9 +1447,10 @@ async def _follow(
         else:
             previous.cancel()
         release_unused()
-        slot.first_group = obj.group_id
-        # A replacement that starts behind the old subscription still drains through what that one delivered.
-        slot.largest_group = max(obj.group_id, slot.skip_through[0] if slot.skip_through else obj.group_id)
+        if obj is not None:
+            slot.first_group = obj.group_id
+            # A replacement that starts behind the old subscription still drains through what that one delivered.
+            slot.largest_group = max(obj.group_id, slot.skip_through[0] if slot.skip_through else obj.group_id)
         last_object_at = loop.time()
         if not silent:
             # A subscription that delivered an object was accepted.
@@ -1460,7 +1463,7 @@ async def _follow(
                 _log.exception("on_switched raised; the want delivers regardless")
         # Later groups that reached the replacement early, out of order, follow the object that cut over.
         # Each delivery is isolated, so one raising callback loses neither the rest nor the held events.
-        replay = _held_after(slot.held, obj)
+        replay = _held_after(slot.held, obj) if obj is not None else slot.held
         slot.held = []
 
         def deliver(name: str, value: object) -> None:
@@ -1470,7 +1473,7 @@ async def _follow(
                 _log.exception("%s raised at a cutover; the want delivers regardless", name)
 
         # A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-        if not repeated:
+        if obj is not None and not repeated:
             slot.delivered(obj)
             if not over() and active is slot:
                 deliver("on_object", obj)
@@ -1479,7 +1482,7 @@ async def _follow(
                 break
             if isinstance(held, ObjectEvent):
                 slot.delivered(held.value)
-                if _is_progress(held.value, obj.group_id):
+                if _is_progress(held.value, slot.first_group):
                     slot.progressed = True
                 slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
                 deliver("on_object", held.value)
@@ -1550,6 +1553,12 @@ async def _follow(
         if over():
             return
         slot.accepted = info
+        # A rotation's replacement for a track that has delivered nothing has no first object to wait for, and
+        # waiting would hold the old connection for the whole overlap. It takes over once accepted: the relay
+        # sends the track's first object on both subscriptions (measured on ord, #524).
+        if slot is pending and rotating(slot) and active.latest is None and active.skip_through is None:
+            cutover(slot)
+            return
         if slot is not active:
             return
         # Accepted: the watch that waited for the namespace to be announced again is done with.
