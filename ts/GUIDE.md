@@ -845,7 +845,7 @@ const roots = subscriber.publishingRoots(
 );
 ```
 
-With ada already in the room, bob joining and then closing his publisher, ada's console shows:
+With ada already in the room, bob joining and then closing the publisher, ada's console shows:
 
 ```text
 loaded [ 'ada' ]
@@ -884,7 +884,8 @@ What the view reports, and when:
   10 to 13 s after the crash.
 - A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
 - While the subscriber reconnects, the view keeps its last state. Once the new connection has
-  loaded, one `onChanged` reports what changed meanwhile, with additions and removals together.
+  loaded, one `onChanged` reports what changed meanwhile, with additions and removals together. A
+  root whose removal was already pending when the connection dropped can be removed in a later call.
 
 `onError` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
 The view is closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).

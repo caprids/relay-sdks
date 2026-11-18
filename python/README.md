@@ -751,7 +751,7 @@ roots = subscriber.publishing_roots(
 )
 ```
 
-With ada already in the room, bob joining and then closing his publisher, ada's process prints:
+With ada already in the room, bob joining and then closing the publisher, ada's process prints:
 
 ```text
 loaded ['ada']
@@ -789,7 +789,8 @@ What the view reports, and when:
   10 to 13 s after the crash.
 - A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
 - While the subscriber reconnects, the view keeps its last state. Once the new connection has
-  loaded, one `on_changed` reports what changed meanwhile, with additions and removals together.
+  loaded, one `on_changed` reports what changed meanwhile, with additions and removals together. A
+  root whose removal was already pending when the connection dropped can be removed in a later call.
 
 `on_error` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
 The view is closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
@@ -802,8 +803,10 @@ publishes a small JSON document on a `presence` track and resends it every 2 s a
 ([TypeScript guide](../ts/GUIDE.md#presence-a-document-and-a-heartbeat-for-each-root)).
 
 The Python SDK has no presence helper. A Python application can still read presence, because the
-track is plain JSON with no added fields. Each object is one party's whole document. Want the
-`presence` track of each root and keep the newest document:
+track is plain JSON with no added fields. Each object is one party's whole document, in a group of
+its own. Want the `presence` track of each root and keep the newest document. A want can deliver the
+relay's cached copy of an object again after it resubscribes, so count an object only when it is
+newer than the last one: a larger group ID in the same generation, or a newer generation.
 
 ```python
 import time
@@ -821,35 +824,72 @@ STALE_AFTER = 6.0  # three of the publishers' 2 s heartbeats
 
 subscriber = await connect_supervised_subscriber(url, get_token=get_token)
 documents: dict[str, object] = {}
+payloads: dict[str, bytes] = {}
 heard: dict[str, float] = {}
+route: dict[str, str] = {}  # the generation each want is subscribed to
+newest: dict[str, tuple[str, int]] = {}  # the (generation, group) of the last object counted
+
+
+def is_stale(root_id: str) -> bool:
+    return time.monotonic() - heard[root_id] >= STALE_AFTER
+
+
+def counts(root_id: str, group_id: int) -> bool:
+    """Whether an object is newer than the last one counted. A relay's cached copy is not."""
+    generation = route.get(root_id)
+    if generation is None:
+        return False
+    if root_id not in newest:
+        return True
+    last_generation, last_group = newest[root_id]
+    if generation == last_generation:
+        return group_id > last_group
+    return generation > last_generation or is_stale(root_id)  # generations sort by start time
 
 
 def on_presence(root_id: str, obj: MoqtObject) -> None:
-    if obj.status != "normal":
+    if obj.status != "normal" or not counts(root_id, obj.group_id):
         return
-    try:
-        document = read_json(obj)
-    except ValueError:
-        return  # not JSON: keep the document you had
-    heard[root_id] = time.monotonic()
-    if documents.get(root_id) != document:
+    newest[root_id] = (route[root_id], obj.group_id)
+    if payloads.get(root_id) != obj.payload:
+        try:
+            document = read_json(obj)
+        except ValueError:
+            return  # not JSON: keep the document you had
+        payloads[root_id] = obj.payload
         documents[root_id] = document
         print("document", root_id, document)
+    if root_id in documents:
+        heard[root_id] = time.monotonic()
+
+
+def follow(root_id: str, namespace: tuple[str, ...]) -> None:
+    def on_object(obj: MoqtObject) -> None:
+        on_presence(root_id, obj)
+
+    def on_generation(generation_namespace: tuple[str, ...]) -> None:
+        route[root_id] = generation_namespace[-1]
+
+    subscriber.want(
+        f"presence/{root_id}",
+        namespace,
+        "presence",
+        WantHandlers(
+            on_object=on_object,
+            on_subscribed=lambda info, generation_namespace: on_generation(generation_namespace),
+            on_switched=lambda info: on_generation(info.to_namespace),
+        ),
+        generations=True,
+    )
 
 
 def on_changed(change: PublishingRootsChange) -> None:
     for root in change.added:
-
-        def on_object(obj: MoqtObject, root_id: str = root.id) -> None:
-            on_presence(root_id, obj)
-
-        subscriber.want(
-            f"presence/{root.id}", root.namespace, "presence", WantHandlers(on_object=on_object), generations=True
-        )
+        follow(root.id, root.namespace)
     for root in change.removed:
         subscriber.unwant(f"presence/{root.id}")
-        documents.pop(root.id, None)
-        heard.pop(root.id, None)
+        for state in (documents, payloads, heard, route, newest):
+            state.pop(root.id, None)
         print("left", root.id)
 
 
@@ -858,17 +898,16 @@ roots = subscriber.publishing_roots(["room", room_id], PublishingRootsHandlers(o
 
 def live() -> dict[str, object]:
     """Members heard from within the stale window."""
-    now = time.monotonic()
-    return {root_id: document for root_id, document in documents.items() if now - heard[root_id] < STALE_AFTER}
+    return {root_id: document for root_id, document in documents.items() if not is_stale(root_id)}
 ```
 
 Against three TypeScript parties that call `publishPresence`, this prints each document once, then a
-new one when a party changes it:
+new one when dora changes the document, and `left` when bob closes the publisher and carol is killed:
 
 ```text
-document dora {'name': 'Dora', 'handRaised': False}
-document carol {'name': 'Carol', 'handRaised': False}
 document bob {'name': 'Bob', 'handRaised': False}
+document carol {'name': 'Carol', 'handRaised': False}
+document dora {'name': 'Dora', 'handRaised': False}
 document dora {'name': 'Dora', 'handRaised': True}
 left bob
 left carol
