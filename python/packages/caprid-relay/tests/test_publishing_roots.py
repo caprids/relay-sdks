@@ -1088,6 +1088,21 @@ def test_follows_a_rotation_make_before_break_and_a_root_the_new_load_misses_is_
     assert (ids(removed.added), ids(removed.removed)) == ([], ["bob"])
 
 
+def test_reports_nothing_for_a_root_the_old_discovery_withdraws_while_the_loading_new_one_already_shows_it() -> None:
+    on, source, phase, _effects = loaded("alice")
+    retired = _transition(phase, _Retiring(on, StubConnection()), PREFIX)
+    candidate = opened_source(retired.effects)
+    replacing = _transition(retired.phase, _Namespace(candidate, "announced", at("alice")), PREFIX).phase
+    withdrawn = _transition(replacing, _Namespace(source, "unannounced", at("alice")), PREFIX)
+    assert withdrawn.effects == (_ScheduleLeave("alice"),)
+    due = _transition(withdrawn.phase, _LeaveDue("alice", following), PREFIX)
+    assert due.effects == ()
+    done = _transition(due.phase, _Loaded(candidate), PREFIX)
+    assert isinstance(done.phase, _Live)
+    assert ids(done.phase.settled.present) == ["alice"]
+    assert done.effects == (_Release(source), _CancelLeave("alice"))
+
+
 def test_settles_every_pending_leave_by_a_new_loads_snapshot_one_it_shows_stays_one_it_does_not_keeps_its_grace() -> (
     None
 ):

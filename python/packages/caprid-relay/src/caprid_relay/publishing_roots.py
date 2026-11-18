@@ -325,9 +325,9 @@ def _follow(phase: _Live | _Replacing, source: _Source, event: _Namespace, prefi
     return _Step(replace(phase, settled=settled), (_emit((added,), (), settled),))
 
 
-def _leave_due(phase: _Live | _Replacing, root_id: str, followed: _Presence) -> _Step:
+def _leave_due(phase: _Live | _Replacing, root_id: str) -> _Step:
     gone = phase.settled.by_id.get(root_id)
-    if gone is None or root_id not in phase.leaving or root_id in followed:
+    if gone is None or root_id not in phase.leaving or any(root_id in s.presence for s in _sources_of(phase)):
         return _Step(phase)
     settled = _settle(root for root in phase.settled.present if root.id != root_id)
     leaving = _without(phase.leaving, root_id)
@@ -383,7 +383,7 @@ def _from_live(phase: _Live, event: _Input, prefix: Sequence[str]) -> _Step:
     if isinstance(event, _Namespace):
         return _follow(phase, source, event, prefix) if event.source is source else _Step(phase)
     if isinstance(event, _LeaveDue):
-        return _leave_due(phase, event.id, source.presence) if event.following(source) else _Step(phase)
+        return _leave_due(phase, event.id) if event.following(source) else _Step(phase)
     if isinstance(event, _Loaded):
         return _resume(phase) if event.source is source else _Step(phase)
     if isinstance(event, _Retiring):
@@ -453,7 +453,7 @@ def _from_replacing(phase: _Replacing, event: _Input, prefix: Sequence[str]) -> 
         return _Step(phase)
     if isinstance(event, _LeaveDue):
         if source is not None and event.following(source):
-            return _leave_due(phase, event.id, source.presence)
+            return _leave_due(phase, event.id)
         return _Step(phase)
     if isinstance(event, _Loaded):
         if candidate is not None and event.source is candidate:
