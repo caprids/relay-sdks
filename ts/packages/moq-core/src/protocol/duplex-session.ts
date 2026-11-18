@@ -14,7 +14,8 @@
  * Request IDs need no coordination. Neither driver both starts and serves the same kind of request; this endpoint's
  * IDs are allocated by the subscribe driver alone, and each peer request is claimed by the driver it is routed to.
  *
- * Measured against moq-relay on 2026-11-18 (docs/single-session-diagnosis.md): one session announced, served the
+ * Measured against moq-relay on 2026-11-18 (spec/behavior.md, "One connection that publishes and subscribes"): one
+ * session announced, served the
  * relay's SUBSCRIBE and subscribed to another session's track at once, with the relay soliciting its announces even
  * though SETUP carried SOLICIT. The relay never routes a session's own announcements back to it.
  */

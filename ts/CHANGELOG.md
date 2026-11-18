@@ -7,6 +7,20 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay`: `connectRelay(options)` opens one connection that publishes and subscribes. It returns a
+  `RelaySession`: everything a `RelaySubscriber` does, plus `publish(namespace)`, which announces a namespace and returns
+  a `RelayPublication` (`registerTrack`, `announced`, `closed`, `close`). A connection announces any number of
+  namespaces with one token. A namespace the relay stops soliciting ends only its publication, with `NAMESPACE_ENDED`.
+  The relay does not route a connection's own announcements back to it: its discovery leaves them out, and a
+  subscribe to its own track is refused. `@caprid/relay/node` exports it over native QUIC. `connectRelay` was the
+  subscriber's name before it became `connectRelaySubscriber`; it now means a connection that does both (see
+  spec/vocabulary.md, "Connections"). `connectRelayPublisher` behaves as before.
+- `@caprid/moq-core`: `createMoqtDuplexSession(transport, config)` runs the subscribe and publish drivers on one
+  transport. `MoqtPublishSession` announces several namespaces: `announce()` now adds a namespace instead of replacing
+  the one announced, `withdraw(namespace)` sends NAMESPACE_DONE, and `isSolicited(namespace)` reports coverage for one
+  namespace. Each namespace announces once a track in it is registered. `onAnnounced` runs once per namespace,
+  `onAnnounceEnded` gets the `namespace` it lost, and `onTrackBinding` and `onSubscribeFailed` carry `trackNamespace`.
+  Code that called `announce()` twice to move to another namespace must `withdraw()` the first.
 - `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
   are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
   announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field

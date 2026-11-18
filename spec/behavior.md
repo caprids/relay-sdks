@@ -1054,8 +1054,10 @@ and every publishing-roots view.
 
 ## Publishing
 
-- Publishing uses a dedicated connection with a token authorized to publish the namespace. One
-  publisher connection serves one namespace and any number of tracks.
+- Publishing uses a connection whose token is authorized to publish the namespace: a dedicated
+  publisher connection, which serves one namespace and any number of tracks, or a connection that
+  also subscribes ([one connection that publishes and subscribes](#one-connection-that-publishes-and-subscribes)),
+  which serves any number of namespaces. Everything below holds for both.
 - Publishing follows the relay's announce-and-serve flow. Connecting a publisher announces its
   namespace. Registering a track makes it servable and sends nothing. The relay learns of the track
   when a subscriber asks for it. A write waits for the relay to subscribe upstream before sending
@@ -1179,6 +1181,44 @@ and every publishing-roots view.
   That is moq-relay 0.17. `main` asks with TRACK_STATUS instead, which the publisher answers (see
   above), and subscribes once ([TRACK_STATUS on moq-relay main](relay-interop.md#track_status-on-moq-relay-main)).
   Implemented in both SDKs.
+
+### One connection that publishes and subscribes
+
+`connectRelay` opens one connection that does everything a subscriber connection does and also
+publishes. MOQT gives a session no fixed role, and moq-relay serves both directions on one session
+when the token grants both: it solicits the session's announces from the token's publish grant
+whatever the session sends in SETUP, and routes its subscriptions as for any subscriber.
+
+- **One session.** The connection sends one SETUP, with the subscriber's options (SOLICIT,
+  ACTIVE_COUNT). The relay's requests to it, the solicitations that carry its announces and the
+  SUBSCRIBEs for its tracks, are served by the publishing side; its own requests and the data they
+  receive are the subscribing side's. One token covers both, so it must grant every namespace the
+  connection publishes and every one it subscribes to.
+- **Publications.** `publish(namespace)` announces a namespace and returns its publication, whose
+  tracks behave as a dedicated publisher's do (registration, demand, writes, `announced`). The
+  connection announces any number of namespaces, each once its first track is registered. A
+  namespace published once stays taken on the connection, also after its publication closes.
+  Closing a publication ends its tracks, waits for their unacknowledged groups as a publisher's
+  `close()` does, and withdraws the namespace (NAMESPACE_DONE). The connection stays open.
+- **A lost namespace ends only its publication.** When no solicitation covers a namespace any more,
+  its publication ends with `NAMESPACE_ENDED` and the namespace is withdrawn; later writes and
+  registrations fail with that error. The connection and its other publications carry on. A
+  dedicated publisher ends its whole connection instead.
+- **No loopback.** The relay never routes a connection's own announcements back to it. Its namespace
+  discovery does not report the namespaces it publishes, and a subscribe to one of its own tracks is
+  refused: request error 16 on moq-relay.
+- **Shutdown.** `close()` ends every publication's tracks, waits for their groups, retracts every
+  announce, then closes the connection and every request on it.
+- **Supervision.** The supervised connections still open one connection per role; a supervised
+  connection that publishes and subscribes is not built yet.
+
+Measured on 2026-11-18 against ord.relay.mux.global, TypeScript SDK on Node over native QUIC
+(`ts/scripts/probe-relay-session.mjs`), 3 of 3 runs: two peers each opened one connection, announced
+two namespaces with one track each and subscribed to both of the other's tracks, and received all 30
+objects on all four. Each peer's discovery reported only the other's two namespaces, and a loopback
+subscribe was refused with request error 16. moq-relay 0.17.2's source agrees: the session's
+publish and subscribe halves are both derived from the token, and routes announced by a session are
+hidden from it.
 
 ### Delivery timeouts
 

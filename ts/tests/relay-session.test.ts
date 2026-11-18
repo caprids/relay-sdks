@@ -11,7 +11,7 @@ import { STREAM_TYPE } from '../packages/moq-core/src/protocol/object-stream.js'
 import type { MoqtTransport } from '../packages/moq-core/src/protocol/session.js';
 import { rawSubscribe, solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
 import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
-import { connectRelaySession, RelayError, type RelaySession } from '../src/index.js';
+import { connectRelay, RelayError, type RelaySession } from '../src/index.js';
 import { encodeSubgroup } from './helpers/relay.js';
 
 const url = 'https://relay.example.com/room';
@@ -83,7 +83,7 @@ async function connect(): Promise<{
 }> {
   const pair = createTransportPair();
   const seen = scriptedRelay(pair.server);
-  const session = await connectRelaySession({
+  const session = await connectRelay({
     url,
     createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
   });
@@ -91,7 +91,7 @@ async function connect(): Promise<{
   return { session, server: pair.server, seen };
 }
 
-describe('connectRelaySession', () => {
+describe('connectRelay', () => {
   it('publishes and subscribes on one connection with one SETUP', async () => {
     const { session, server, seen } = await connect();
     const publication = session.publish(OWN);

@@ -1,4 +1,4 @@
-// Opt-in live check of `connectRelaySession`: one connection per peer that publishes several namespaces and subscribes.
+// Opt-in live check of `connectRelay`: one connection per peer that publishes several namespaces and subscribes.
 // Run after `pnpm build` and `pnpm --filter @caprid/relay-quic build:native`.
 //
 // Two peers, A and B, each open ONE connection. Each discovers the root, then publishes two namespaces, <root>/<name>
@@ -7,7 +7,7 @@
 //
 //   RELAY_URL=https://ord.relay.mux.global RELAY_TOKEN=... RELAY_NAMESPACE_PREFIX=... node scripts/probe-relay-session.mjs
 import { randomUUID } from 'node:crypto';
-import { connectRelaySession } from '@caprid/relay/node';
+import { connectRelay } from '@caprid/relay/node';
 
 const env = process.env;
 const url = env.RELAY_URL;
@@ -15,17 +15,21 @@ if (!url) throw new Error('RELAY_URL is required');
 const token = env.RELAY_TOKEN;
 if (!token) throw new Error('RELAY_TOKEN is required');
 const runMs = Number(env.PROBE_RUN_S ?? 6) * 1000;
-const root = [...(env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-probe').split('/').filter(Boolean), `session-${randomUUID()}`];
+const root = [
+  ...(env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-probe').split('/').filter(Boolean),
+  `session-${randomUUID()}`,
+];
 const startMs = performance.now();
 const at = () => Math.round(performance.now() - startMs);
 
 async function openPeer(name) {
-  const session = await connectRelaySession({ url, getToken: () => token });
+  const session = await connectRelay({ url, getToken: () => token });
   const peer = { name, session, discovery: [], sent: 0, timers: [] };
   void (async () => {
     try {
       for await (const event of session.namespaceEvents({ prefix: root })) {
-        if (event.type !== 'loaded') peer.discovery.push(`${event.type} ${event.namespace.slice(root.length).join('/')}`);
+        if (event.type !== 'loaded')
+          peer.discovery.push(`${event.type} ${event.namespace.slice(root.length).join('/')}`);
       }
     } catch {}
   })();
@@ -93,6 +97,8 @@ for (const peer of [a, b]) for (const timer of peer.timers) clearInterval(timer)
 await Promise.all([a.session.close(), b.session.close()]);
 
 console.log('\n=== summary ===');
-for (const peer of [a, b]) console.log(`[${peer.name}] sent ${peer.sent}; discovery saw: ${peer.discovery.join(', ') || 'nothing'}`);
-for (const r of results) console.log(`${r.label}: objects ${r.objects}, first ${JSON.stringify(r.first)}, error ${r.error ?? 'none'}`);
+for (const peer of [a, b])
+  console.log(`[${peer.name}] sent ${peer.sent}; discovery saw: ${peer.discovery.join(', ') || 'nothing'}`);
+for (const r of results)
+  console.log(`${r.label}: objects ${r.objects}, first ${JSON.stringify(r.first)}, error ${r.error ?? 'none'}`);
 process.exit(0);

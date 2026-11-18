@@ -237,7 +237,7 @@ export interface RelayPublisher {
 }
 
 /**
- * One namespace a connection announces, with the tracks it serves: what `connectRelaySession` returns from `publish()`. A
+ * One namespace a connection announces, with the tracks it serves: what `connectRelay` returns from `publish()`. A
  * dedicated publisher connection is one of these. Its tracks behave as on {@link RelayPublisher}.
  */
 export interface RelayPublication {
@@ -467,7 +467,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
 }
 
 /**
- * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; `connectRelaySession` opens one
+ * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; `connectRelay` opens one
  * connection that does both. A relay must solicit the namespace and subscribe upstream before data can flow.
  */
 export async function connectRelayPublisher(options: ConnectRelayPublisherOptions): Promise<RelayPublisher> {

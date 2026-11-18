@@ -1,7 +1,7 @@
 /**
  * One Relay connection that publishes and subscribes: the subscriber's surface plus `publish()` for any number of
- * namespaces, over one MOQT session (`createMoqtDuplexSession`). See docs/single-session-diagnosis.md for why the
- * relay allows it and what was measured.
+ * namespaces, over one MOQT session (`createMoqtDuplexSession`). See spec/behavior.md, "One connection that publishes and
+ * subscribes".
  */
 import { createMoqtDuplexSession } from '@caprid/moq-core';
 import { type RelaySubscriber, relaySubscriberOf, SUBSCRIBER_SETUP_OPTIONS } from './connect.js';
@@ -10,11 +10,11 @@ import { RelayError } from './errors.js';
 import { createPublishHost, type RelayPublication } from './publish.js';
 import { namespaceFields } from './validation.js';
 
-/** Options for {@link connectRelaySession}: the subscriber's, since publishing adds no connection option. */
+/** Options for {@link connectRelay}: the subscriber's, since publishing adds no connection option. */
 export type ConnectRelaySessionOptions = ConnectRelaySubscriberOptions;
 
 /**
- * A connection that publishes and subscribes. Create one with {@link connectRelaySession}. Everything a
+ * A connection that publishes and subscribes. Create one with {@link connectRelay}. Everything a
  * {@link RelaySubscriber} does works here unchanged; `publish()` adds namespaces this connection announces and serves.
  *
  * The relay never routes a connection's own announcements back to it: `namespaceEvents` does not report this
@@ -38,7 +38,7 @@ export interface RelaySession extends RelaySubscriber {
  * Open one Relay connection that publishes and subscribes. The caller owns connection shutdown. A namespace the relay
  * stops soliciting ends only its publication (`NAMESPACE_ENDED` on its `closed`); the connection stays open.
  */
-export async function connectRelaySession(options: ConnectRelaySessionOptions): Promise<RelaySession> {
+export async function connectRelay(options: ConnectRelaySessionOptions): Promise<RelaySession> {
   assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
   const host = createPublishHost((namespace, error) =>
     host.disconnect(

@@ -14,6 +14,8 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
+| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | Not built yet (TypeScript first) |
+| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | Not built yet |
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
@@ -85,22 +87,36 @@ returns an async iterator (`demandChanges()`); everything that sends a request o
 standing request reports through synchronous handlers instead, as `subscribe`, `want` and
 `publishingRoots` do.
 
-## Connection roles: `connectRelaySubscriber`, `connectRelayPublisher`
+## Connections: `connectRelay`, `connectRelaySubscriber`, `connectRelayPublisher`
 
-A Relay connection has one role. A subscriber connection can subscribe, fetch, and query track
-status; it cannot publish. A publisher connection announces one namespace and serves tracks in it;
-it cannot subscribe. Each uses its own transport and its own token, and the application owns both
-connections' shutdown.
+A Relay connection does one of three things, and its entry point says which. A subscriber
+connection can subscribe, fetch, query track status and discover namespaces; it cannot publish. A
+publisher connection announces one namespace and serves tracks in it; it cannot subscribe. A
+connection from `connectRelay` does both: it is a `RelaySubscriber` with `publish()`, which
+announces any number of namespaces. The application owns every connection's shutdown.
 
-`connectRelay` was the subscriber entry point. Next to `connectRelayPublisher` it read as the
-general or bidirectional way in, and its result type `RelayConnection` said nothing about what the
-connection could do. The names now carry the role: `connectRelaySubscriber` returns a
-`RelaySubscriber`, `connectRelayPublisher` returns a `RelayPublisher`, and a reader who sees either
-knows which token it needs and which operations it has.
+`connectRelay` names the connection that does both because it is the general way in: one
+connection, one token, everything MOQT lets a session do. The name had a different meaning before
+2026-11. It was the subscriber entry point, and next to `connectRelayPublisher` it read as the
+general or bidirectional way in, which that connection was not, while its result type
+`RelayConnection` said nothing about what the connection could do. It was renamed
+`connectRelaySubscriber`. In 2026-11 the SDK gained a connection that publishes and subscribes
+(MOQT gives a session no role, and moq-relay serves both directions on one session; see
+behavior.md, "One connection that publishes and subscribes"), and the bare name now means what it
+always seemed to. The role-named entry points stay: `connectRelaySubscriber` and
+`connectRelayPublisher` say which token a connection needs and which operations it has.
 
-Not adopted: keeping `connectRelay` as the short, default entry point (subscribing is not more
-fundamental than publishing, and the asymmetry is what caused the confusion); `RelayConnection` as a
-shared base type (the two roles share a lifetime implementation, not an API).
+`RelaySession` is the result type: one MOQT session, both directions. It extends `RelaySubscriber`,
+so anything that takes a subscriber (a supervised subscriber's connection, a player's track source)
+takes it unchanged. `RelayPublication` is one namespace the connection announces, with the tracks it
+serves. It is not a "publisher", which in this vocabulary is a connection, nor an "announcement",
+because it also serves the tracks and owns their writers. Its options type is
+`ConnectRelaySessionOptions`, because `ConnectRelayOptions` already names what every connection
+takes.
+
+Not adopted: `connectRelaySession` (longer, for no gain once the bare name was free of its old
+meaning); `RelayConnection` again as the result type (the objection to it stands);
+`connectRelayPeer` / `RelayPeer` ("peer" says nothing about publishing or subscribing).
 
 The connection options follow the same split. `ConnectRelayOptions` is what both
 roles take: endpoint, token provider, lifetime signal, connection deadline, and transport. Each
@@ -235,7 +251,8 @@ alias would have kept the misleading name in autocomplete next to the one that r
 Consumers inside the repository (examples, live smoke tests, the Video.js streaming example) moved
 in the same change. The packages have been published since 0.1.0. Before 1.0, a minor version can
 break the API, and the changelogs ([TypeScript](../ts/CHANGELOG.md), [Python](../python/CHANGELOG.md))
-say what each rename changed and what to do about it.
+say what each rename changed and what to do about it. `connectRelay` is the one name that came back, with a new
+meaning; [Connections](#connections-connectrelay-connectrelaysubscriber-connectrelaypublisher) says why.
 
 ## One error identity: `RelayError`, `code`, `phase`
 
