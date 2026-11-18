@@ -1572,6 +1572,13 @@ class MoqtSessionImpl implements MoqtSession {
     const reader = new StreamReader(stream.readable);
     const type = await reader.readVarint();
     const message = await this.#readControlFrame(reader, type);
+    // A request still arriving when the session ended is dropped: nothing reaches a callback after `onClosed`. (A duplex
+    // session's transport outlives its subscriber, for the publisher's drain.)
+    if (this.#destroyed) {
+      await reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+      return;
+    }
     const initiatingRequestId =
       message.kind === 'fetch'
         ? message.request.requestId

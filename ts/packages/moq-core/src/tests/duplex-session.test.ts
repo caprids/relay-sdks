@@ -304,4 +304,25 @@ describe('createMoqtDuplexSession', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(offered).not.toHaveBeenCalled();
   });
+  it('drops a request to the subscriber still arriving when it is destroyed', async () => {
+    const order: string[] = [];
+    const { pair, session } = await harness({
+      subscriber: {
+        callbacks: { onIncomingPublish: () => order.push('publish'), onClosed: () => order.push('closed') },
+      },
+    });
+    session.publisher.announce(OWN);
+    session.publisher.registerTrack({ trackNamespace: OWN, trackName: 'video' });
+    const solicitation = await solicitNamespace(pair.server, [], 1);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+
+    const publish = encodePublish({ requestId: 5, trackNamespace: OTHER, trackName: 'offered', trackAlias: 9 });
+    const writer = (await pair.server.createBidirectionalStream()).writable.getWriter();
+    await writer.write(publish.subarray(0, 1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    session.destroy();
+    await writer.write(publish.subarray(1)).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(order).toEqual(['closed']);
+  });
 });
