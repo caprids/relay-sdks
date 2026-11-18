@@ -363,8 +363,8 @@ function fromLive(phase: Live, input: Arrival, prefix: readonly string[]): Step 
 }
 
 /**
- * A root the new snapshot misses is never removed at the load: it gets the grace against the new discovery. The
- * snapshot may have been taken inside a publisher rotation's gap, or just before a root's announce reached this relay.
+ * A root the new snapshot misses is never removed at the load. It gets the grace against the new discovery, because
+ * the relay may have taken the snapshot inside a publisher rotation's gap, or just before the root's announce reached it.
  */
 function adopt(phase: Replacing, candidate: Source, prefix: readonly string[]): Step {
   const { added, removed: missing } = diffRoots(phase.settled, candidate.presence, prefix);

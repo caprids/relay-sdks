@@ -399,10 +399,10 @@ def _from_live(phase: _Live, event: _Input, prefix: Sequence[str]) -> _Step:
 
 
 def _adopt(phase: _Replacing, candidate: _Source, prefix: Sequence[str]) -> _Step:
-    """A root the new snapshot misses is never removed at the load: it gets the grace against the new discovery.
+    """A root the new snapshot misses is never removed at the load. It gets the grace against the new discovery.
 
-    The snapshot may have been taken inside a publisher rotation's gap, or just before a root's
-    announce reached this relay.
+    The relay may have taken the snapshot inside a publisher rotation's gap, or just before the
+    root's announce reached it.
     """
     added, missing = _diff_roots(phase.settled, candidate.presence, prefix)
     leaving = tuple(gone.id for gone in missing)
