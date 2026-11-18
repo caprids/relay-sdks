@@ -152,7 +152,8 @@ function openNamespaceRequest(
     if (ended || snapshot.kind === 'loaded') return;
     stopTimers();
     snapshot = { kind: 'loaded' };
-    sink.event({ type: 'loaded' });
+    // It comes once per request, so it takes no capacity and a snapshot that fills the queue still loads.
+    sink.event({ type: 'loaded' }, false);
   };
   const heard = () => {
     if (snapshot.kind !== 'quiet') return;

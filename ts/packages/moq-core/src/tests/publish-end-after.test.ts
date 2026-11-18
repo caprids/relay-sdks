@@ -92,13 +92,19 @@ describe('RegisteredTrack.end({ after })', () => {
     // Still bound, and the session still opens the stream although it is closing.
     expect(bindings.at(-1)).toBe(alias);
     await writeLastGroup(await session.openUniStream(alias), alias, 7);
+
+    // The group reaches the subscriber while its PUBLISH_DONE is held. Wait for it here, not after `last` settles: the
+    // drain closes the transport as soon as the subscriber answers PUBLISH_DONE, and closing discards what the
+    // subscriber has not read yet, so reading it only then raced that answer (lost on Node 24.22, won on 24.14). Polled
+    // every millisecond, as the drain's flush window (CLOSE_FLUSH_TIMEOUT_MS) is running.
+    await vi.waitFor(() => expect(catalog.objects).toHaveLength(1), { interval: 1 });
+    expect(catalog.objects.map((object) => [object.groupId, new TextDecoder().decode(object.payload)])).toEqual([
+      [7, 'end of broadcast'],
+    ]);
     expect(catalog.done).toEqual([]);
 
     last.resolve();
     await vi.waitFor(() => expect(catalog.done).toHaveLength(1));
-    expect(catalog.objects.map((object) => [object.groupId, new TextDecoder().decode(object.payload)])).toEqual([
-      [7, 'end of broadcast'],
-    ]);
     expect(catalog.done[0]).toMatchObject({
       statusCode: PUBLISH_DONE_STATUS.TRACK_ENDED,
       streamCount: 1,

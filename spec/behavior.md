@@ -665,7 +665,8 @@ The iterator owns the request, never the connection.
   `announced` events for the namespaces already announced when the relay accepted the request, and
   before any later change. An application that tracks the `announced` set holds the relay's view at
   that point, and an empty set then means nothing is announced, not that nothing has arrived yet.
-  Python follows in a later release.
+  `loaded` takes no capacity, so a snapshot that exactly fills the iterator's queue still loads,
+  and one more namespace still overflows it. Python follows in a later release.
   - With MoQ Active Count negotiated (draft-lcurley-moq-active-count), the boundary is exact. The
     subscriber connection's SETUP declares the option (`0x40B64` = 1). When the relay's SETUP declares
     it too, the REQUEST_OK answering SUBSCRIBE_NAMESPACE carries the count of NAMESPACE messages that

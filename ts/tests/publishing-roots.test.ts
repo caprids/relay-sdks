@@ -469,6 +469,26 @@ describe('a root being removed', () => {
     });
   });
 
+  it('reports nothing for a root the old discovery withdraws while the loading new one already shows it', async () => {
+    const { subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.publishingRoots({ prefix: PREFIX }, handlers);
+    const first = await discovery();
+    const old = newGeneration(1_000);
+    first.push({ type: 'announced', namespace: at('alice', old) });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    subscriber.rotate();
+    const next = await discovery(1);
+    next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
+    first.push({ type: 'unannounced', namespace: at('alice', old) });
+    await pause(150);
+    next.push({ type: 'loaded' });
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length === 2, 'the marker added');
+    expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
+  });
+
   it('reports a root the old discovery still shows as removed after the grace when the new one never does', async () => {
     const { subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
