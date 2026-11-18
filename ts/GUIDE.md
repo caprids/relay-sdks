@@ -951,7 +951,8 @@ so do not rely on the first objects after demand begins. See
 - `createCatalogService(track, document)` sends a document again on every relay subscription, and
   retries a failed send while demand remains.
 - `createDocumentService(track)` does the same for a document you replace with `update(document)`,
-  such as a media timeline. It also sends each update while the relay is subscribed.
+  such as a media timeline. It also sends the latest document on each update while the relay is
+  subscribed.
 - `createFrameWriter(track)` maps encoded frames onto groups. By default a keyframe opens a group and
   deltas append to it. `grouping: 'frame'` gives one group per frame. The writer skips frames the
   relay has no subscription for instead of waiting on the deadline, and resumes at the next keyframe
