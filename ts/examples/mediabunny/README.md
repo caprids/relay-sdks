@@ -69,4 +69,4 @@ packet reads. Abort does not close the caller's connection.
 
 The reusable adapter also supports Opus and explicit shared timestamp offsets. This example leaves
 out multi-track scheduling, codec changes, and live encoder queues. Those belong to application
-policy and to the later media-publishing stage in [the proposal](../../../spec/media-layer.md).
+policy.

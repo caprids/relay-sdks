@@ -1610,14 +1610,13 @@ to both languages.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below, and
   reading frames in decode order within a latency budget is [Media subscribing](#media-subscribing),
-  both implemented in both SDKs. A `register_media` publishing handle is not implemented.
+  both implemented in both SDKs.
 
 ## Media publishing
 
 The media publishing policy lives in the product package (`@caprid/relay/media`, `caprid_relay.media`)
-over registered tracks: one tier above the write slot, one below the proposed `register_media`
-handle. It knows no format. A frame carries its own object properties and a catalog is bytes.
-Implemented in both SDKs.
+over registered tracks, one tier above the write slot. It knows no format. A frame carries its own
+object properties and a catalog is bytes. Implemented in both SDKs.
 
 - A catalog is a state-shaped track. The catalog service sends its document on the current relay
   demand and again on every later relay subscription, including a replacement subscription (the

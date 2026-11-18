@@ -1792,13 +1792,6 @@ The media layer uses the mechanisms the rest of the repository uses:
 
 ## Not built
 
-- **A one-call publishing handle.** The proposal had `register_media` / `registerMedia` returning a
-  `MediaTracks` handle: one call registering the catalog track and every media track with the LOC
-  timescale and `mediaTrackProperties`, building the first catalog (withholding an `avc1` entry
-  until its avcC exists), serving it, and returning a frame writer per track, a `sourceUrl()`, an
-  `update()` that registered added tracks first, and a `close()` that ended the tracks and sent the
-  end-of-broadcast catalog. The pieces it would compose all ship, and the examples compose them in
-  a few dozen lines each. The names were placeholders and none is public.
 - **Replaying the open group** to a new relay subscription, as Video.js's publisher does, so the
   first viewer decodes at once. It would cost one GOP of memory per track. The relay's cache already
   serves later viewers from the group's start, and `onKeyframeNeeded` lets an encoder shorten the
