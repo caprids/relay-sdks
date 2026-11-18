@@ -598,10 +598,12 @@ subscription, so later assignments do not change that subscription.
 
 ## Discover namespaces
 
-`namespaceEvents` tells a subscriber which namespaces under a prefix are announced. A call room, a
-set of cameras, or a channel list can keep its roster this way without a server of its own. It is the
-same bounded iterator as `subscribeEvents`, with the same capacity, signal, overflow, and error
-classes. It owns one request, never the connection.
+`namespaceEvents` tells a subscriber which namespaces under a prefix are announced. It is the raw
+discovery stream, and the same bounded iterator as `subscribeEvents`, with the same capacity,
+signal, overflow, and error classes. It owns one request, never the connection. To keep a list of
+live publishers, such as a call roster or a set of cameras, use
+[`publishingRoots()`](#discover-who-is-publishing-with-no-server) on a supervised subscriber
+instead. It reads these events for you and stays correct across reconnects and rotations.
 
 ```ts
 const roster = new Map<string, readonly string[]>();
@@ -772,6 +774,262 @@ cannot negotiate protocols, still fails with `TRANSPORT_UNAVAILABLE`. It needs n
 other transports, wrap `nativeQuicTransport()` from `@caprid/relay-quic` (on Node) or
 `withWebSocketFallback()` from `@caprid/relay-websocket` the same way. The Python SDK does the same
 by wrapping `caprid_relay.quic.connect_quic`.
+
+## Discover who is publishing, with no server
+
+A call needs the list of people in it, and a dashboard needs the list of cameras that are up. The
+relay already knows which namespaces its publishers have announced, so an application can read that
+list from the relay and run no roster server of its own. `subscriber.publishingRoots()` reads the
+list and keeps it correct across reconnects and token rotations. The presence helpers add a small
+document and a heartbeat for each publisher. The example below is a room roster, but the API has no
+notion of a room. It follows whatever prefix you give it.
+
+### The namespace layout
+
+A publishing-roots view reads one layout and treats it as a contract: a prefix, then a root, then a
+generation.
+
+```text
+room/standup                     the prefix, which you choose
+room/standup/ada                 a root: one live party, named by its last field
+room/standup/ada/0mwmoh58v0da3   a generation: one connection of ada's supervised publisher
+```
+
+- The **prefix** is any namespace the subscriber's token allows it to discover.
+- Each namespace one field below the prefix is a **root**. A root is one entry in the list, and its
+  last field is its `id`.
+- A [supervised publisher](#stay-connected-supervised-connections) on `[...prefix, id]` announces
+  each of its connections one field below its root, as a **generation**. The view counts a root
+  once, however many generations it has had.
+- An unsupervised publisher (`connectRelayPublisher`) on `[...prefix, id]` announces the root itself.
+  It counts too.
+- The view ignores anything deeper than a generation, and the prefix itself.
+
+Publishing here means announced. A publisher announces its namespace when it registers its first
+track, before it writes anything. A publisher with no track announces nothing, so it is never a
+root.
+
+### Follow the roots
+
+Each party publishes under the prefix at its own id. Any party that wants the list opens a view on
+the prefix.
+
+```ts
+import { connectSupervisedPublisher, connectSupervisedSubscriber } from '@caprid/relay';
+
+const prefix = ['room', roomId];
+
+// Every party publishes under the prefix, at its own id.
+const publisher = await connectSupervisedPublisher({ url, namespace: [...prefix, myId], getToken });
+const camera = publisher.registerTrack({ track: 'video' });
+
+// Any party that wants the list follows the prefix.
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
+const roots = subscriber.publishingRoots(
+  { prefix },
+  {
+    onChanged({ added, removed, present, initial }) {
+      for (const root of added) {
+        if (root.id === myId) continue; // the view reports your own publisher too
+        subscriber.want(
+          `video/${root.id}`,
+          { namespace: root.namespace, track: 'video', generations: true },
+          { onObject: (object) => showFrame(root.id, object) },
+        );
+      }
+      for (const root of removed) subscriber.unwant(`video/${root.id}`);
+      console.log(initial ? 'loaded' : 'changed', [...present.keys()]);
+    },
+    onError: (error) => console.error('discovery failed for good', error),
+  },
+);
+```
+
+With ada already in the room, bob joining and then closing the publisher, ada's console shows:
+
+```text
+loaded [ 'ada' ]
+changed [ 'ada', 'bob' ]
+changed [ 'ada' ]
+```
+
+`onChanged` receives one change:
+
+- `added` lists the roots that started publishing. On the first call it lists every root that was
+  already publishing, which can be none.
+- `removed` lists the roots that stopped. It is empty on the first call.
+- `present` is a `Map` of every root after the change, by `id`, in the order the view first saw
+  them.
+- `initial` is true on the first call only. That call is the load, and it always comes, even for an
+  empty prefix. A UI that announces arrivals skips it. Every later call names at least one root in
+  `added` or `removed`.
+
+The view itself has the same state. `roots.loaded` is false until the first `onChanged`, so you can
+tell an empty room from one that has not loaded yet. `roots.present` is the same map `onChanged` last
+received, and stays the same object until the roots change. `roots.close()` stops the view. It is
+idempotent, and the view delivers nothing after it. `subscriber.close()` closes every view too, without
+calling its handlers.
+
+Each `root.namespace` is the prefix followed by the root's `id`. Hand it to `want()` with
+`generations: true`, as above, to follow that root's media across its publisher's reconnects and
+rotations. Unwant the key when the view removes the root.
+
+What the view reports, and when:
+
+- The load comes about one round trip and 50 ms after the call.
+- A publisher's clean `close()` removes its root about 105 ms later on the same relay, and about 210
+  ms later from another relay of the cluster. The view waits 100 ms after the relay withdraws a
+  root's last namespace before it removes the root.
+- A crashed or frozen publisher stays announced until the relay's idle timeout. The view removes its
+  root 10 to 13 s after the crash.
+- A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
+- While the subscriber reconnects, the view keeps its last state. Once the new connection has
+  loaded, one `onChanged` reports what changed meanwhile, with additions and removals together. A
+  root whose removal was already pending when the connection dropped can be removed in a later call.
+
+`onError` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
+The view has closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
+
+### Presence: a document and a heartbeat for each root
+
+A root tells you that something is announced. It does not tell you who it is, and a frozen publisher
+stays announced for about 10 s. The presence helpers in `@caprid/relay/media` cover both. Each party
+publishes a small JSON document that describes it and resends it as a heartbeat. Everyone else reads
+those documents and learns within 6 s when a party stops sending.
+
+```ts
+import { createPresenceView, publishPresence } from '@caprid/relay/media';
+
+interface Profile {
+  name: string;
+  handRaised: boolean;
+}
+
+// Every party: describe yourself on your own supervised publisher.
+const me = publishPresence<Profile>(publisher, { name: 'Ada', handRaised: false });
+
+// Check what other parties sent. A throw skips that document.
+function parseProfile(value: unknown): Profile {
+  const { name, handRaised } = value as Partial<Profile>;
+  if (typeof name !== 'string' || typeof handRaised !== 'boolean') throw new TypeError('not a profile');
+  return { name, handRaised };
+}
+
+const room = createPresenceView(
+  subscriber,
+  { prefix, parse: parseProfile },
+  {
+    onChanged({ joined, left, updated, stale, resumed, present, initial }) {
+      for (const member of joined) console.log(initial ? 'here' : 'joined', member.id, member.document.name);
+      for (const member of left) console.log('left', member.id);
+      for (const member of updated) console.log('updated', member.id, member.document);
+      for (const member of stale) console.log('stale', member.id);
+      for (const member of resumed) console.log('resumed', member.id);
+      render([...present.values()].filter((member) => !member.stale));
+    },
+  },
+);
+
+// Later: change the document. The helper sends it only if its JSON changed.
+me.update({ ...me.document, handRaised: true });
+```
+
+`publishPresence(publisher, document)` registers a `presence` track on the supervised publisher and
+serves the document on it. The document goes out when a viewer subscribes, on every `update()` that
+changes its JSON, and again every 2 s (`PRESENCE_HEARTBEAT_MS`) as a heartbeat. `me.document` is the
+latest document you gave. Presence lasts as long as the publisher. To leave, close the publisher:
+
+```ts
+await publisher.close(); // viewers report you as left once the relay withdraws your namespace
+```
+
+`createPresenceView(subscriber, { prefix, parse }, { onChanged })` follows the publishing roots
+under the prefix and reads each root's document. A root with a document is a **member**. A member
+has the root's `id` and `namespace`, its newest `document`, `since` (when the view first read it, as
+`Date.now()`), and `stale`. A change carries five lists:
+
+- `joined`: members whose first document arrived. On the first call, everyone who had one at the
+  load.
+- `left`: members whose root stopped publishing.
+- `updated`: members whose document changed.
+- `stale`: members that sent nothing new for three heartbeats (6 s). A stale member is still
+  announced, so it stays in `present` with `stale: true`. Most UIs hide it, as `render` does above.
+- `resumed`: stale members that sent a document again.
+
+`present`, `initial`, `room.loaded`, `room.present` and `room.close()` mean what they mean on a
+publishing-roots view. The first call waits until every root present at the load has a document, for
+at most 1 s. A root that never publishes a presence document is never a member. Use
+`publishingRoots()` to see it.
+
+Without `parse`, documents are the parsed JSON, typed `unknown`. Treat a document as untrusted input.
+Any party whose token can publish under the prefix can send any JSON. The view reports a document
+that `parse` rejects nowhere, so log inside `parse` if you want to see those.
+
+`createPresenceView` throws a `RelayError` with code `CLOSED` if its subscriber is already closed,
+and so does `publishingRoots()`.
+
+How fast a view learns that a member has gone:
+
+| What happened | What the view reports | When |
+| --- | --- | --- |
+| The member closed its publisher | `left` | About 105 ms later on the same relay |
+| The member crashed or froze | `stale` | 6 s after its last heartbeat, with the default 2 s heartbeat |
+| The member crashed or froze | `left` | 10 to 13 s later, at the relay's idle timeout |
+
+To change the track name or the heartbeat, pass the same `track` and `heartbeatMs` to both
+`publishPresence` and `createPresenceView`. The track format is plain JSON with no added fields, so
+any MoQ client can read it. See the [presence track](../spec/media-layer.md#presence-track).
+
+### Select one kind of party with a label
+
+To list one kind of party, put a label in the namespace before the id, and view the prefix that ends
+with the label:
+
+```ts
+const ada = await connectSupervisedPublisher({ url, namespace: ['room', id, 'participant', 'ada'], getToken });
+const scribe = await connectSupervisedPublisher({ url, namespace: ['room', id, 'bot', 'scribe'], getToken });
+ada.registerTrack({ track: 'video' });
+scribe.registerTrack({ track: 'notes' });
+
+const participants = subscriber.publishingRoots(
+  { prefix: ['room', id, 'participant'] },
+  { onChanged: ({ present }) => console.log('participants', [...present.keys()]) },
+);
+const bots = subscriber.publishingRoots(
+  { prefix: ['room', id, 'bot'] },
+  { onChanged: ({ present }) => console.log('bots', [...present.keys()]) },
+);
+```
+
+This prints `participants [ 'ada' ]` and `bots [ 'scribe' ]`. The relay filters by prefix, so it
+sends the participants view nothing about bots. A label after the id, or inside a presence document,
+would make every viewer discover everything and filter it locally.
+
+The view's prefix must end one field above the ids. With this layout a view on `['room', id]` loads
+empty, because every generation is three fields below it.
+
+### Things to check
+
+- **An empty list with no error can mean a token problem.** If the subscriber's token does not grant
+  the prefix, the relay accepts the request and sends nothing. The view loads empty, and `onError`
+  never runs.
+- **A publisher needs a track to be listed.** A publisher announces its namespace when it registers
+  its first track. `publishPresence` registers one.
+- **Handlers must be synchronous.** Passing an `async` `onChanged` or `onError` throws a `TypeError`
+  from `publishingRoots()` or `createPresenceView()`. The SDK logs a handler that throws, and the
+  view carries on.
+- **The view includes you.** Your own publisher is a root under the prefix like any other. Skip your
+  own `id` where it matters.
+- **Views and wants can overlap.** One connection can hold a view on a prefix, more views on
+  prefixes under it, and wants on the roots, all at once. They share one discovery request. Only
+  [`namespaceEvents`](#discover-namespaces), on an unsupervised subscriber, refuses an overlapping
+  prefix with `PREFIX_OVERLAP`.
+- **A publisher's own reconnect can look like a leave.** A rotation opens the new connection before
+  it closes the old one, so it reports nothing. A reconnect after a lost connection has no old
+  connection to overlap with. If the relay sees the old connection close before the new one
+  announces, the view removes the root and then adds it again, and a presence view reports `left`
+  then `joined`. Want the root again when the view adds it, as the sample above does. If the old
+  connection only went silent, a presence view can report `stale` then `resumed` instead.
 
 ## Publishing lifecycle
 

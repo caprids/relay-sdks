@@ -441,7 +441,8 @@ class SupervisedSubscriber:
         root, and anything deeper is ignored. The prefix follows the namespace rules with room for the two
         fields under it (1 to 30 fields), and the subscriber's token must allow discovering it. Shares the
         connection's discovery with every want and view under the same prefix tree. Arguments are checked
-        at once; handlers run from a later turn on. See ``spec/behavior.md``, "Publishing roots".
+        at once; handlers run from a later turn on. Raises :class:`RelayError` with code ``CLOSED`` when the
+        subscriber is already closed. See ``spec/behavior.md``, "Publishing roots".
         """
         if not isinstance(handlers, PublishingRootsHandlers):
             raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
