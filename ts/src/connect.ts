@@ -148,7 +148,8 @@ export interface RelaySubscriber {
    * already announced, then `loaded` once, then one event per announce and withdrawal. A relay that
    * negotiated MoQ Active Count marks where its snapshot ends; against one that did not, `loaded` is
    * the SDK's estimate (see `SNAPSHOT_QUIET_MS` and `SNAPSHOT_LIMIT_MS`), so an announce that lands
-   * meanwhile can come before it. A relay rejection ends it with `SubscriptionRequestError`, the
+   * meanwhile can come before it. `loaded` takes no `capacity`, so a snapshot that fills the queue
+   * still loads. A relay rejection ends it with `SubscriptionRequestError`, the
    * connection ending with `SubscriptionConnectionClosedError`, a full queue with
    * `SubscriptionOverflowError`; a relay that finishes the request ends it cleanly. See
    * spec/behavior.md, "Discovery", for the timing.
