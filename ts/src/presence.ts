@@ -136,8 +136,8 @@ export interface PresenceChange<T> {
    */
   readonly updated: readonly PresenceMember<T>[];
   /**
-   * Members that went stale. On the first call, the members in `joined` that went stale before the load, so a member
-   * is always in `stale` before it is in `resumed`.
+   * Members that went stale. On the first call, the members in `joined` that are stale at the load, so a member is
+   * always in `stale` before it is in `resumed`.
    */
   readonly stale: readonly PresenceMember<T>[];
   /** Stale members with a new document. */

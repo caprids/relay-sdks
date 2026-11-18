@@ -258,7 +258,7 @@ describe('createPresenceView', () => {
     expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'] }, { joined: ['carol'] }]);
   });
 
-  it('names a member that went stale before the load in stale as well as joined, so resumed follows a stale', () => {
+  it('names a member stale at the load in stale as well as joined, so resumed follows a stale', () => {
     const room = fakeRoom();
     const { changes, handlers } = recorder();
     createPresenceView(room.subscriber, { prefix: PREFIX, heartbeatMs: 100 }, handlers);
