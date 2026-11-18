@@ -9,8 +9,8 @@ each section says what changed and what to do about it. How to cut a release is 
 
 - `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
   are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
-  announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and a second field
-  under it is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
+  announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field
+  below a root is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
   first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
   `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
   only the roots added or removed meanwhile, in one call. A root whose removal was already pending, or that the old

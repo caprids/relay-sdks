@@ -3,8 +3,9 @@ import { SubscriptionConnectionClosedError } from './subscription.js';
 import { backoffDelay, RESUBSCRIBE_BACKOFF, sleep, whenAborted } from './supervision.js';
 
 /**
- * A root under the prefix: the namespace one field below it that a publisher announced, either a supervised
- * publisher's root or an unsupervised publisher's namespace (depth 1).
+ * A root under the prefix: the namespace one field below it, publishing while a namespace at it or one field below it
+ * is announced. A supervised publisher announces its generations one field below its root; an unsupervised publisher
+ * announces the root itself (depth 1).
  */
 export interface PublishingRoot {
   /** The field one below the prefix, as the root's publisher chose it. */
@@ -22,7 +23,9 @@ export interface PublishingRootsChange {
   readonly added: readonly PublishingRoot[];
   /** Roots that stopped publishing. Empty on the first call. */
   readonly removed: readonly PublishingRoot[];
-  /** Every root publishing after this change, by id, in the order the view first saw them. The same map as `present`. */
+  /**
+   * Every root publishing after this change, by id, in the order the view first saw them. The same map as `present`.
+   */
   readonly present: ReadonlyMap<string, PublishingRoot>;
   /** True on the first call only: the view has just loaded. A UI that announces arrivals skips this one. */
   readonly initial: boolean;

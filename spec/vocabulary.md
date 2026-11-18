@@ -313,8 +313,8 @@ message).
 
 `subscriber.publishingRoots({ prefix }, { onChanged })` reports the roots that are publishing now
 under a prefix ([behavior.md](behavior.md#publishing-roots)). A root is the namespace one field
-below the prefix that a publisher announces, as CONTEXT.md defines it, and publishing means
-announced, not necessarily sending objects. The name says what the relay knows, a root with
+below the prefix that a publisher announces at or one field under, as CONTEXT.md defines it, and
+publishing means announced, not necessarily sending objects. The name says what the relay knows, a root with
 something announced, and claims nothing about who is behind it. The option is `prefix`, as on
 `namespaceEvents`. The call is a noun for what it keeps, as `want` is, because it is a standing
 request on the supervisor, not a single request: it outlives connections and reports through

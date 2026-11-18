@@ -229,10 +229,11 @@ export interface SupervisedSubscriber {
   rotate(): void;
   /**
    * Follow the roots that are publishing now under a prefix, across reconnects and rotations, with no roster server.
-   * Publishing means announced, not necessarily sending objects. Each namespace one field below the prefix is a root,
-   * and a root is removed once its last namespace has been withdrawn for 100 ms (soon after a clean close, at the
-   * relay's idle timeout after a crash). The layout is a contract: a second field under a root is read as that root's
-   * generation, so a supervised publisher's generations count as one root, and anything deeper is ignored.
+   * Publishing means announced, not necessarily sending objects. A root is the field one below the prefix, publishing
+   * while its own namespace or one a field below it is announced, and removed once its last namespace has been
+   * withdrawn for 100 ms (soon after a clean close, at the relay's idle timeout after a crash). The layout is a
+   * contract: a namespace one field below a root, two below the prefix, is read as that root's generation, so a
+   * supervised publisher's generations count as one root, and anything deeper is ignored.
    * Shares the connection's discovery with every want and view under the same prefix tree. Arguments are checked at
    * once; handlers run from the next turn on.
    */
@@ -267,8 +268,8 @@ interface Connection {
   /** One watch per fixed namespace a want waits on to be announced again, shared by every want on it. */
   wakes: Map<string, NamespaceWake & { users: number; linger?: ReturnType<typeof setTimeout> | undefined }>;
   /**
-   * Wants with a subscription and publishing-roots views with a discovery still on this connection; a rotation closes it once
-   * none are left.
+   * Wants with a subscription and publishing-roots views with a discovery still on this connection; a rotation closes
+   * it once none are left.
    */
   holds: number;
   /** Called whenever `holds` drops to zero. */
@@ -1794,7 +1795,8 @@ interface NamespaceWake {
 
 /**
  * The connection's watch for the fixed `namespace`, opened on first use and closed a moment after its last user leaves.
- * It is served by the connection's discovery, so a root's discovery or a publishing-roots view over the namespace serves it too.
+ * It is served by the connection's discovery, so a root's discovery or a publishing-roots view over the namespace
+ * serves it too.
  */
 function namespaceWake(connection: Connection, namespace: string[]): { watch: NamespaceWake; release(): void } {
   const key = JSON.stringify(namespace);

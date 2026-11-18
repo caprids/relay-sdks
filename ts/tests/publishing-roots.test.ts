@@ -117,11 +117,11 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     d.push({ type: 'loaded' });
     const generation = newGeneration();
     d.push({ type: 'announced', namespace: at('carol', generation) });
-    await until(() => changes.length === 2, 'join');
+    await until(() => changes.length === 2, 'addition');
     expect(summary(changes[1]!)).toEqual({ added: ['carol'], removed: [], present: ['carol'], initial: false });
     expect(view.present).toBe(changes[1]!.present);
     d.push({ type: 'unannounced', namespace: at('carol', generation) });
-    await until(() => changes.length === 3, 'leave');
+    await until(() => changes.length === 3, 'removal');
     expect(summary(changes[2]!)).toEqual({ added: [], removed: ['carol'], present: [], initial: false });
   });
 
@@ -142,7 +142,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     d.push({ type: 'announced', namespace: at('alice', replacement, 'deeper') });
     d.push({ type: 'announced', namespace: at('mallory', newGeneration(), 'deeper') });
     d.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
     expect(changes[1]!.present).not.toBe(present);
   });
@@ -154,10 +154,10 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     const d = await discovery();
     d.push({ type: 'loaded' });
     d.push({ type: 'announced', namespace: at('dave') });
-    await until(() => changes.length === 2, 'join');
+    await until(() => changes.length === 2, 'addition');
     expect(summary(changes[1]!)).toEqual({ added: ['dave'], removed: [], present: ['dave'], initial: false });
     d.push({ type: 'unannounced', namespace: at('dave') });
-    await until(() => changes.length === 3, 'leave');
+    await until(() => changes.length === 3, 'removal');
     expect(summary(changes[2]!)).toEqual({ added: [], removed: ['dave'], present: [], initial: false });
   });
 
@@ -177,7 +177,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     next.push({ type: 'announced', namespace: at('alice', generation) });
     next.push({ type: 'loaded' });
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join on the new connection');
+    await until(() => changes.length === 2, 'the marker added on the new connection');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -198,7 +198,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     await pause();
     expect(oldClosed).toBe(false);
     first.push({ type: 'announced', namespace: at('bob') });
-    await until(() => changes.length === 2, 'a join on the old discovery while the new one loads');
+    await until(() => changes.length === 2, 'an addition on the old discovery while the new one loads');
     expect(summary(changes[1]!)).toEqual({ added: ['bob'], removed: [], present: ['alice', 'bob'], initial: false });
     next.push({ type: 'announced', namespace: at('alice') });
     next.push({ type: 'announced', namespace: at('bob') });
@@ -223,7 +223,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     next.push({ type: 'loaded' });
     await until(() => connections[0]!.discoveries[0]!.closed, 'the old connection released');
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join on the new connection');
+    await until(() => changes.length === 2, 'the marker added on the new connection');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -244,7 +244,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
     next.push({ type: 'announced', namespace: at('alice') });
     next.push({ type: 'loaded' });
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({
       added: ['zed'],
       removed: [],
@@ -377,7 +377,7 @@ describe('SupervisedSubscriber.publishingRoots', () => {
   });
 });
 
-describe('a root leaving', () => {
+describe('a root being removed', () => {
   it('reports nothing when a rotation withdraws the only generation just before announcing the next', async () => {
     const { subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
@@ -393,7 +393,7 @@ describe('a root leaving', () => {
     d.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
     await pause(150);
     d.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -411,7 +411,7 @@ describe('a root leaving', () => {
     await pause();
     expect(changes).toHaveLength(1);
     expect(view.present).toBe(changes[0]!.present);
-    await until(() => changes.length === 2, 'leave');
+    await until(() => changes.length === 2, 'removal');
     expect(Date.now() - withdrawn).toBeGreaterThanOrEqual(90);
     expect(summary(changes[1]!)).toEqual({ added: [], removed: ['alice'], present: [], initial: false });
     await pause(150);
@@ -453,14 +453,14 @@ describe('a root leaving', () => {
     subscriber.rotate();
     const next = await discovery(1);
     first.push({ type: 'announced', namespace: at('bob') });
-    await until(() => changes.length === 2, 'bob joins on the old discovery');
+    await until(() => changes.length === 2, 'bob added on the old discovery');
     next.push({ type: 'announced', namespace: at('alice') });
     next.push({ type: 'loaded' });
     await pause(5);
     next.push({ type: 'announced', namespace: at('bob') });
     await pause(150);
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 3, 'the marker join');
+    await until(() => changes.length === 3, 'the marker added');
     expect(summary(changes[2]!)).toEqual({
       added: ['zed'],
       removed: [],
@@ -484,14 +484,14 @@ describe('a root leaving', () => {
     next.push({ type: 'announced', namespace: at('carol') });
     const loaded = Date.now();
     next.push({ type: 'loaded' });
-    await until(() => changes.length === 2, 'the join at the load');
+    await until(() => changes.length === 2, 'the addition at the load');
     expect(summary(changes[1]!)).toEqual({
       added: ['carol'],
       removed: [],
       present: ['alice', 'bob', 'carol'],
       initial: false,
     });
-    await until(() => changes.length === 3, 'the leave');
+    await until(() => changes.length === 3, 'the removal');
     expect(Date.now() - loaded).toBeGreaterThanOrEqual(90);
     expect(summary(changes[2]!)).toEqual({ added: [], removed: ['bob'], present: ['alice', 'carol'], initial: false });
   });
@@ -514,7 +514,7 @@ describe('a root leaving', () => {
     next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
     await pause(150);
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -535,7 +535,7 @@ describe('a root leaving', () => {
     next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
     next.push({ type: 'loaded' });
     next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -557,7 +557,7 @@ describe('a root leaving', () => {
     covering.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
     covering.push({ type: 'loaded' });
     covering.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the marker added');
     expect(summary(changes[1]!)).toEqual({ added: ['zed'], removed: [], present: ['alice', 'zed'], initial: false });
   });
 
@@ -577,7 +577,7 @@ describe('a root leaving', () => {
     await pause(150);
     expect(changes).toHaveLength(1);
     covering.push({ type: 'loaded' });
-    await until(() => changes.length === 2, 'the leave');
+    await until(() => changes.length === 2, 'the removal');
     expect(summary(changes[1]!)).toEqual({ added: [], removed: ['alice'], present: [], initial: false });
   });
 
@@ -927,7 +927,7 @@ describe('the publishing-roots transition', () => {
     expect(next).toEqual({ phase: step.phase, effects: [] });
   });
 
-  it('follows a rotation make-before-break; a root the old discovery shows and the new load misses leaves after its grace', () => {
+  it('follows a rotation make-before-break; a root the old discovery shows and the new load misses is removed after its grace', () => {
     const { on, source, step } = loaded('alice', 'bob');
     const to = connection();
     const retired = transition(step.phase, { kind: 'retiring', connection: on, next: to }, PREFIX);
