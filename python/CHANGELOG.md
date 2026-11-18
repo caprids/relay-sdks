@@ -12,8 +12,10 @@ is in [docs/releasing.md](../docs/releasing.md).
   the prefix is a root (`PublishingRoot`: `id`, `namespace`), and one a field below a root is read as that root's
   generation, so a supervised publisher's rotations and reconnects report nothing. The first `on_changed` is the load
   (`PublishingRootsChange.initial` true, every root publishing in `added`, possibly none), and `PublishingRoots.loaded`
-  tells "no root here" from "not loaded yet". After a reconnect the view reports only the roots added or removed
-  meanwhile, in one call. An application can build a room roster with no roster server.
+  tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports only the roots added
+  or removed meanwhile. New roots come in one call at the load. A root the new discovery misses is removed in a later
+  call, once the new discovery has shown it nothing for 0.1 s, so a snapshot taken inside a publisher rotation's gap
+  reports nothing (#427). An application can build a room roster with no roster server.
   `SupervisedSubscriber.close()` also closes every publishing-roots view, without calling its handlers.
 - `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations, every want waiting for its namespace to be announced again, and every
