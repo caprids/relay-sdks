@@ -11,7 +11,7 @@ lockstep.
 | [transport-adapter.md](transport-adapter.md) | The transport adapter contract: what every adapter the SDKs run over (browser WebTransport, native QUIC in Node and on aioquic, QMux over WebSocket, test pairs) must do, as numbered `TA-n` rules under the MOQT and QUIC specifications | The transport adapter conformance suite (#193), whose tests are named after the rules |
 | [publisher-recovery.md](publisher-recovery.md) | Observed publisher replacement limits and application recovery guidance | Relay limitations. The opt-in supervised connections implement the recovery policy, and the connection primitives do not |
 | [relay-interop.md](relay-interop.md) | moq-relay's wire encodings, deviations from the draft, and measured behavior, by relay version, with a local reproduction | Measurements and the probe tasks in `mise.toml`, not a contract |
-| [media-layer.md](media-layer.md) | The LOC packaging, MSF catalog, source URL, and decoder-configuration work the SDKs take over from media publishers, measured against the Python Video.js example | Stage 1 implemented. Of stages 2 and 3, the catalog, document, and frame-writer services, the catalog reader, and the frame reader ship. The `register_media` handle remains proposed |
+| [media-layer.md](media-layer.md) | The LOC packaging, MSF catalog, source URL, and decoder-configuration work the SDKs take over from media publishers, measured against the Python Video.js example | The catalog, document, and frame-writer services, the catalog reader, and the frame reader ship; a one-call handle that would compose them is not built |
 | `vectors/` | Encoding test vectors every protocol layer must pass | Each SDK's test suite loads the JSON and checks its encoder and decoder |
 
 ## Changing a pin
