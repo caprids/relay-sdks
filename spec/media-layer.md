@@ -1506,12 +1506,13 @@ the audio: a talker that knows its text earlier, as a TTS does, can send it soon
 
 [Issue #422](https://github.com/muxinc/relay-sdks/issues/422). Who is in a room and what each member
 says about itself, such as a display name, a join time or a host flag, with no roster server. A
-[members view](behavior.md#members) says who is announced under a root, but not who they are. A
+[publishing-roots view](behavior.md#publishing-roots) says which roots are announced under a prefix,
+but not who is behind them. A
 frozen or crashed publisher also stays announced until the relay's idle timeout, about 10 s on
 `ord`. The presence track gives each member a document that names it and keeps proving that the
 member is alive. TypeScript ships its helpers in `@caprid/relay/media`. Python has none yet.
 
-**The track.** A data track in each member's generation namespace (`<root>/<member>/<generation>`),
+**The track.** A data track in each member's generation namespace (`<prefix>/<member>/<generation>`),
 named `presence` by default (`PRESENCE_TRACK`), with Default Publisher Priority 32 (`0x0E`), between
 audio (16) and video (96). Each object is the member's whole document, compact UTF-8 JSON, in a group
 of its own. The payload is the application's JSON and nothing else. The helpers add no fields, so
@@ -1527,8 +1528,8 @@ differ. The publisher sends the unchanged document again `PRESENCE_HEARTBEAT_MS`
 last change or heartbeat. With no relay subscription, a heartbeat sends nothing. A member leaves by closing its
 supervised publisher, and the withdrawal of its namespace is the goodbye.
 
-**The listener** (`createPresenceView`) follows the root's members and wants each member's presence
-track with `generations: true` and subscriber priority 32.
+**The listener** (`createPresenceView`) follows the publishing roots under its `prefix`, each one a
+member, and wants each member's presence track with `generations: true` and subscriber priority 32.
 
 - *Order.* A document counts when it comes from the generation the listener read last with a larger
   group ID, or from a newer generation. Group IDs start at 0 in each generation and grow by one per
@@ -1538,17 +1539,17 @@ track with `generations: true` and subscriber priority 32.
   on a clock that is behind its last run. A live listener ignores a publisher restarted on such a
   clock until the member goes stale, so it shows as stale and then resumed.
 - *Roster.* A member is on the roster from its first document that counts and parses until the
-  members view reports it gone. A member that never sends one is never shown.
+  publishing-roots view reports it removed. A member that never sends one is never shown.
 - *Stale.* A member is stale when no document counted for 3 × `heartbeatMs` (6 s), which is before
   the relay withdraws a frozen publisher. Its next document that counts clears it. The count pauses
   only for the listener's own connection: a want restart for `connection` pauses it, and the next
   subscription starts a full window. Any other restart leaves it running.
-- *Load.* The roster loads once the members view has loaded and every member present then has a
-  document, or 1 s after the members view loaded. A document that arrives later is a join.
+- *Load.* The roster loads once the publishing-roots view has loaded and every member present then
+  has a document, or 1 s after the publishing-roots view loaded. A document that arrives later is a join.
 - *Changes.* One synchronous `onChanged` reports `joined`, `left`, `updated` (the document's bytes
-  changed), `stale` and `resumed`, with `present` and `initial` as in `MembersChange`. Heartbeats,
+  changed), `stale` and `resumed`, with `present` and `initial` as in `PublishingRootsChange`. Heartbeats,
   cached copies, publisher rotations, and the listener's own reconnects and rotations report nothing.
-- *End.* The view ends when its subscriber closes, with nothing reported, as the members view does.
+- *End.* The view ends when its subscriber closes, with nothing reported, as the publishing-roots view does.
 
 **No timestamp or sequence number.** The transport orders one member's documents, and only that
 member's documents are ever compared. A sender clock would have to be compared with the listener's

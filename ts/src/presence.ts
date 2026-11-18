@@ -1,5 +1,5 @@
 import { createDocumentService } from './document-service.js';
-import type { Member, MembersChange } from './members.js';
+import type { PublishingRoot, PublishingRootsChange } from './publishing-roots.js';
 import { synchronousCallback } from './subscription.js';
 import type { SupervisedPublisher } from './supervised-publisher.js';
 import type { RestartReason, SupervisedSubscriber } from './supervised-subscriber.js';
@@ -19,7 +19,7 @@ export const PRESENCE_HEARTBEAT_MS = 2000;
  * not queue behind video on a congested link and turn congestion into false stale reports.
  */
 const PRESENCE_PRIORITY = 32;
-/** How long a view's first report waits for the documents of the members present when `members()` loaded. */
+/** How long a view's first report waits for the documents of the roots publishing when `publishingRoots()` loaded. */
 const PRESENCE_LOAD_LIMIT_MS = 1000;
 const STALE_HEARTBEATS = 3;
 const MIN_HEARTBEAT_MS = 100;
@@ -111,7 +111,7 @@ export function publishPresence<T>(
 }
 
 /** One member with a presence document, as a view reports it. Replaced, never changed, when anything in it changes. */
-export interface PresenceMember<T> extends Member {
+export interface PresenceMember<T> extends PublishingRoot {
   /** The newest document read from the member. */
   readonly document: T;
   /** `Date.now()` when the view first read the member's document; kept across updates, staleness and rotations. */
@@ -140,7 +140,7 @@ export interface PresenceChange<T> {
   /** Stale members with a new document. */
   readonly resumed: readonly PresenceMember<T>[];
   /**
-   * Every reported member after this change, by id, in the order `members()` reported them. The same map as
+   * Every reported member after this change, by id, in the order `publishingRoots()` reported them. The same map as
    * `present`.
    */
   readonly present: ReadonlyMap<string, PresenceMember<T>>;
@@ -150,8 +150,11 @@ export interface PresenceChange<T> {
 
 /** What a presence view follows. */
 export interface PresenceViewOptions<T> {
-  /** The root whose members to follow, as for `members()`: each member's supervised publisher serves `<root>/<id>`. */
-  root: readonly string[];
+  /**
+   * The prefix whose members to follow, as for `publishingRoots()`: each member is a root, whose supervised publisher
+   * serves `<prefix>/<id>`.
+   */
+  prefix: readonly string[];
   /** The track name. Default {@link PRESENCE_TRACK}. */
   track?: string;
   /**
@@ -167,24 +170,24 @@ export interface PresenceViewOptions<T> {
   parse?(value: unknown): T;
 }
 
-/** The callbacks a presence view delivers to. Like `MembersHandlers`, they must be synchronous. */
+/** The callbacks a presence view delivers to. Like `PublishingRootsHandlers`, they must be synchronous. */
 export interface PresenceViewHandlers<T> {
   /**
    * The view loaded, or a member joined, left, changed its document, went stale or resumed. The first call is the
-   * load and runs once, after every member present at `members()`'s load has a document or after 1 s; every later
-   * call names at least one member. One input calls it at most once, with everything that input changed. A
+   * load and runs once, after every member present at `publishingRoots()`'s load has a document or after 1 s; every
+   * later call names at least one member. One input calls it at most once, with everything that input changed. A
    * member's publisher rotating with the same document, the relay repeating a document, and the subscriber's
    * reconnects and rotations call nothing.
    */
   onChanged?(change: PresenceChange<T>): void;
   /**
-   * The members view failed in a way no wait fixes, as `MembersHandlers.onError` describes. The view is closed. A root
-   * outside the token's grant is not one: the roster loads empty and this is never called.
+   * The publishing-roots view failed in a way no wait fixes, as `PublishingRootsHandlers.onError` describes. The view
+   * is closed. A prefix outside the token's grant is not one: the roster loads empty and this is never called.
    */
   onError?(error: unknown): void;
 }
 
-/** A live roster: the members under a root with a presence document. Create one with {@link createPresenceView}. */
+/** A live roster: the members under a prefix with a presence document. Create one with {@link createPresenceView}. */
 export interface PresenceView<T> {
   /** False until the first `onChanged`. Stays true across reconnects. */
   readonly loaded: boolean;
@@ -194,36 +197,36 @@ export interface PresenceView<T> {
    */
   readonly present: ReadonlyMap<string, PresenceMember<T>>;
   /**
-   * Stop: unwant every member's presence track and close the members view. Idempotent; nothing is delivered after it,
-   * even when called from `onChanged`. The view also stops on its own, reporting nothing, once the subscriber closes.
+   * Stop: unwant every member's presence track and close the publishing-roots view. Idempotent; nothing is delivered
+   * after it, even when called from `onChanged`. The view also stops on its own, reporting nothing, once the subscriber closes.
    */
   close(): void;
 }
 
 /**
- * Follow the presence documents of everyone under a root: `subscriber.members({ root })` plus one want per member
- * that follows the member's supervised publisher to its newest generation. A member is reported once its first
+ * Follow the presence documents of everyone under a prefix: `subscriber.publishingRoots({ prefix })` plus one want per
+ * root that follows the member's supervised publisher to its newest generation. A member is reported once its first
  * readable document arrives, and goes stale after three heartbeats with nothing new (see `PresenceMember.stale`). The
  * view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on.
  *
  * ```ts
- * const room = createPresenceView(subscriber, { root: ['room', id], parse: parseProfile }, {
+ * const room = createPresenceView(subscriber, { prefix: ['room', id], parse: parseProfile }, {
  *   onChanged: ({ present }) => render([...present.values()].filter((member) => !member.stale)),
  * });
  * ```
  */
 export function createPresenceView(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<unknown> & { parse?: undefined },
   handlers?: PresenceViewHandlers<unknown>,
 ): PresenceView<unknown>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<T> & { parse(value: unknown): T },
   handlers?: PresenceViewHandlers<T>,
 ): PresenceView<T>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<T>,
   handlers: PresenceViewHandlers<T> = {},
 ): PresenceView<T> {
@@ -285,7 +288,7 @@ export function createPresenceView<T>(
     }
   };
 
-  const open = (member: Member) => {
+  const open = (member: PublishingRoot) => {
     const { id } = member;
     const key = `\0presence:${view}:${++joins}:${id}`;
     wants.set(id, key);
@@ -328,20 +331,21 @@ export function createPresenceView<T>(
       case 'error':
         if (!ended()) deliver('onError', () => onError?.(effect.error));
         return;
-      case 'close-members':
-        members.close();
+      case 'close-roots':
+        roots.close();
         return;
     }
   };
 
-  const members = subscriber.members(
-    { root: options.root },
+  const roots = subscriber.publishingRoots(
+    { prefix: options.prefix },
     {
-      onChanged: (change) => feed({ kind: 'members', change, at: performance.now() }),
-      onError: (error) => feed({ kind: 'members-error', error }),
+      onChanged: (change) => feed({ kind: 'roots', change, at: performance.now() }),
+      onError: (error) => feed({ kind: 'roots-error', error }),
     },
   );
-  // The supervisor closes the members view and drops the wants without calling either, so the view ends itself.
+  // The supervisor closes the publishing-roots view and drops the wants without calling either, so the view ends
+  // itself.
   let unsubscribe = () => {};
   const stop = () => {
     closing = true;
@@ -446,14 +450,14 @@ interface ObjectKey {
 type Clock = { readonly kind: 'running'; readonly dueAt: number } | { readonly kind: 'paused' };
 
 /**
- * One member `members()` reports. `route` is the generation of the want's current subscription, which keys every
+ * One root `publishingRoots()` reports. `route` is the generation of the want's current subscription, which keys every
  * object; `last` is the key of the newest object counted.
  */
 type MemberState<T> =
   /** No readable document yet: never reported. */
   | {
       readonly kind: 'awaiting';
-      readonly member: Member;
+      readonly member: PublishingRoot;
       readonly route: string | undefined;
       readonly last: ObjectKey | undefined;
     }
@@ -478,9 +482,12 @@ type MemberState<T> =
 type States<T> = ReadonlyMap<string, MemberState<T>>;
 
 type ViewPhase<T> =
-  /** `members()` has not loaded. */
+  /** `publishingRoots()` has not loaded. */
   | { readonly kind: 'loading' }
-  /** `members()` loaded; the first report waits for `waiting` (present at that load, no document yet) or `loadBy`. */
+  /**
+   * `publishingRoots()` loaded; the first report waits for `waiting` (present at that load, no document yet) or
+   * `loadBy`.
+   */
   | {
       readonly kind: 'gathering';
       readonly states: States<T>;
@@ -492,8 +499,8 @@ type ViewPhase<T> =
 
 /** What reaches the reducer. `at` is `performance.now()`; `date` is `Date.now()`. */
 type PresenceInput =
-  | { readonly kind: 'members'; readonly change: MembersChange; readonly at: number }
-  | { readonly kind: 'members-error'; readonly error: unknown }
+  | { readonly kind: 'roots'; readonly change: PublishingRootsChange; readonly at: number }
+  | { readonly kind: 'roots-error'; readonly error: unknown }
   | { readonly kind: 'subscribed'; readonly id: string; readonly generation: string; readonly at: number }
   | { readonly kind: 'switched'; readonly id: string; readonly generation: string }
   | { readonly kind: 'restarted'; readonly id: string; readonly reason: RestartReason }
@@ -509,11 +516,11 @@ type PresenceInput =
   | { readonly kind: 'close' };
 
 type PresenceEffect<T> =
-  | { readonly kind: 'want'; readonly member: Member }
+  | { readonly kind: 'want'; readonly member: PublishingRoot }
   | { readonly kind: 'unwant'; readonly id: string }
   | { readonly kind: 'emit'; readonly change: PresenceChange<T> }
   | { readonly kind: 'error'; readonly error: unknown }
-  | { readonly kind: 'close-members' };
+  | { readonly kind: 'close-roots' };
 
 interface PresenceContext<T> {
   readonly staleAfterMs: number;
@@ -533,7 +540,7 @@ const PAUSED: Clock = { kind: 'paused' };
 const stay = <T>(phase: ViewPhase<T>): Step<T> => ({ phase, effects: [] });
 const quiet = <T>(state: MemberState<T>): MemberStep<T> => ({ state, reports: [] });
 
-function entryOf<T>(member: Member, document: T, since: number, stale: boolean): PresenceMember<T> {
+function entryOf<T>(member: PublishingRoot, document: T, since: number, stale: boolean): PresenceMember<T> {
   return Object.freeze({ id: member.id, namespace: member.namespace, document, since, stale });
 }
 
@@ -607,18 +614,18 @@ function due<T>(state: MemberState<T>, at: number): MemberStep<T> {
 
 type Applied<T> = { states: States<T>; reports: Report<T>[]; effects: PresenceEffect<T>[] };
 
-function follow<T>(states: States<T>, change: MembersChange): Applied<T> {
+function follow<T>(states: States<T>, change: PublishingRootsChange): Applied<T> {
   const next = new Map(states);
   const reports: Report<T>[] = [];
   const effects: PresenceEffect<T>[] = [];
-  for (const { id } of change.left) {
+  for (const { id } of change.removed) {
     const state = next.get(id);
     if (!state) continue;
     next.delete(id);
     effects.push({ kind: 'unwant', id });
     if (state.kind !== 'awaiting') reports.push({ event: 'left', member: state.entry });
   }
-  for (const member of change.joined) {
+  for (const member of change.added) {
     if (next.has(member.id)) continue;
     next.set(member.id, { kind: 'awaiting', member, route: undefined, last: undefined });
     effects.push({ kind: 'want', member });
@@ -628,10 +635,10 @@ function follow<T>(states: States<T>, change: MembersChange): Applied<T> {
 
 function apply<T>(
   states: States<T>,
-  input: Exclude<PresenceInput, { kind: 'close' | 'members-error' }>,
+  input: Exclude<PresenceInput, { kind: 'close' | 'roots-error' }>,
   ctx: PresenceContext<T>,
 ): Applied<T> {
-  if (input.kind === 'members') return follow(states, input.change);
+  if (input.kind === 'roots') return follow(states, input.change);
   if (input.kind === 'tick') {
     const next = new Map(states);
     const reports: Report<T>[] = [];
@@ -694,19 +701,19 @@ function gather<T>(
  */
 function transition<T>(phase: ViewPhase<T>, input: PresenceInput, ctx: PresenceContext<T>): Step<T> {
   if (phase.kind === 'closed') return stay(phase);
-  if (input.kind === 'close' || input.kind === 'members-error') {
+  if (input.kind === 'close' || input.kind === 'roots-error') {
     const states = phase.kind === 'loading' ? NOBODY : phase.states;
     return {
       phase: { kind: 'closed' },
       effects: [
         ...[...states.keys()].map((id): PresenceEffect<T> => ({ kind: 'unwant', id })),
-        { kind: 'close-members' },
-        ...(input.kind === 'members-error' ? [{ kind: 'error' as const, error: input.error }] : []),
+        { kind: 'close-roots' },
+        ...(input.kind === 'roots-error' ? [{ kind: 'error' as const, error: input.error }] : []),
       ],
     };
   }
   if (phase.kind === 'loading') {
-    if (input.kind !== 'members' || !input.change.initial) return stay(phase);
+    if (input.kind !== 'roots' || !input.change.initial) return stay(phase);
     const { states, effects } = follow<T>(NOBODY, input.change);
     const gathering = {
       kind: 'gathering',

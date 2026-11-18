@@ -9,7 +9,7 @@ import {
   type PresenceViewHandlers,
   publishPresence,
 } from '../src/media.js';
-import type { Member, MembersChange, MembersHandlers } from '../src/members.js';
+import type { PublishingRoot, PublishingRootsChange, PublishingRootsHandlers } from '../src/publishing-roots.js';
 import {
   type RestartReason,
   type SupervisedSubscriber,
@@ -27,14 +27,14 @@ import {
   until,
 } from './helpers/supervision-fakes.js';
 
-const ROOT = ['room', 'p'];
+const PREFIX = ['room', 'p'];
 const WINDOW = 3 * PRESENCE_HEARTBEAT_MS;
 const OLD = '0000000aaxxxx';
 const G1 = '0000000bbxxxx';
 const G2 = '0000000ccxxxx';
 const OK = { trackAlias: 1, parameters: {}, trackProperties: [] } as unknown as SubscribeOk;
 const encode = (document: unknown) => new TextEncoder().encode(JSON.stringify(document));
-const memberOf = (id: string): Member => ({ id, namespace: [...ROOT, id] });
+const rootOf = (id: string): PublishingRoot => ({ id, namespace: [...PREFIX, id] });
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] });
@@ -50,10 +50,10 @@ interface Opened {
   handlers: WantHandlers;
 }
 
-/** A supervised subscriber whose members view and wants the test drives by hand. */
+/** A supervised subscriber whose publishing-roots view and wants the test drives by hand. */
 function fakeRoom() {
-  let membersHandlers: MembersHandlers | undefined;
-  let present = new Map<string, Member>();
+  let rootsHandlers: PublishingRootsHandlers | undefined;
+  let present = new Map<string, PublishingRoot>();
   const opened: Opened[] = [];
   const unwanted: string[] = [];
   let status: SupervisedStatus = 'live';
@@ -65,19 +65,19 @@ function fakeRoom() {
     };
   });
   const room = {
-    membersCalls: 0,
-    membersClosed: false,
+    rootsCalls: 0,
+    rootsClosed: false,
     opened,
     unwanted,
     subscriber: {
-      members(_options, handlers = {}) {
-        room.membersCalls += 1;
-        membersHandlers = handlers;
+      publishingRoots(_options, handlers = {}) {
+        room.rootsCalls += 1;
+        rootsHandlers = handlers;
         return {
           loaded: false,
           present,
           close() {
-            room.membersClosed = true;
+            room.rootsClosed = true;
           },
         };
       },
@@ -91,28 +91,33 @@ function fakeRoom() {
         return status;
       },
       closed,
-    } satisfies Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
-    /** The supervisor stops: it closes the members view and drops the wants without calling them, as `close()` does. */
+    } satisfies Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
+    /** The supervisor stops: it closes the publishing-roots view and drops the wants without calling them, as `close()` does. */
     stop,
-    change(joined: string[], left: string[] = [], initial = false) {
+    change(added: string[], removed: string[] = [], initial = false) {
       present = new Map(present);
-      for (const id of left) present.delete(id);
-      for (const id of joined) present.set(id, memberOf(id));
-      const change: MembersChange = { joined: joined.map(memberOf), left: left.map(memberOf), present, initial };
-      membersHandlers?.onChanged?.(change);
+      for (const id of removed) present.delete(id);
+      for (const id of added) present.set(id, rootOf(id));
+      const change: PublishingRootsChange = {
+        added: added.map(rootOf),
+        removed: removed.map(rootOf),
+        present,
+        initial,
+      };
+      rootsHandlers?.onChanged?.(change);
     },
     load(...ids: string[]) {
       room.change(ids, [], true);
     },
     fail(error: unknown) {
-      membersHandlers?.onError?.(error);
+      rootsHandlers?.onError?.(error);
     },
     /** The newest want opened for `id`, as the relay would drive it. */
     peer(id: string, which = -1) {
       const want = opened.filter((entry) => entry.options.namespace.at(-1) === id).at(which);
       if (!want) throw new Error(`no want for ${id}`);
       const { handlers } = want;
-      const at = (generation: string) => [...ROOT, id, generation];
+      const at = (generation: string) => [...PREFIX, id, generation];
       const bytes = (groupId: number, payload: Uint8Array) =>
         handlers.onObject?.({
           groupId,
@@ -170,7 +175,7 @@ function summary(change: PresenceChange<unknown>) {
 function liveRoom(...ids: string[]) {
   const room = fakeRoom();
   const record = recorder();
-  const view = createPresenceView(room.subscriber, { root: ROOT }, record.handlers);
+  const view = createPresenceView(room.subscriber, { prefix: PREFIX }, record.handlers);
   room.load(...ids);
   for (const id of ids) {
     const peer = room.peer(id);
@@ -188,7 +193,7 @@ describe('createPresenceView', () => {
     room.change(['bob']);
     const bob = room.peer('bob');
     expect(bob.want.options).toEqual({
-      namespace: [...ROOT, 'bob'],
+      namespace: [...PREFIX, 'bob'],
       track: 'presence',
       generations: true,
       parameters: { subscriberPriority: 32 },
@@ -202,7 +207,7 @@ describe('createPresenceView', () => {
     const entry = changes[0]!.joined[0]!;
     expect(entry).toEqual({
       id: 'bob',
-      namespace: [...ROOT, 'bob'],
+      namespace: [...PREFIX, 'bob'],
       document: { name: 'Bob', host: true },
       since: Date.now(),
       stale: false,
@@ -211,10 +216,10 @@ describe('createPresenceView', () => {
     expect([...view.present.values()]).toEqual([entry]);
   });
 
-  it('loads an empty root at once, with nobody', () => {
+  it('loads an empty prefix at once, with nobody', () => {
     const room = fakeRoom();
     const { changes, handlers } = recorder();
-    const view = createPresenceView(room.subscriber, { root: ROOT }, handlers);
+    const view = createPresenceView(room.subscriber, { prefix: PREFIX }, handlers);
     expect(view.loaded).toBe(false);
     room.load();
     expect(changes.map(summary)).toEqual([{ initial: true }]);
@@ -222,10 +227,10 @@ describe('createPresenceView', () => {
     expect(view.present.size).toBe(0);
   });
 
-  it('loads as soon as every member present has a document, in members() order', () => {
+  it('loads as soon as every member present has a document, in publishingRoots() order', () => {
     const room = fakeRoom();
     const { changes, handlers } = recorder();
-    const view = createPresenceView(room.subscriber, { root: ROOT }, handlers);
+    const view = createPresenceView(room.subscriber, { prefix: PREFIX }, handlers);
     room.load('alice', 'bob');
     room.peer('bob').subscribed();
     room.peer('bob').object(0, { name: 'Bob' });
@@ -240,7 +245,7 @@ describe('createPresenceView', () => {
   it('loads after 1 s without a member whose document never came, and reports it as an ordinary join later', () => {
     const room = fakeRoom();
     const { changes, handlers } = recorder();
-    createPresenceView(room.subscriber, { root: ROOT }, handlers);
+    createPresenceView(room.subscriber, { prefix: PREFIX }, handlers);
     room.load('alice', 'carol');
     room.peer('alice').subscribed();
     room.peer('alice').object(0, { name: 'Alice' });
@@ -425,7 +430,7 @@ describe('createPresenceView', () => {
         throw new TypeError('not a profile');
       return value as { name: string };
     };
-    const view = createPresenceView(room.subscriber, { root: ROOT, parse }, handlers);
+    const view = createPresenceView(room.subscriber, { prefix: PREFIX, parse }, handlers);
     room.load('alice');
     const alice = room.peer('alice');
     alice.subscribed();
@@ -452,12 +457,12 @@ describe('createPresenceView', () => {
     const registry = new FinalizationRegistry<string>((name) => collected.push(name));
     const open = (name: string) => {
       const handlers = { onChanged: () => {} };
-      createPresenceView(room.subscriber, { root: ROOT }, handlers).close();
+      createPresenceView(room.subscriber, { prefix: PREFIX }, handlers).close();
       registry.register(handlers, name);
     };
     open('first');
     open('second');
-    // The fake keeps the newest members handlers, which holds the last view; the real supervisor drops them on close.
+    // The fake keeps the newest publishing-roots handlers, which holds the last view; the real supervisor drops them on close.
     open('last');
     for (let round = 0; round < 10 && collected.length < 2; round++) {
       gc();
@@ -472,7 +477,7 @@ describe('createPresenceView', () => {
     const view = createPresenceView(
       room.subscriber,
       {
-        root: ROOT,
+        prefix: PREFIX,
         parse: (value) => {
           room.stop();
           return value;
@@ -498,7 +503,7 @@ describe('createPresenceView', () => {
     const view = createPresenceView(
       room.subscriber,
       {
-        root: ROOT,
+        prefix: PREFIX,
         parse: (value) => {
           view.close();
           return value;
@@ -516,12 +521,12 @@ describe('createPresenceView', () => {
     expect(view.present.size).toBe(0);
   });
 
-  it('delivers nothing after close() from onChanged, and unwants every member and closes the members view', () => {
+  it('delivers nothing after close() from onChanged, and unwants every member and closes the publishing-roots view', () => {
     const room = fakeRoom();
     const changes: PresenceChange<unknown>[] = [];
     const view = createPresenceView(
       room.subscriber,
-      { root: ROOT },
+      { prefix: PREFIX },
       {
         onChanged: (change) => {
           changes.push(change);
@@ -536,7 +541,7 @@ describe('createPresenceView', () => {
     vi.advanceTimersByTime(1000);
     expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'] }]);
     expect(room.unwanted.sort()).toEqual(room.opened.map((want) => want.key).sort());
-    expect(room.membersClosed).toBe(true);
+    expect(room.rootsClosed).toBe(true);
     room.peer('bob').subscribed();
     room.peer('bob').object(0, { name: 'bob' });
     room.change(['carol']);
@@ -558,13 +563,13 @@ describe('createPresenceView', () => {
     expect([...view.present.keys()]).toEqual(['alice', 'bob']);
   });
 
-  it("closes and reports the members view's failure, and delivers nothing after it", () => {
+  it("closes and reports the publishing-roots view's failure, and delivers nothing after it", () => {
     const { room, view, changes, errors } = liveRoom('alice');
     const failure = new Error('token does not allow the room');
     room.fail(failure);
     expect(errors).toEqual([failure]);
     expect(room.unwanted).toEqual([room.peer('alice').want.key]);
-    expect(room.membersClosed).toBe(true);
+    expect(room.rootsClosed).toBe(true);
     room.peer('alice').object(1, { name: 'changed' });
     vi.advanceTimersByTime(60_000);
     expect(changes).toEqual([]);
@@ -577,7 +582,7 @@ describe('createPresenceView', () => {
     const seen: PresenceChange<unknown>[] = [];
     createPresenceView(
       room.subscriber,
-      { root: ROOT },
+      { prefix: PREFIX },
       {
         onChanged: (change) => {
           seen.push(change);
@@ -597,7 +602,7 @@ describe('createPresenceView', () => {
   it('calls a member stale after three of the heartbeats it is given', () => {
     const room = fakeRoom();
     const { changes, handlers } = recorder();
-    createPresenceView(room.subscriber, { root: ROOT, heartbeatMs: 500 }, handlers);
+    createPresenceView(room.subscriber, { prefix: PREFIX, heartbeatMs: 500 }, handlers);
     room.load('alice');
     room.peer('alice').subscribed();
     room.peer('alice').object(0, {});
@@ -607,21 +612,21 @@ describe('createPresenceView', () => {
     expect(changes.map(summary).at(-1)).toEqual({ stale: ['alice'] });
   });
 
-  it('checks its arguments at once, before following the root', () => {
+  it('checks its arguments at once, before following the prefix', () => {
     const room = fakeRoom();
     const view = (options: unknown, handlers?: unknown) => () =>
       createPresenceView(room.subscriber, options as never, handlers as never);
     expect(view(undefined)).toThrow(TypeError);
-    expect(view({ root: ROOT, track: '' })).toThrow(TypeError);
-    expect(view({ root: ROOT, heartbeatMs: '2000' })).toThrow(TypeError);
-    expect(view({ root: ROOT, heartbeatMs: 99 })).toThrow(RangeError);
-    expect(view({ root: ROOT, heartbeatMs: 1000.5 })).toThrow(RangeError);
-    expect(view({ root: ROOT, heartbeatMs: 715_827_883 })).toThrow(RangeError);
-    expect(view({ root: ROOT, parse: 'json' })).toThrow(TypeError);
-    expect(view({ root: ROOT }, null)).toThrow(TypeError);
-    expect(view({ root: ROOT }, { onChanged: 'render' })).toThrow(TypeError);
-    expect(view({ root: ROOT }, { onChanged: async () => {} })).toThrow(TypeError);
-    expect(room.membersCalls).toBe(0);
+    expect(view({ prefix: PREFIX, track: '' })).toThrow(TypeError);
+    expect(view({ prefix: PREFIX, heartbeatMs: '2000' })).toThrow(TypeError);
+    expect(view({ prefix: PREFIX, heartbeatMs: 99 })).toThrow(RangeError);
+    expect(view({ prefix: PREFIX, heartbeatMs: 1000.5 })).toThrow(RangeError);
+    expect(view({ prefix: PREFIX, heartbeatMs: 715_827_883 })).toThrow(RangeError);
+    expect(view({ prefix: PREFIX, parse: 'json' })).toThrow(TypeError);
+    expect(view({ prefix: PREFIX }, null)).toThrow(TypeError);
+    expect(view({ prefix: PREFIX }, { onChanged: 'render' })).toThrow(TypeError);
+    expect(view({ prefix: PREFIX }, { onChanged: async () => {} })).toThrow(TypeError);
+    expect(room.rootsCalls).toBe(0);
   });
 });
 
@@ -639,12 +644,12 @@ describe('createPresenceView over a supervised subscriber', () => {
     );
     try {
       const { changes, handlers } = recorder();
-      const view = createPresenceView(subscriber, { root: ROOT }, handlers);
+      const view = createPresenceView(subscriber, { prefix: PREFIX }, handlers);
       const generation = newGeneration();
       const serve = async (n: number) => {
         await until(() => (connections[n]?.discoveries.length ?? 0) > 0, `discovery on connection ${n}`);
         const discovery = connections[n]!.discoveries[0]!;
-        discovery.push({ type: 'announced', namespace: [...ROOT, 'alice', generation] });
+        discovery.push({ type: 'announced', namespace: [...PREFIX, 'alice', generation] });
         discovery.push({ type: 'loaded' });
         await until(() => (connections[n]?.subscriptions.length ?? 0) > 0, `presence subscription on connection ${n}`);
         const subscription = connections[n]!.subscriptions[0]!;
@@ -663,7 +668,10 @@ describe('createPresenceView over a supervised subscriber', () => {
         };
       };
       const old = await serve(0);
-      expect(old.subscription.options).toMatchObject({ namespace: [...ROOT, 'alice', generation], track: 'presence' });
+      expect(old.subscription.options).toMatchObject({
+        namespace: [...PREFIX, 'alice', generation],
+        track: 'presence',
+      });
       old.send(0);
       await until(() => changes.length === 1, 'the load');
       expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'] }]);
@@ -695,10 +703,10 @@ describe('createPresenceView over a supervised subscriber', () => {
       { url: 'https://relay.example.com/moq', reconnect: { initialDelayMs: 0, maxDelayMs: 0 } },
     );
     const { changes, errors, handlers } = recorder();
-    createPresenceView(subscriber, { root: ROOT, heartbeatMs: 100 }, handlers);
+    createPresenceView(subscriber, { prefix: PREFIX, heartbeatMs: 100 }, handlers);
     await until(() => (connections[0]?.discoveries.length ?? 0) > 0, 'discovery');
     const discovery = connections[0]!.discoveries[0]!;
-    discovery.push({ type: 'announced', namespace: [...ROOT, 'alice', newGeneration()] });
+    discovery.push({ type: 'announced', namespace: [...PREFIX, 'alice', newGeneration()] });
     discovery.push({ type: 'loaded' });
     await until(() => (connections[0]?.subscriptions.length ?? 0) > 0, 'the presence subscription');
     const subscription = connections[0]!.subscriptions[0]!;
@@ -723,7 +731,7 @@ describe('publishPresence', () => {
   const sent = (track: FakeTrack) => track.writes.map((bytes) => new TextDecoder().decode(bytes));
 
   function start(document: unknown = { name: 'Ada', joinedAt: 1 }, options = {}) {
-    const publisher = fakePublisher([...ROOT, 'alice']);
+    const publisher = fakePublisher([...PREFIX, 'alice']);
     const me = publishPresence(publisher, document, options);
     const track = publisher.tracks.get('presence')!;
     return { publisher, me, track };
@@ -788,7 +796,7 @@ describe('publishPresence', () => {
   });
 
   it('refuses a document JSON cannot encode before registering anything, and keeps the current one on update', () => {
-    const publisher = fakePublisher([...ROOT, 'alice']);
+    const publisher = fakePublisher([...PREFIX, 'alice']);
     expect(() => publishPresence(publisher, undefined)).toThrow(TypeError);
     expect(() => publishPresence(publisher, () => {})).toThrow(TypeError);
     expect(() => publishPresence(publisher, { joinedAt: 1n })).toThrow(TypeError);

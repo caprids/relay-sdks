@@ -8,7 +8,7 @@
  * properties, a document is bytes, and the reader drives a sequencer it is given, so they pair with `@caprid/moq-media`'s
  * LOC and MSF helpers and its `FrameSequencer` without depending on them. Presence is a JSON convention of its own:
  * `publishPresence` serves a participant's document with a heartbeat, and `createPresenceView` follows everyone's under
- * a root as a live roster.
+ * a prefix as a live roster.
  *
  * ```ts
  * import { createCatalogService, createFrameWriter, mediaTrackProperties } from '@caprid/relay/media';
