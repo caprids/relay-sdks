@@ -791,10 +791,9 @@ taken over.
     group, so that object is usually one the old subscription delivered. It is dropped, as is every
     object at or before the last location the old subscription delivered, and delivery carries on
     from the first one after it. A subgroup end the old subscription reported is not reported
-    again, and neither is one of an earlier group. The cutover does not wait for a new object: both
-    connections receive each object within a fraction of a millisecond, and while the old one
-    delivers each first the replacement would never take over, holding the old connection for the
-    whole overlap. No callback marks the cutover, no `onSwitched`, `onRestarted` or `onSubscribed`,
+    again. The cutover does not wait for a new object: both connections receive each object within
+    a fraction of a millisecond, and while the old one delivers each first the replacement would
+    never take over, holding the old connection for the whole overlap. No callback marks the cutover, no `onSwitched`, `onRestarted` or `onSubscribed`,
     and nothing is lost or repeated, so decoders keep their state. The old subscription is
     cancelled, not drained. Once any of the want's subscriptions has heard `PUBLISH_DONE`, nothing
     is dropped: a restarted publisher numbers its groups from 0 again. A want whose track sends

@@ -1068,13 +1068,11 @@ interface Slot {
    * are skipped.
    */
   skipThrough?: Location | undefined;
-  /** The subgroup ends it delivered, of the latest group it delivered one in. */
-  ends?: SubgroupEnds;
   /**
-   * After a rotation's silent cutover, the subgroup ends its predecessors delivered, which it does not repeat. Nor
-   * those of earlier groups, which were the predecessors' to deliver.
+   * The subgroup ends it reported, as `group:subgroup`, newest last. A rotation's replacement takes the set over and
+   * does not report them again.
    */
-  skipEnds?: SubgroupEnds | undefined;
+  ends: Set<string>;
   /** Whether it delivered an object from a later group than its first. */
   progressed: boolean;
   /** While draining after a cutover: the largest group it had delivered, through which its events still reach the handlers. */
@@ -1100,8 +1098,8 @@ function atOrBefore(object: MoqtObject, latest: Location | undefined): boolean {
 }
 
 type Location = { groupId: number; objectId: number };
-/** The subgroups of one group whose end was delivered. */
-type SubgroupEnds = { groupId: number; subgroupIds: Set<number> };
+/** How many subgroup ends a slot remembers reporting: far more than a replacement repeats from the latest group. */
+const REMEMBERED_ENDS = 256;
 
 /** The later of two locations, either of which may be unknown. */
 function later(a: Location | undefined, b: Location | undefined): Location | undefined {
@@ -1113,20 +1111,6 @@ function later(a: Location | undefined, b: Location | undefined): Location | und
 /** Record `object` as the latest `slot` delivered, if it is later than what it had. */
 function delivered(slot: Slot, object: MoqtObject): void {
   if (!atOrBefore(object, slot.latest)) slot.latest = { groupId: object.groupId, objectId: object.objectId };
-}
-
-/** Record a subgroup end `slot` delivered. Only the latest group's are kept: a replacement starts there. */
-function deliveredEnd(slot: Slot, info: { groupId: number; subgroupId: number }): void {
-  if (slot.ends === undefined || info.groupId > slot.ends.groupId) {
-    slot.ends = { groupId: info.groupId, subgroupIds: new Set([info.subgroupId]) };
-  } else if (info.groupId === slot.ends.groupId) slot.ends.subgroupIds.add(info.subgroupId);
-}
-
-/** The subgroup ends of the later group, or of both when they are of the same group. */
-function laterEnds(a: SubgroupEnds | undefined, b: SubgroupEnds | undefined): SubgroupEnds | undefined {
-  if (a === undefined || b === undefined) return a ?? b;
-  if (a.groupId !== b.groupId) return a.groupId > b.groupId ? a : b;
-  return { groupId: a.groupId, subgroupIds: new Set([...a.subgroupIds, ...b.subgroupIds]) };
 }
 
 /** What a subscription is made with, as a comparable key. */
@@ -1313,7 +1297,7 @@ async function follow(
     // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
     if (silent && !endedTargets.has(slot.key) && from.ended !== 'publisher-done') {
       slot.skipThrough = later(from.latest, from.skipThrough);
-      slot.skipEnds = laterEnds(from.ends, from.skipEnds);
+      slot.ends = from.ends;
     }
     endedTargets.clear();
     pending = undefined;
@@ -1342,7 +1326,8 @@ async function follow(
     } else from.subscription.cancel();
     releaseUnused();
     slot.firstGroup = object.groupId;
-    slot.largestGroup = object.groupId;
+    // A replacement that starts behind the old subscription still drains through what that one delivered.
+    slot.largestGroup = Math.max(object.groupId, slot.skipThrough?.groupId ?? object.groupId);
     lastObjectAt = performance.now();
     if (!silent) {
       try {
@@ -1389,13 +1374,10 @@ async function follow(
 
   /** A subgroup end of the active subscription, or of one draining: once, across a rotation's cutover. */
   const onSubgroupEnd = (slot: Slot, info: { groupId: number; subgroupId: number; endOfGroup: boolean }) => {
-    const skip = slot.skipEnds;
-    if (
-      skip &&
-      (info.groupId < skip.groupId || (info.groupId === skip.groupId && skip.subgroupIds.has(info.subgroupId)))
-    )
-      return;
-    deliveredEnd(slot, info);
+    const key = `${info.groupId}:${info.subgroupId}`;
+    if (slot.ends.has(key)) return;
+    slot.ends.add(key);
+    if (slot.ends.size > REMEMBERED_ENDS) slot.ends.delete(slot.ends.values().next().value as string);
     handlers().onSubgroupEnd?.(info);
   };
 
@@ -1413,7 +1395,9 @@ async function follow(
       return;
     }
     if (draining.has(slot)) {
-      if (object.groupId <= (slot.drainThrough as number)) handlers().onObject?.(object);
+      if (object.groupId <= (slot.drainThrough as number) && !atOrBefore(object, slot.skipThrough)) {
+        handlers().onObject?.(object);
+      }
       return;
     }
     if (slot !== pending) return;
@@ -1525,6 +1509,7 @@ async function follow(
       connection: on,
       subscription,
       progressed: false,
+      ends: new Set(),
       held: [],
     };
     slot = opened;

@@ -1131,6 +1131,10 @@ def _any_cancelled(tokens: Sequence[CancellationToken]) -> CancellationToken:
     return token
 
 
+_REMEMBERED_ENDS = 256
+"""How many subgroup ends a slot remembers reporting: far more than a replacement repeats from the latest group."""
+
+
 @dataclass(slots=True, eq=False)
 class _Slot:
     """One subscription an attempt holds: the active one, a move's pending replacement, or an old one draining."""
@@ -1152,11 +1156,9 @@ class _Slot:
     """After a rotation's silent cutover, the latest object its predecessors delivered: the replacement repeats
     the latest group from its start, and an earlier object arriving late on another stream was delivered
     already. Both are skipped."""
-    ends: tuple[int, frozenset[int]] | None = None
-    """The subgroup ends it delivered, of the latest group it delivered one in: the group, and its subgroups."""
-    skip_ends: tuple[int, frozenset[int]] | None = None
-    """After a rotation's silent cutover, the subgroup ends its predecessors delivered, which it does not repeat.
-    Nor those of earlier groups, which were the predecessors' to deliver."""
+    ends: dict[tuple[int, int], None] = field(default_factory=dict)
+    """The subgroup ends it reported, as (group, subgroup), newest last. A rotation's replacement takes them
+    over and does not report them again."""
     progressed: bool = False
     """Whether it delivered an object from a later group than its first."""
     drain_through: int | None = None
@@ -1182,19 +1184,15 @@ class _Slot:
         if not _at_or_before(obj, self.latest):
             self.latest = (obj.group_id, obj.object_id)
 
-    def delivered_end(self, info: SubgroupEnd) -> None:
-        """Record a subgroup end this slot delivered. Only the latest group's are kept: a replacement starts there."""
-        if self.ends is None or info.group_id > self.ends[0]:
-            self.ends = (info.group_id, frozenset({info.subgroup_id}))
-        elif info.group_id == self.ends[0]:
-            self.ends = (info.group_id, self.ends[1] | {info.subgroup_id})
-
-    def repeats_end(self, info: SubgroupEnd) -> bool:
-        """Whether a predecessor delivered this subgroup end, or it is of a group that was the predecessor's."""
-        if self.skip_ends is None:
+    def reports_end(self, info: SubgroupEnd) -> bool:
+        """Whether to report this subgroup end: not one already reported. Records it."""
+        key = (info.group_id, info.subgroup_id)
+        if key in self.ends:
             return False
-        group_id, subgroup_ids = self.skip_ends
-        return info.group_id < group_id or (info.group_id == group_id and info.subgroup_id in subgroup_ids)
+        self.ends[key] = None
+        if len(self.ends) > _REMEMBERED_ENDS:
+            del self.ends[next(iter(self.ends))]
+        return True
 
 
 def _is_progress(obj: MoqtObject, first_group: int | None) -> bool:
@@ -1210,17 +1208,6 @@ def _later(a: tuple[int, int] | None, b: tuple[int, int] | None) -> tuple[int, i
     if b is None:
         return a
     return max(a, b)
-
-
-def _later_ends(
-    a: tuple[int, frozenset[int]] | None, b: tuple[int, frozenset[int]] | None
-) -> tuple[int, frozenset[int]] | None:
-    """The subgroup ends of the later group, or of both when they are of the same group."""
-    if a is None or b is None:
-        return a or b
-    if a[0] != b[0]:
-        return a if a[0] > b[0] else b
-    return (a[0], a[1] | b[1])
 
 
 def _at_or_before(obj: MoqtObject, latest: tuple[int, int] | None) -> bool:
@@ -1431,7 +1418,7 @@ async def _follow(
         # Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
         if silent and not target_ended(slot) and previous.ended != "publisher-done":
             slot.skip_through = _later(previous.latest, previous.skip_through)
-            slot.skip_ends = _later_ends(previous.ends, previous.skip_ends)
+            slot.ends = previous.ends
         ended_targets.clear()
         pending = None
         clear_retry()
@@ -1458,7 +1445,8 @@ async def _follow(
             previous.cancel()
         release_unused()
         slot.first_group = obj.group_id
-        slot.largest_group = obj.group_id
+        # A replacement that starts behind the old subscription still drains through what that one delivered.
+        slot.largest_group = max(obj.group_id, slot.skip_through[0] if slot.skip_through else obj.group_id)
         last_object_at = loop.time()
         if not silent:
             # A subscription that delivered an object was accepted.
@@ -1495,8 +1483,7 @@ async def _follow(
                 slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
                 deliver("on_object", held.value)
             elif isinstance(held, SubgroupEndEvent):
-                if not slot.repeats_end(held.value):
-                    slot.delivered_end(held.value)
+                if slot.reports_end(held.value):
                     deliver("on_subgroup_end", held.value)
             else:
                 deliver("on_subgroup_reset", held.value)
@@ -1519,7 +1506,8 @@ async def _follow(
             want.call("on_object", obj)
             return
         if slot in draining:
-            if slot.drain_through is not None and obj.group_id <= slot.drain_through:
+            through = slot.drain_through
+            if through is not None and obj.group_id <= through and not _at_or_before(obj, slot.skip_through):
                 want.call("on_object", obj)
             return
         if slot is not pending:
@@ -1574,8 +1562,7 @@ async def _follow(
         elif reaches(slot, event.value.group_id):
             if isinstance(event, SubgroupResetEvent):
                 want.call("on_subgroup_reset", event.value)
-            elif not slot.repeats_end(event.value):
-                slot.delivered_end(event.value)
+            elif slot.reports_end(event.value):
                 want.call("on_subgroup_end", event.value)
 
     def on_publisher_done(slot: _Slot, info: PublishDone) -> None:

@@ -2060,21 +2060,32 @@ async def _rotated_want(
     cleanup: list[Callable[[], object]],
 ) -> tuple[ExpiringSubscribers, list[str], FakeSubscription, FakeSubscription]:
     """A want rotated to a second connection (#430): what it reported, the old subscription and the replacement."""
+    s, seen, old, replacement, _move = await _rotated_movable_want(cleanup)
+    return s, seen, old, replacement
+
+
+async def _rotated_movable_want(
+    cleanup: list[Callable[[], object]],
+) -> tuple[ExpiringSubscribers, list[str], FakeSubscription, FakeSubscription, Callable[[], Awaitable[None]]]:
+    """As :func:`_rotated_want`, with a call that moves the want to another track, draining the old one, and
+    cuts over at the new track's first object."""
     subscriber, s = await start_rotating_subscriber(cleanup)
     seen: list[str] = []
-    subscriber.want(
-        "video",
-        ["room"],
-        "video",
-        WantHandlers(
-            on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
-            on_object=lambda obj: seen.append(f"object {obj.group_id}.{obj.object_id}"),
-            on_subgroup_end=lambda info: seen.append(f"end {info.group_id}"),
-            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
-            on_switched=lambda _info: seen.append("switched"),
-        ),
-        retry=FAST,
+    handlers = WantHandlers(
+        on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
+        on_object=lambda obj: seen.append(f"object {obj.group_id}.{obj.object_id}"),
+        on_subgroup_end=lambda info: seen.append(f"end {info.group_id}"),
+        on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+        on_switched=lambda _info: seen.append("switched"),
     )
+    subscriber.want("video", ["room"], "video", handlers, retry=FAST)
+
+    async def move_to_another_track() -> None:
+        subscriber.want("video", ["room"], "other", handlers, retry=FAST, drain=0.2)
+        await until(lambda: len(s.connections[1].subscriptions) == 2, "subscribe to the other track")
+        s.connections[1].subscriptions[1].accept()
+        s.connections[1].subscriptions[1].send_object(0)
+
     await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
     old = s.first.subscriptions[0]
     old.accept()
@@ -2083,7 +2094,7 @@ async def _rotated_want(
     await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
     replacement = s.connections[1].subscriptions[0]
     replacement.accept()
-    return s, seen, old, replacement
+    return s, seen, old, replacement, move_to_another_track
 
 
 async def test_rotation_closes_the_old_connection_well_before_the_overlap_when_it_delivers_every_group_first(
@@ -2108,6 +2119,51 @@ async def test_rotation_closes_the_old_connection_at_the_cached_group_of_a_track
     await until(lambda: s.first.closed.done(), "old connection closed at the cached group", timeout=1)
     _send_group(replacement, 2)
     assert seen == ["subscribed", "object 1.0", "end 1", "object 2.0", "end 2"]
+
+
+async def test_rotation_reports_a_subgroup_end_the_old_connection_had_not_of_a_group_before_its_latest(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _s, seen, old, replacement = await _rotated_want(cleanup)
+    old.send_object(2)
+    _send_group(old, 3)
+    replacement.send_object(3)
+    _send_end(replacement, 2)
+    _send_end(replacement, 3)
+    assert seen == ["subscribed", "object 1.0", "end 1", "object 2.0", "object 3.0", "end 3", "end 2"]
+
+
+async def test_rotation_repeats_nothing_while_the_replacement_drains_after_a_move_to_another_track(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _s, seen, old, replacement, move_to_another_track = await _rotated_movable_want(cleanup)
+    old.send_object(4)
+    old.send_object(4, 1)
+    replacement.send_object(4)
+    await move_to_another_track()
+    replacement.send_object(4, 1)
+    assert seen == ["subscribed", "object 1.0", "end 1", "object 4.0", "object 4.1", "switched", "object 0.0"]
+
+
+async def test_rotation_drains_a_replacement_that_started_behind_through_what_the_old_connection_delivered(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _s, seen, old, replacement, move_to_another_track = await _rotated_movable_want(cleanup)
+    old.send_object(4)
+    replacement.send_object(2)
+    await move_to_another_track()
+    replacement.send_object(4, 1)
+    _send_end(replacement, 4)
+    assert seen == [
+        "subscribed",
+        "object 1.0",
+        "end 1",
+        "object 4.0",
+        "switched",
+        "object 0.0",
+        "object 4.1",
+        "end 4",
+    ]
 
 
 async def test_rotation_skips_what_the_old_connection_delivered_when_the_replacement_is_groups_behind_it(
