@@ -275,4 +275,16 @@ describe('createMoqtDuplexSession', () => {
     await vi.waitFor(() => expect(closed).toHaveLength(1));
     expect(closed[0]!.error).toBeDefined();
   });
+  it('reports a clean peer close as clean, though it fails the control stream too', async () => {
+    const pair = createTransportPair();
+    const closed: { error?: unknown }[] = [];
+    createMoqtDuplexSession(pair.client, { subscriber: { callbacks: { onClosed: (info) => closed.push(info) } } });
+    const control = (await pair.server.createUnidirectionalStream()).getWriter();
+    await control.write(encodeSetup([]));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    pair.server.close({ closeCode: 0, reason: '' });
+    await vi.waitFor(() => expect(closed).toHaveLength(1));
+    expect(closed[0]).toEqual({});
+  });
 });

@@ -53,6 +53,7 @@ import {
   type SubgroupHeader,
 } from './object-stream.js';
 import { type BidirectionalStreamLike, openRequestStream, type RequestStream } from './request-stream.js';
+import { isSessionError } from './transport-error.js';
 
 // ============================================================================
 // Transport seam
@@ -536,6 +537,17 @@ function declares(options: readonly KeyValuePair[], type: number): boolean {
 
 type RequestKind = 'subscribe' | 'fetch' | 'track-status' | 'subscribe-namespace';
 
+const PENDING = Symbol('pending');
+
+/** Whether `promise` had already settled when this was called: one microtask turn, whichever handler runs first. */
+async function settled(promise: Promise<unknown>): Promise<boolean> {
+  try {
+    return (await Promise.race([promise, Promise.resolve(PENDING)])) !== PENDING;
+  } catch {
+    return true;
+  }
+}
+
 function activeCountViolation(
   answers: RequestKind,
   negotiated: boolean,
@@ -664,8 +676,12 @@ class MoqtSessionImpl implements MoqtSession {
       this.#controlWriter = control.getWriter();
       // A control stream MUST stay open for the session's lifetime (§6.3): a peer stopping it has ended the session, as
       // the publish driver also treats it. A clean local close resolves the writer instead, and #fatal no-ops once
-      // #handleClosed has run.
-      void this.#controlWriter.closed.catch((error: unknown) => this.#fatal(error));
+      // #handleClosed has run. A session-wide failure (a peer's clean close fails every stream as it settles `closed`)
+      // is the transport's to report: `closed` says whether it was clean.
+      void this.#controlWriter.closed.catch(async (error: unknown) => {
+        if (isSessionError(error) || (await settled(this.#transport.closed))) return;
+        this.#fatal(error);
+      });
       const options: KeyValuePair[] = [
         {
           type: SETUP_OPTION.MOQT_IMPLEMENTATION,
