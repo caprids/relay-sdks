@@ -668,6 +668,270 @@ After `drop_connections()`, each supervisor reports `reconnecting` and then `liv
 connection. Against `ord.relay.mux.global`, a want following generations was receiving again about
 1 s after the drop.
 
+## Discover who is publishing, with no server
+
+A call needs the list of people in it. A dashboard needs the cameras that are up. A worker needs to
+know which devices are sending. The relay already knows which namespaces are announced, so an
+application can read that list from the relay and run no roster server of its own.
+`subscriber.publishing_roots()` reads the list and keeps it right across reconnects and token
+rotations. A room roster is the worked example below, but nothing in the API knows about rooms. The
+prefix is where your application's own structure goes.
+
+### The namespace layout
+
+A publishing-roots view reads one layout and treats it as a contract: a prefix, then a root, then a
+generation.
+
+```text
+room/standup                     the prefix, which you choose
+room/standup/ada                 a root: one live party, named by its last field
+room/standup/ada/0mwmoh58v0da3   a generation: one connection of ada's supervised publisher
+```
+
+- The **prefix** is any namespace the subscriber's token allows it to discover.
+- Each namespace one field below the prefix is a **root**. A root is one entry in the list, and its
+  last field is its `id`.
+- A [supervised publisher](#stay-connected-supervised-connections) on `[*prefix, id]` announces each
+  of its connections one field below its root, as a **generation**. The view counts a root once,
+  however many generations it has had.
+- An unsupervised publisher (`connect_relay_publisher`) on `[*prefix, id]` announces the root itself.
+  It counts too.
+- Anything deeper than a generation is ignored, and so is the prefix itself.
+
+Publishing here means announced. A publisher is announced once it has registered its first track,
+before it writes anything. A publisher with no track is not announced, so it is never a root.
+
+### Follow the roots
+
+Each party publishes under the prefix at its own id. Any party that wants the list opens a view on
+the prefix.
+
+```python
+from caprid_relay import (
+    MoqtObject,
+    PublishingRootsChange,
+    PublishingRootsHandlers,
+    WantHandlers,
+    connect_supervised_publisher,
+    connect_supervised_subscriber,
+)
+
+prefix = ["room", room_id]
+
+# Every party publishes under the prefix, at its own id.
+publisher = await connect_supervised_publisher(url, namespace=[*prefix, my_id], get_token=get_token)
+camera = publisher.register_track("video")
+
+# Any party that wants the list follows the prefix.
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+
+
+def on_changed(change: PublishingRootsChange) -> None:
+    for root in change.added:
+        if root.id == my_id:
+            continue  # the view reports your own publisher too
+
+        def on_object(obj: MoqtObject, root_id: str = root.id) -> None:
+            show_frame(root_id, obj)
+
+        subscriber.want(
+            f"video/{root.id}", root.namespace, "video", WantHandlers(on_object=on_object), generations=True
+        )
+    for root in change.removed:
+        subscriber.unwant(f"video/{root.id}")
+    print("loaded" if change.initial else "changed", [root.id for root in change.present])
+
+
+roots = subscriber.publishing_roots(
+    prefix,
+    PublishingRootsHandlers(
+        on_changed=on_changed,
+        on_error=lambda error: print("discovery failed for good", error),
+    ),
+)
+```
+
+With ada already in the room, bob joining and then closing his publisher, ada's process prints:
+
+```text
+loaded ['ada']
+changed ['ada', 'bob']
+changed ['ada']
+```
+
+`on_changed` is required. It receives one `PublishingRootsChange`:
+
+- `added` holds the roots that started publishing. On the first call it holds every root that was
+  already publishing, which can be none.
+- `removed` holds the roots that stopped. It is empty on the first call.
+- `present` is a tuple of every `PublishingRoot` after the change, in the order the view first saw
+  them.
+- `initial` is true on the first call only. That call is the load, and it always comes, even for an
+  empty prefix. An application that announces arrivals skips it. Every later call names at least one
+  root in `added` or `removed`.
+
+The view itself has the same state. `roots.loaded` is false until the first `on_changed`, so you can
+tell an empty room from one that has not loaded yet. `roots.present` is the same tuple `on_changed`
+last received. `roots.close()` stops the view. It is idempotent, and nothing is delivered after it.
+`subscriber.close()` closes every view too, without calling its handlers.
+
+Each `root.namespace` is the prefix followed by the root's `id`. Hand it to `want()` with
+`generations=True`, as above, to follow that root's media across its publisher's reconnects and
+rotations. Unwant the key when the root is removed.
+
+What the view reports, and when:
+
+- The load comes about one round trip and 0.05 s after the call.
+- A publisher's clean `close()` removes its root about 105 ms later on the same relay, and about
+  210 ms later from another relay of the cluster. The view waits 0.1 s after a root's last namespace
+  is withdrawn before it removes the root.
+- A crashed or frozen publisher stays announced until the relay's idle timeout. Its root is removed
+  10 to 13 s after the crash.
+- A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
+- While the subscriber reconnects, the view keeps its last state. Once the new connection has
+  loaded, one `on_changed` reports what changed meanwhile, with additions and removals together.
+
+`on_error` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
+The view is closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
+
+### Presence: read the documents with a want
+
+A root tells you that something is announced. It does not tell you who it is, and a frozen publisher
+stays announced for about 10 s. The TypeScript SDK has presence helpers for this: each party
+publishes a small JSON document on a `presence` track and resends it every 2 s as a heartbeat
+([TypeScript guide](../ts/GUIDE.md#presence-a-document-and-a-heartbeat-for-each-root)).
+
+The Python SDK has no presence helper. A Python application can still read presence, because the
+track is plain JSON with no added fields. Each object is one party's whole document. Want the
+`presence` track of each root and keep the newest document:
+
+```python
+import time
+
+from caprid_relay import (
+    MoqtObject,
+    PublishingRootsChange,
+    PublishingRootsHandlers,
+    WantHandlers,
+    connect_supervised_subscriber,
+    read_json,
+)
+
+STALE_AFTER = 6.0  # three of the publishers' 2 s heartbeats
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+documents: dict[str, object] = {}
+heard: dict[str, float] = {}
+
+
+def on_presence(root_id: str, obj: MoqtObject) -> None:
+    if obj.status != "normal":
+        return
+    try:
+        document = read_json(obj)
+    except ValueError:
+        return  # not JSON: keep the document you had
+    heard[root_id] = time.monotonic()
+    if documents.get(root_id) != document:
+        documents[root_id] = document
+        print("document", root_id, document)
+
+
+def on_changed(change: PublishingRootsChange) -> None:
+    for root in change.added:
+
+        def on_object(obj: MoqtObject, root_id: str = root.id) -> None:
+            on_presence(root_id, obj)
+
+        subscriber.want(
+            f"presence/{root.id}", root.namespace, "presence", WantHandlers(on_object=on_object), generations=True
+        )
+    for root in change.removed:
+        subscriber.unwant(f"presence/{root.id}")
+        documents.pop(root.id, None)
+        heard.pop(root.id, None)
+        print("left", root.id)
+
+
+roots = subscriber.publishing_roots(["room", room_id], PublishingRootsHandlers(on_changed=on_changed))
+
+
+def live() -> dict[str, object]:
+    """Members heard from within the stale window."""
+    now = time.monotonic()
+    return {root_id: document for root_id, document in documents.items() if now - heard[root_id] < STALE_AFTER}
+```
+
+Against three TypeScript parties that call `publishPresence`, this prints each document once, then a
+new one when a party changes it:
+
+```text
+document dora {'name': 'Dora', 'handRaised': False}
+document carol {'name': 'Carol', 'handRaised': False}
+document bob {'name': 'Bob', 'handRaised': False}
+document dora {'name': 'Dora', 'handRaised': True}
+left bob
+left carol
+```
+
+Treat a document as untrusted input, and check its shape before you use it. Any party whose token can
+publish under the prefix can send any JSON.
+
+How fast this learns that a party has gone:
+
+| What happened | What you see | When |
+| --- | --- | --- |
+| The party closed its publisher | Its root in `removed` | About 105 ms later on the same relay |
+| The party crashed or froze | `live()` drops it | 6 s after its last heartbeat, with the default 2 s heartbeat |
+| The party crashed or froze | Its root in `removed` | 10 to 13 s later, at the relay's idle timeout |
+
+A Python party that publishes no `presence` track is still a root, so `publishing_roots()` lists it.
+A TypeScript presence view does not, because it reports a party only once it has read a document
+from it. The track format is in the [presence track](../spec/media-layer.md#presence-track) section
+of the media-layer spec.
+
+### Select one kind of party with a label
+
+To list one kind of party, put a label in the namespace before the id, and view the prefix that ends
+with the label. Publish participants on `["room", room_id, "participant", who]` and bots on
+`["room", room_id, "bot", name]`. Then follow only the participants:
+
+```python
+participants = subscriber.publishing_roots(
+    ["room", room_id, "participant"],
+    PublishingRootsHandlers(on_changed=lambda change: print("participants", [root.id for root in change.present])),
+)
+```
+
+The relay filters by prefix, so this view never hears about bots. A label after the id, or inside a
+presence document, would make every viewer discover everything and filter it locally.
+
+The view's prefix must end one field above the ids. With this layout a view on `["room", room_id]`
+loads empty, because every generation is three fields below it.
+
+### Things to check
+
+- **An empty list with no error can mean a token problem.** If the subscriber's token does not grant
+  the prefix, the relay accepts the request and sends nothing. The view loads empty, and `on_error`
+  never runs.
+- **A publisher needs a track to be listed.** A publisher is announced when it registers its first
+  track.
+- **Handlers must be synchronous.** Passing an `async def` as `on_changed` or `on_error` raises
+  `TypeError` from `publishing_roots()`. A handler that raises is logged, and the view carries on.
+- **A closed subscriber raises.** `publishing_roots()` on a closed subscriber raises `RelayError`
+  with code `CLOSED`.
+- **The view includes you.** Your own publisher is a root under the prefix like any other. Skip your
+  own `id` where it matters.
+- **Views and wants can overlap.** One connection can hold a view on a prefix, more views on
+  prefixes under it, and wants on the roots, all at once. They share one discovery request. Only
+  `namespace_events`, on an unsupervised subscriber, refuses an overlapping prefix with
+  `PREFIX_OVERLAP`.
+- **A publisher's own reconnect can look like a leave.** A rotation opens the new connection before
+  it closes the old one, so it reports nothing. A reconnect after a lost connection has no old
+  connection to overlap with. If the relay sees the old connection close before the new one
+  announces, the root is removed and then added again. Want the root again when it is added, as the
+  samples above do.
+
 ## Publishing lifecycle
 
 A publisher connection serves one namespace with any number of tracks. It uses a separate transport
@@ -1242,6 +1506,8 @@ The observable behavior is the same. The spelling follows Python conventions:
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
+| `subscriber.publishingRoots({ prefix }, { onChanged, onError })`; `present` is a `Map` by id | `subscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`; `present` is a tuple of `PublishingRoot`, and `on_changed` is required |
+| `publishPresence`, `createPresenceView` in `@caprid/relay/media` | No helper. Read the `presence` track with a want ([recipe](#presence-read-the-documents-with-a-want)). |
 
 ## Scope and limits
 

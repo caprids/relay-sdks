@@ -235,7 +235,8 @@ export interface SupervisedSubscriber {
    * contract: a namespace one field below a root, two below the prefix, is read as that root's generation, so a
    * supervised publisher's generations count as one root, and anything deeper is ignored.
    * Shares the connection's discovery with every want and view under the same prefix tree. Arguments are checked at
-   * once; handlers run from the next turn on.
+   * once; handlers run from the next turn on. Throws a `RelayError` with code `CLOSED` when the subscriber is already
+   * closed.
    */
   publishingRoots(options: PublishingRootsOptions, handlers?: PublishingRootsHandlers): PublishingRoots;
   /** Stop reconnecting, cancel every want, close every publishing-roots view and close the connection. Idempotent. */

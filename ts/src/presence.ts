@@ -210,7 +210,8 @@ export interface PresenceView<T> {
  * Follow the presence documents of everyone under a prefix: `subscriber.publishingRoots({ prefix })` plus one want per
  * root that follows the member's supervised publisher to its newest generation. A member is reported once its first
  * readable document arrives, and goes stale after three heartbeats with nothing new (see `PresenceMember.stale`). The
- * view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on.
+ * view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on. Throws a
+ * `RelayError` with code `CLOSED` when the subscriber is already closed.
  *
  * ```ts
  * const room = createPresenceView(subscriber, { prefix: ['room', id], parse: parseProfile }, {
