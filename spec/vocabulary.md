@@ -29,7 +29,7 @@ without a row here is a bug.
 | Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` (`NamespaceEventOptions`) returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
-| The relay's initial snapshot of a namespace request is complete | `{ type: 'loaded' }`; `SNAPSHOT_QUIET_MS`, `SNAPSHOT_LIMIT_MS` | not yet (TypeScript only) |
+| The relay's initial snapshot of a namespace request is complete | `{ type: 'loaded' }`; `SNAPSHOT_QUIET_MS`, `SNAPSHOT_LIMIT_MS` | `NamespaceEvent(type='loaded')` (`namespace=None`); `SNAPSHOT_QUIET`, `SNAPSHOT_LIMIT` (seconds) |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` (`RegisterTrackOptions`, each track property a `PublishProperty`) returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
@@ -67,9 +67,9 @@ without a row here is a bug.
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
-| Follow the roots publishing under a prefix, across reconnects and rotations | `subscriber.publishingRoots(PublishingRootsOptions, PublishingRootsHandlers)` (`prefix`) returns `PublishingRoots` (`loaded`, `present`, `close()`) | not yet (TypeScript only) |
-| One root publishing under a prefix | `PublishingRoot` (`id`, `namespace`) | not yet (TypeScript only) |
-| A publishing-roots view loaded, or roots were added or removed | `onChanged(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `onError(error)` | not yet (TypeScript only) |
+| Follow the roots publishing under a prefix, across reconnects and rotations | `subscriber.publishingRoots(PublishingRootsOptions, PublishingRootsHandlers)` (`prefix`) returns `PublishingRoots` (`loaded`, `present`, `close()`) | `subscriber.publishing_roots(prefix, PublishingRootsHandlers)` returns `PublishingRoots` (`loaded`, `present` as a tuple, `close()`) |
+| One root publishing under a prefix | `PublishingRoot` (`id`, `namespace`) | `PublishingRoot` (`id`, `namespace`) |
+| A publishing-roots view loaded, or roots were added or removed | `onChanged(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `onError(error)` | `on_changed(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `on_error(error)` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | `subscriber.catch_up(key)`; `on_restarted` reason `"catch-up"` |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |

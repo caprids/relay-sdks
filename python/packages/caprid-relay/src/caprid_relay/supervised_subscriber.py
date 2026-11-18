@@ -11,8 +11,9 @@ on a re-want, is made before the break instead, as ``switch_to`` makes one (issu
 replacement opens while the current subscription keeps delivering, and ``on_switched`` marks the
 cutover. Before the connection's credential expires, the supervisor rotates to a new connection the
 same way (issue #261): every want's subscription moves to it make-before-break, and a want that
-keeps its target sees no break and no repeat. See ``spec/behavior.md``, "Supervised connections".
-The counterpart of ``ts/src/supervised-subscriber.ts``.
+keeps its target sees no break and no repeat. Publishing-roots views (:mod:`caprid_relay.publishing_roots`)
+follow the roots publishing under a prefix from the same per-connection discovery. See ``spec/behavior.md``, "Supervised
+connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
 
 from __future__ import annotations
@@ -37,15 +38,21 @@ from moq_core import (
     SubgroupReset,
     SubscribeOk,
 )
-from moq_core.errors import is_moqt_protocol_error
 
 from ._awaitable import RelayAwaitable
+from ._discovery import (
+    DISCOVERY_CAPACITY,
+    DISCOVERY_LINGER,
+    DiscoveryIndex,
+    DiscoveryWatchHandlers,
+    discovery_ending,
+    refused_for_good,
+)
 from ._subscription import (
     ObjectEvent,
     RelaySubscription,
     SubgroupEndEvent,
     SubgroupResetEvent,
-    SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
     synchronous_callback,
@@ -80,8 +87,7 @@ from .connect_session import (
     TokenProvider,
     validate_timeout,
 )
-from .errors import RelayError
-from .namespace_events import NamespaceEvents
+from .publishing_roots import PublishingRoots, PublishingRootsHandlers
 from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _until_predicate
 
 _log = logging.getLogger("caprid_relay")
@@ -96,15 +102,6 @@ the subscriber connection ended and was replaced. ``terminated``: the relay ende
 with REQUEST_ERROR after accepting it. ``catch-up``: the application called ``catch_up(key)`` because the
 subscription delivered too late to use.
 """
-
-_DISCOVERY_CAPACITY = 1024
-"""Events a root's discovery may queue: its first answer lists every namespace under the root."""
-
-_ROOT_LINGER = 5.0
-"""How long an unused root's discovery is kept, so a want that resubscribes at once reuses its snapshot."""
-
-_WAKE_LINGER = 5.0
-"""How long an unused namespace watch is kept, as a root's discovery is."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,19 +157,19 @@ class WantHandlers:
 
 @dataclass(slots=True, eq=False)
 class _Connection:
-    """One live subscriber connection and the discovery it runs for followed roots."""
+    """One live subscriber connection and the discovery every want on it shares."""
 
     subscriber: RelaySubscriber
     ended: CancellationToken
     """Cancelled when this connection ends."""
+    discovery: DiscoveryIndex
     retiring: CancellationToken = field(default_factory=CancellationToken)
     """Cancelled when a rotation replaced this connection: its wants move to the new one."""
-    roots: dict[tuple[str, ...], _RootWatch] = field(default_factory=dict)
-    """One discovery per followed root, shared by every want on it."""
     wakes: dict[tuple[str, ...], _NamespaceWake] = field(default_factory=dict)
     """One watch per fixed namespace a want waits on to be announced again, shared by every want on it."""
     holds: int = 0
-    """Wants with a subscription still on this connection; a rotation closes it once none are left."""
+    """Wants with a subscription and publishing-roots views with a discovery still on this connection; a
+    rotation closes it once none are left."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation; resolved whenever ``holds`` drops to zero."""
     rotate_at: float | None = None
@@ -249,7 +246,7 @@ class _Want:
             listener()
 
 
-def _guarded(handlers: WantHandlers) -> dict[str, Callable[..., None]]:
+def _guarded(handlers: WantHandlers | PublishingRootsHandlers) -> dict[str, Callable[..., None]]:
     """The primitive's guard on every handler: a declared-async callback is refused, a returned awaitable observed."""
     guarded: dict[str, Callable[..., None]] = {}
     for handler_field in fields(handlers):
@@ -265,6 +262,7 @@ def _guarded(handlers: WantHandlers) -> dict[str, Callable[..., None]]:
 @dataclass(slots=True, eq=False)
 class _State:
     wants: dict[str, _Want] = field(default_factory=dict)
+    views: set[PublishingRoots] = field(default_factory=set)
     status: SupervisedStatus = "connecting"
     stopped: bool = False
     current: _Connection | None = None
@@ -431,8 +429,45 @@ class SupervisedSubscriber:
         if state.wake is not None and not state.wake.done():
             state.wake.set_result(None)
 
+    def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
+        """Follow the roots that are publishing now under ``prefix``, across reconnects and rotations, with no
+        roster server.
+
+        Publishing means announced, not necessarily sending objects. A root is the namespace one field below
+        the prefix, publishing while it or a namespace one field below it is announced, and removed once
+        its last namespace has been withdrawn for 0.1 s (soon after a clean close, at the relay's idle
+        timeout after a crash). The layout is a contract: a namespace one field below a root, two below the
+        prefix, is read as that root's generation, so a supervised publisher's generations count as one
+        root, and anything deeper is ignored. The prefix follows the namespace rules with room for the two
+        fields under it (1 to 30 fields), and the subscriber's token must allow discovering it. Shares the
+        connection's discovery with every want and view under the same prefix tree. Arguments are checked
+        at once; handlers run from a later turn on. See ``spec/behavior.md``, "Publishing roots".
+        """
+        if not isinstance(handlers, PublishingRootsHandlers):
+            raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
+        guarded = _guarded(handlers)
+        on_changed = guarded.get("on_changed")
+        if on_changed is None:
+            raise TypeError("on_changed must be callable")
+        fields_ = namespace_fields(prefix)
+        namespace_fields((*fields_, "x", "x"))
+        state = self._state
+        if state.stopped:
+            raise supervisor_closed("subscriber")
+        view = PublishingRoots(
+            fields_,
+            on_changed,
+            guarded.get("on_error"),
+            live_connection=self._live_connection,
+            current=lambda: state.current,
+            on_closed=lambda: state.views.discard(view),
+        )
+        state.views.add(view)
+        return view
+
     def close(self) -> None:
-        """Stop reconnecting, cancel every want and close the connection. Idempotent."""
+        """Stop reconnecting, cancel every want, close every publishing-roots view without calling its handlers,
+        and close the connection. Idempotent."""
         self._close()
 
     async def __aenter__(self) -> Self:
@@ -560,6 +595,8 @@ async def _supervise_relay_subscriber(
         state.wants.clear()
         for want in wants:
             want.controller.cancel()
+        for view in list(state.views):
+            view.close()
         if state.current is not None:
             state.current.subscriber.close()
         state.current = None
@@ -591,7 +628,10 @@ async def _supervise_relay_subscriber(
             subscriber.close()
             return None
         live = _Connection(
-            subscriber, CancellationToken(), rotate_at=rotation_deadline(subscriber.expires_at, rotate_margin)
+            subscriber,
+            CancellationToken(),
+            DiscoveryIndex(lambda prefix: subscriber.namespace_events(prefix, capacity=DISCOVERY_CAPACITY)),
+            rotate_at=rotation_deadline(subscriber.expires_at, rotate_margin),
         )
         # Cancelled the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
         subscriber.closed.add_done_callback(lambda _: live.ended.cancel())
@@ -600,10 +640,7 @@ async def _supervise_relay_subscriber(
     def settle_ended(live: _Connection) -> None:
         """The connection ended: release what it ran and stop anything still waiting on it."""
         live.ended.cancel()
-        for watch in list(live.roots.values()):
-            watch.close()
-        for wake in list(live.wakes.values()):
-            wake.close()
+        live.discovery.close()
 
     async def rotate_from(old: _Connection, manual: Callable[[], bool]) -> _Connection | None:
         """Open the connection that replaces ``old``, move every want to it, and close ``old`` once they moved.
@@ -809,18 +846,6 @@ async def _supervise_relay_subscriber(
     return SupervisedSubscriber(state, closed, close)
 
 
-def _refused_for_good(error: BaseException) -> bool:
-    """Whether a request refused at the call is the want's own fault, which no connection fixes.
-
-    An argument, a request the wire cannot carry, or a root overlapping another followed root.
-    Anything else raised there (``CLOSED``, the connection's ``TRANSPORT_ERROR`` or ``GOAWAY``) is the
-    connection ending before the supervisor has heard of it.
-    """
-    if isinstance(error, TypeError | ValueError) or is_moqt_protocol_error(error):
-        return True
-    return isinstance(error, RelayError) and error.code == "PREFIX_OVERLAP"
-
-
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """What ended one attempt, and what the want does next.
@@ -880,8 +905,6 @@ async def _supervise_want(
                 want.call("on_error", want.deferred)
                 return
             started = await live_connection(scope)
-            # A want replaced while waiting must not open anything: its replacement may already hold an
-            # overlapping root.
             if started is None or scope.cancelled:
                 return
             want.settled_target = None
@@ -979,7 +1002,6 @@ async def _backoff(want: _Want, connection: _Connection, delay: float, track_end
         with contextlib.suppress(Exception):
             # The attempt itself reports a discovery it cannot open.
             held = _root_watch(connection, want.options.namespace)
-    # Released in the turn the want is cancelled, as in an attempt, so a replacement can claim an overlapping root.
     remove_release = on_cancel([want.controller], held[1]) if held is not None else None
 
     def changed() -> None:
@@ -1031,7 +1053,7 @@ def _hold_wake(want: _Want, connection: _Connection) -> _NamespaceWake | None:
     try:
         watch, release = _namespace_wake(connection, want.options.namespace)
     except Exception:
-        # Another request on the connection overlaps the namespace (PREFIX_OVERLAP), or the connection is closing.
+        # The connection is closing, or its discovery cannot open a request.
         return None
     want.wake = (connection, watch, release)
     return watch
@@ -1062,10 +1084,9 @@ async def _attempt(want: _Want, connection: _Connection, next_connection: Callab
             watch, release = _root_watch(connection, options.namespace)
         except Exception as error:
             # As for a subscribe: a connection ending under the call refuses the request with its own error.
-            if any(token.cancelled for token in scope) or not _refused_for_good(error):
+            if any(token.cancelled for token in scope) or not refused_for_good(error):
                 return cancelled_or_connection(False)
             return _Outcome("fatal", error=error)
-        # Released in the turn the want is cancelled, so a replacement want can claim an overlapping root at once.
         remove_release = on_cancel(scope, release)
     try:
         generation: str | None = None
@@ -1634,7 +1655,7 @@ async def _follow(
         try:
             pending = open_slot(target, target_generation, on)
         except Exception as error:
-            if any(token.cancelled for token in scope) or not _refused_for_good(error):
+            if any(token.cancelled for token in scope) or not refused_for_good(error):
                 settle(cancelled_or_connection(True))
             else:
                 settle(_Outcome("fatal", error=error))
@@ -1645,7 +1666,7 @@ async def _follow(
         want.settled_target = (want.options.track, want.options.parameters)
         # An argument the relay can never take is the want's fault; anything else is the connection ending
         # under the call.
-        if any(token.cancelled for token in scope) or not _refused_for_good(error):
+        if any(token.cancelled for token in scope) or not refused_for_good(error):
             return cancelled_or_connection(False)
         return _Outcome("fatal", error=error)
 
@@ -1781,13 +1802,13 @@ def _discovery_failed(
     """What a root's discovery ending means for the want: the connection's end moves it on, the relay
     ending the request or a REQUEST_ERROR a wait may fix is retried with backoff on a fresh request,
     and anything else is surfaced."""
-    if scope.cancelled or isinstance(error, SubscriptionConnectionClosedError):
+    if scope.cancelled:
         return cancelled_or_connection(accepted)
-    retry = _Outcome("retry", accepted=accepted, reason="generation")
-    if error is None:
-        return retry
-    if isinstance(error, SubscriptionRequestError) and not is_permanent_request_error(error.request_error):
-        return retry
+    ending = discovery_ending(error)
+    if ending == "connection":
+        return cancelled_or_connection(accepted)
+    if ending == "retry":
+        return _Outcome("retry", accepted=accepted, reason="generation")
     return _Outcome("fatal", error=error)
 
 
@@ -1814,43 +1835,41 @@ class _Failed:
 
 
 class _RootWatch:
-    """One root's discovery on a connection: the generations announced one field below it."""
+    """A want's view of the generations announced one field below its root, from the connection's discovery."""
 
-    __slots__ = ("_events", "_failure", "_generations", "_listeners", "_root", "_task", "users")
+    __slots__ = ("_generations", "_listeners", "_root", "_watch")
 
-    def __init__(self, subscriber: RelaySubscriber, root: tuple[str, ...], on_end: Callable[[], None]) -> None:
+    def __init__(self, discovery: DiscoveryIndex, root: tuple[str, ...]) -> None:
         self._root = root
         self._generations: set[str] = set()
         self._listeners: list[Callable[[], None]] = []
-        self._failure: tuple[BaseException | None] | None = None
-        self.users = 0
-        # Raises PREFIX_OVERLAP at once when another followed root overlaps this one.
-        self._events: NamespaceEvents = subscriber.namespace_events(root, capacity=_DISCOVERY_CAPACITY)
-        self._task = asyncio.ensure_future(self._read(on_end))
-        _observe(self._task)
+        self._watch = discovery.watch(
+            root,
+            DiscoveryWatchHandlers(
+                on_announced=self._announced,
+                on_unannounced=self._unannounced,
+                on_ended=lambda _error: self._notify(),
+            ),
+        )
+        for namespace in self._watch.namespaces():
+            generation = self._generation_of(namespace)
+            if generation is not None:
+                self._generations.add(generation)
 
-    async def _read(self, on_end: Callable[[], None]) -> None:
-        depth = len(self._root)
-        try:
-            async for event in self._events:
-                # Only one field below the root is a generation; anything deeper belongs to someone else.
-                if len(event.namespace) != depth + 1:
-                    continue
-                generation = event.namespace[depth]
-                if event.type == "announced":
-                    self._generations.add(generation)
-                else:
-                    self._generations.discard(generation)
-                self._notify()
-            # The relay ended the request, or the watch was closed: neither is a failure of the want.
-            self._failure = (None,)
-        except asyncio.CancelledError:
-            self._failure = (None,)
-            raise
-        except Exception as error:
-            self._failure = (error,)
-        finally:
-            on_end()
+    def _generation_of(self, namespace: tuple[str, ...]) -> str | None:
+        # Only one field below the root is a generation; anything deeper belongs to someone else.
+        return namespace[-1] if len(namespace) == len(self._root) + 1 else None
+
+    def _announced(self, namespace: tuple[str, ...]) -> None:
+        generation = self._generation_of(namespace)
+        if generation is not None:
+            self._generations.add(generation)
+            self._notify()
+
+    def _unannounced(self, namespace: tuple[str, ...]) -> None:
+        generation = self._generation_of(namespace)
+        if generation is not None:
+            self._generations.discard(generation)
             self._notify()
 
     def _notify(self) -> None:
@@ -1863,7 +1882,8 @@ class _RootWatch:
 
     def failure(self) -> tuple[BaseException | None] | None:
         """How discovery ended, once it has: the error, ``None`` inside when the relay ended it cleanly."""
-        return self._failure
+        ended = self._watch.ended
+        return None if ended is None else (ended.error,)
 
     def on_change(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Observe every change, discovery's end included; returns the removal."""
@@ -1878,8 +1898,9 @@ class _RootWatch:
     async def newest(self, scope: Sequence[CancellationToken]) -> str | _Failed | None:
         """Wait for a generation to be announced; ``None`` once ``scope`` is cancelled."""
         while True:
-            if self._failure is not None:
-                return _Failed(self._failure[0])
+            failure = self.failure()
+            if failure is not None:
+                return _Failed(failure[0])
             found = self.current()
             if found is not None:
                 return found
@@ -1892,82 +1913,35 @@ class _RootWatch:
             finally:
                 remove()
 
-    def close(self) -> None:
-        self._events.close()
-
-
-def _overlaps(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
-    """Whether two namespace prefixes overlap field by field: equal, or one contains the other."""
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    return longer[: len(shorter)] == shorter
-
 
 def _root_watch(connection: _Connection, root: tuple[str, ...]) -> tuple[_RootWatch, Callable[[], None]]:
-    """The connection's watch for ``root``, opened on first use and closed when its last user releases it."""
-    entry = connection.roots.get(root)
-    if entry is None:
-        # A watch kept for reuse but unused would hold its prefix and refuse an overlapping root: close it first.
-        for held_root, held in list(connection.roots.items()):
-            if held.users == 0 and _overlaps(held_root, root):
-                del connection.roots[held_root]
-                held.close()
-        # A fixed namespace's watch only shortens a wait: it gives way to a root's discovery, and its wants back off.
-        for held_namespace, wake in list(connection.wakes.items()):
-            if _overlaps(held_namespace, root):
-                del connection.wakes[held_namespace]
-                wake.close()
-        created: list[_RootWatch] = []
-
-        # An ended discovery leaves the map at once, so the next attempt asks the relay again.
-        def forget_ended() -> None:
-            if created and connection.roots.get(root) is created[0]:
-                del connection.roots[root]
-
-        entry = _RootWatch(connection.subscriber, root, forget_ended)
-        created.append(entry)
-        connection.roots[root] = entry
-    watch = entry
-    watch.users += 1
-    released = False
-
-    def release() -> None:
-        nonlocal released
-        if released:
-            return
-        released = True
-        watch.users -= 1
-        if watch.users == 0:
-
-            def linger_over() -> None:
-                if watch.users == 0 and connection.roots.get(root) is watch:
-                    del connection.roots[root]
-                    watch.close()
-
-            asyncio.get_running_loop().call_later(_ROOT_LINGER, linger_over)
-
-    return watch, release
+    """A want's watch of ``root`` on the connection's shared discovery, and its release."""
+    watch = _RootWatch(connection.discovery, root)
+    return watch, watch._watch.release
 
 
 class _NamespaceWake:
-    """One fixed namespace's announcement, watched with SUBSCRIBE_NAMESPACE on the namespace itself. Each change of the
-    namespace is counted, so a waiter compares what came after the moment it marked with :meth:`seen`."""
+    """One fixed namespace's announcement, watched on the connection's shared discovery, so a followed root or
+    publishing-roots view over the namespace serves it. Each change of the namespace is counted, so a waiter compares
+    what came after the moment it marked with :meth:`seen`."""
 
     __slots__ = (
         "_announced_at",
         "_ended",
-        "_events",
         "_listeners",
         "_namespace",
+        "_on_end",
         "_returned_at",
         "_seen",
-        "_task",
+        "_watch",
         "_withdrawn",
         "linger",
         "users",
     )
 
-    def __init__(self, subscriber: RelaySubscriber, namespace: tuple[str, ...], on_end: Callable[[], None]) -> None:
+    def __init__(self, discovery: DiscoveryIndex, namespace: tuple[str, ...], on_end: Callable[[], None]) -> None:
         self._namespace = namespace
+        self._on_end = on_end
         self._listeners: list[Callable[[], None]] = []
         self._seen = 0
         self._announced_at = 0
@@ -1976,43 +1950,49 @@ class _NamespaceWake:
         self._ended = False
         self.users = 0
         self.linger: asyncio.TimerHandle | None = None
-        # Raises PREFIX_OVERLAP at once when a followed root or another watch overlaps the namespace.
-        self._events: NamespaceEvents = subscriber.namespace_events(namespace, capacity=_DISCOVERY_CAPACITY)
-        self._task = asyncio.ensure_future(self._read(on_end))
-        _observe(self._task)
+        # Raises when the connection's discovery is closed or cannot open a request.
+        self._watch = discovery.watch(
+            namespace,
+            DiscoveryWatchHandlers(
+                on_announced=self._announced, on_unannounced=self._unannounced, on_ended=self._request_ended
+            ),
+        )
+        # A request already open over the namespace shows it without an event: count that as a fresh request's first.
+        if any(len(shown) == len(namespace) for shown in self._watch.namespaces()):
+            self._seen = 1
+            self._announced_at = 1
 
-    async def _read(self, on_end: Callable[[], None]) -> None:
-        try:
-            async for event in self._events:
-                # Only the namespace itself; a deeper one is another publisher's.
-                if len(event.namespace) != len(self._namespace):
-                    continue
-                self._seen += 1
-                if event.type == "announced":
-                    self._announced_at = self._seen
-                    if self._withdrawn:
-                        self._returned_at = self._seen
-                else:
-                    self._announced_at = 0
-                    self._returned_at = 0
-                    self._withdrawn = True
-                self._notify()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Refused or ended with the connection: the wants waiting on it back off.
-            pass
-        finally:
-            self._ended = True
-            on_end()
-            self._notify()
+    def _announced(self, namespace: tuple[str, ...]) -> None:
+        # Only the namespace itself; a deeper one is another publisher's.
+        if len(namespace) != len(self._namespace):
+            return
+        self._seen += 1
+        self._announced_at = self._seen
+        if self._withdrawn:
+            self._returned_at = self._seen
+        self._notify()
+
+    def _unannounced(self, namespace: tuple[str, ...]) -> None:
+        if len(namespace) != len(self._namespace):
+            return
+        self._seen += 1
+        self._announced_at = 0
+        self._returned_at = 0
+        self._withdrawn = True
+        self._notify()
+
+    def _request_ended(self, _error: BaseException | None) -> None:
+        # Refused or ended with the connection: the wants waiting on it back off.
+        self._ended = True
+        self._on_end()
+        self._notify()
 
     def _notify(self) -> None:
         for listener in list(self._listeners):
             listener()
 
     def seen(self) -> int:
-        """How many changes of the namespace the request has reported."""
+        """How many changes of the namespace the watch has reported."""
         return self._seen
 
     def announced_at(self) -> int:
@@ -2020,15 +2000,15 @@ class _NamespaceWake:
         return self._announced_at
 
     def returned_at(self) -> int:
-        """As :meth:`announced_at`, but only for an ``announced`` that followed a withdrawal this request reported."""
+        """As :meth:`announced_at`, but only for an ``announced`` that followed a withdrawal this watch reported."""
         return self._returned_at
 
     def failed(self) -> bool:
-        """Whether the request ended: the relay refused or ended it, the connection closed, or a root took it."""
+        """Whether the watch ended: the relay refused or ended its request, or the connection closed."""
         return self._ended
 
     def on_change(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Observe every change, the request's end included; returns the removal."""
+        """Observe every change, the watch's end included; returns the removal."""
         self._listeners.append(listener)
 
         def remove() -> None:
@@ -2038,34 +2018,23 @@ class _NamespaceWake:
         return remove
 
     def close(self) -> None:
-        self._events.close()
+        self._ended = True
+        self._watch.release()
 
 
 def _namespace_wake(connection: _Connection, namespace: tuple[str, ...]) -> tuple[_NamespaceWake, Callable[[], None]]:
     """The connection's watch for the fixed ``namespace``, opened on first use and closed a moment after its last
-    user leaves."""
+    user leaves. It is served by the connection's discovery, so a root's discovery or a publishing-roots view serves it
+    too."""
     entry = connection.wakes.get(namespace)
     if entry is None:
-        # A watch or a root's discovery kept for reuse but unused would hold an overlapping prefix and refuse this one.
-        for held_namespace, held in list(connection.wakes.items()):
-            if held.users == 0 and _overlaps(held_namespace, namespace):
-                del connection.wakes[held_namespace]
-                if held.linger is not None:
-                    held.linger.cancel()
-                    held.linger = None
-                held.close()
-        for held_root, held_watch in list(connection.roots.items()):
-            if held_watch.users == 0 and _overlaps(held_root, namespace):
-                del connection.roots[held_root]
-                held_watch.close()
         created: list[_NamespaceWake] = []
 
         def forget_ended() -> None:
             if created and connection.wakes.get(namespace) is created[0]:
                 del connection.wakes[namespace]
 
-        # Raises PREFIX_OVERLAP at once when a followed root or another watch overlaps the namespace.
-        entry = _NamespaceWake(connection.subscriber, namespace, forget_ended)
+        entry = _NamespaceWake(connection.discovery, namespace, forget_ended)
         created.append(entry)
         connection.wakes[namespace] = entry
     watch = entry
@@ -2091,7 +2060,7 @@ def _namespace_wake(connection: _Connection, namespace: tuple[str, ...]) -> tupl
                     del connection.wakes[namespace]
                     watch.close()
 
-            watch.linger = asyncio.get_running_loop().call_later(_WAKE_LINGER, linger_over)
+            watch.linger = asyncio.get_running_loop().call_later(DISCOVERY_LINGER, linger_over)
 
     return watch, release
 

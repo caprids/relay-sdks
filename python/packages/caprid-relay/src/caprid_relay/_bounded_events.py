@@ -32,9 +32,12 @@ class BoundedEventSink(Generic[E]):
     def __init__(self, events: BoundedEvents[E]) -> None:
         self._events = events
 
-    def event(self, event: E) -> None:
-        """One event; past the capacity the iterator ends with ``SubscriptionOverflowError``."""
-        self._events._push(event)
+    def event(self, event: E, *, counted: bool = True) -> None:
+        """One event; past the capacity the iterator ends with ``SubscriptionOverflowError``.
+
+        ``counted=False`` queues an event the producer yields at most once, which takes no capacity.
+        """
+        self._events._push(event, counted)
 
     def ended(self, error: BaseException | None = None) -> None:
         """The producer ended: ``None`` finishes the iterator cleanly, anything else is raised from reads.
@@ -69,7 +72,9 @@ class BoundedEvents(Generic[E]):
         if not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity must be a positive integer")
         self._capacity = capacity
-        self._queue: deque[E] = deque()
+        # Each event with whether it takes capacity; ``_counted`` is how many queued events do.
+        self._queue: deque[tuple[E, bool]] = deque()
+        self._counted = 0
         # A one-element tuple, so an event that is itself ``None`` stays distinguishable from a wake.
         self._pending: asyncio.Future[tuple[E] | None] | None = None
         self._ended = False
@@ -91,16 +96,17 @@ class BoundedEvents(Generic[E]):
         if self._ended:
             self._request.cancel(self._failure)
 
-    def _push(self, event: E) -> None:
+    def _push(self, event: E, counted: bool) -> None:
         if self._ended:
             return
         if self._pending is not None and not self._pending.done():
             self._pending.set_result((event,))
             return
-        if len(self._queue) == self._capacity:
+        if counted and self._counted == self._capacity:
             self._finish(SubscriptionOverflowError("Subscription event buffer overflow"))
             return
-        self._queue.append(event)
+        self._queue.append((event, counted))
+        self._counted += counted
 
     def _finish(self, error: BaseException | None = None, *, keep_queue: bool = False) -> None:
         if self._ended:
@@ -109,7 +115,7 @@ class BoundedEvents(Generic[E]):
         self._failure = error
         # A pending read only exists while the queue is empty, so keeping it still settles that read as done.
         if not keep_queue:
-            self._queue.clear()
+            self._clear()
         if self._cancellation is not None:
             self._cancellation.remove_callback(self._finish)
         if self._request is not None:
@@ -133,7 +139,9 @@ class BoundedEvents(Generic[E]):
                     return handed[0]
             # Events left by a clean completion are read before the end.
             if self._queue:
-                return self._queue.popleft()
+                event, counted = self._queue.popleft()
+                self._counted -= counted
+                return event
             if self._ended:
                 if self._failure is not None:
                     raise self._failure
@@ -148,7 +156,11 @@ class BoundedEvents(Generic[E]):
     def close(self) -> None:
         """Discard queued events and settle pending reads as EOF. Idempotent."""
         self._finish()
+        self._clear()
+
+    def _clear(self) -> None:
         self._queue.clear()
+        self._counted = 0
 
     async def aclose(self) -> None:
         """:meth:`close` as a coroutine, for ``contextlib.aclosing`` and other async-iterator cleanup."""

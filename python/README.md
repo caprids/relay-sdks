@@ -1223,7 +1223,7 @@ The observable behavior is the same. The spelling follows Python conventions:
 | --- | --- |
 | `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
 | `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
-| `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`. `NamespaceEvent.namespace` is a tuple, and a prefix that overlaps one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP`. |
+| `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`. `NamespaceEvent.namespace` is `tuple[str, ...] \| None`. It is `None` only on a `loaded` event, which marks the end of the relay's initial snapshot, so check `type` before you read it. A prefix that overlaps one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP`. |
 | `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |

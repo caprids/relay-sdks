@@ -38,6 +38,7 @@ from moq_core.control_messages import (
     TrackStatus,
     decode_control_message,
     encode_fetch_ok,
+    encode_goaway,
     encode_namespace,
     encode_namespace_done,
     encode_publish,
@@ -1164,9 +1165,9 @@ class TestSubscribeNamespace:
         harness.session.subscribe_namespace(
             _room(),
             NamespaceSubscriptionHandlers(
-                on_ok=lambda: events.append("ok"),
+                on_ok=lambda count: events.append(("ok", count)),
                 on_namespace=lambda suffix: events.append(("namespace", suffix)),
-                on_namespace_done=lambda suffix: events.append(("done", suffix)),
+                on_namespace_done=lambda suffix, _ended: events.append(("done", suffix)),
             ),
         )
         request = await harness.fake.next_request_stream()
@@ -1178,7 +1179,7 @@ class TestSubscribeNamespace:
         await request.send(encode_namespace_done(["alice"]))
 
         await wait_for(lambda: len(events) == 4)
-        assert events == ["ok", ("namespace", ["alice"]), ("namespace", []), ("done", ["alice"])]
+        assert events == [("ok", None), ("namespace", ["alice"]), ("namespace", []), ("done", ["alice"])]
         harness.session.destroy()
 
     async def test_surfaces_request_error_and_does_not_report_an_end_after_it(self) -> None:
@@ -1249,7 +1250,7 @@ class TestSubscribeNamespace:
         harness.session.subscribe_namespace(
             _room(),
             NamespaceSubscriptionHandlers(
-                on_namespace_done=lambda suffix: calls.append(("done", suffix)),
+                on_namespace_done=lambda suffix, ended: calls.append(("done", suffix, ended)),
                 on_end=lambda error: calls.append(("end", error is not None)),
             ),
         )
@@ -1266,7 +1267,7 @@ class TestSubscribeNamespace:
             request.reset(RuntimeError("gone"))
 
         await wait_for(lambda: len(calls) == 3)
-        assert calls == [("done", ["bob"]), ("done", ["alice"]), ("end", ending == "reset")]
+        assert calls == [("done", ["bob"], False), ("done", ["alice"], True), ("end", ending == "reset")]
         harness.session.destroy()
 
     async def test_reports_a_fin_after_request_ok_as_a_clean_end_and_fins_back(self) -> None:
@@ -1514,3 +1515,195 @@ class TestMaxAge:
         # The caller's object is not touched.
         assert parameters == MessageParameters(include_properties=0, max_age=500)
         harness.session.destroy()
+
+
+ACTIVE_COUNT = KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1)
+
+
+async def _active_count_harness(*, client: bool = True, server: bool = True) -> Harness:
+    harness = create_session_harness(setup_options=[ACTIVE_COUNT] if client else [])
+    harness.fake.send_server_setup([ACTIVE_COUNT] if server else [])
+    await harness.session.ready
+    return harness
+
+
+async def _record_namespaces(harness: Harness) -> tuple[list[object], Any]:
+    events: list[object] = []
+
+    harness.session.subscribe_namespace(
+        _room(),
+        NamespaceSubscriptionHandlers(
+            on_ok=lambda count: events.append(("ok", count)),
+            on_synced=lambda: events.append("synced"),
+            on_namespace=lambda suffix: events.append(("namespace", suffix)),
+            on_namespace_done=lambda suffix, _ended: events.append(("done", suffix)),
+            on_end=lambda error: events.append(("end", error is not None)),
+        ),
+    )
+    request = await harness.fake.next_request_stream()
+    await request.first_message
+    return events, request
+
+
+def _is_end(event: object) -> bool:
+    return isinstance(event, tuple) and event[0] == "end"
+
+
+class TestActiveCount:
+    async def test_reports_the_count_and_syncs_right_after_the_counted_namespace_a_repeat_counted(self) -> None:
+        harness = await _active_count_harness()
+        events, request = await _record_namespaces(harness)
+
+        await request.send(encode_request_ok(MessageParameters(active_count=2)))
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace(["bob"]))
+        await request.send(encode_namespace_done(["bob"]))
+
+        await wait_for(lambda: len(events) == 6)
+        assert events == [
+            ("ok", 2),
+            ("namespace", ["alice"]),
+            ("namespace", ["alice"]),
+            "synced",
+            ("namespace", ["bob"]),
+            ("done", ["bob"]),
+        ]
+        assert harness.fake.close_info is None
+        harness.session.destroy()
+
+    async def test_syncs_right_after_request_ok_on_a_count_of_0_and_a_fin_after_it_is_a_clean_end(self) -> None:
+        harness = await _active_count_harness()
+        events, request = await _record_namespaces(harness)
+
+        await request.send(encode_request_ok(MessageParameters(active_count=0)))
+        await request.fin()
+
+        await wait_for(lambda: len(events) == 3)
+        assert events == [("ok", 0), "synced", ("end", False)]
+        assert harness.fake.close_info is None
+        harness.session.destroy()
+
+    @pytest.mark.parametrize(
+        ("client", "server"),
+        [
+            pytest.param(True, False, id="only this session declares it"),
+            pytest.param(False, True, id="only the server"),
+        ],
+    )
+    async def test_reports_no_count_and_never_syncs_unless_both_declare_it(self, client: bool, server: bool) -> None:
+        harness = await _active_count_harness(client=client, server=server)
+        events, request = await _record_namespaces(harness)
+
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace_done(["alice"]))
+
+        await wait_for(lambda: len(events) == 3)
+        assert events == [("ok", None), ("namespace", ["alice"]), ("done", ["alice"])]
+        assert harness.fake.close_info is None
+        harness.session.destroy()
+
+    @pytest.mark.parametrize(
+        ("server", "script"),
+        [
+            pytest.param(True, [encode_request_ok()], id="REQUEST_OK omits the count while negotiated"),
+            pytest.param(
+                False,
+                [encode_request_ok(MessageParameters(active_count=0))],
+                id="REQUEST_OK carries the count while not negotiated",
+            ),
+            pytest.param(
+                True,
+                [
+                    encode_request_ok(MessageParameters(active_count=2)),
+                    encode_namespace(["alice"]),
+                    encode_namespace_done(["alice"]),
+                ],
+                id="a NAMESPACE_DONE inside the counted set",
+            ),
+            pytest.param(
+                True,
+                [encode_request_ok(MessageParameters(active_count=1)), encode_goaway()],
+                id="a GOAWAY inside the counted set",
+            ),
+            pytest.param(
+                True,
+                [encode_request_ok(MessageParameters(active_count=2)), encode_namespace(["alice"]), "fin"],
+                id="the stream finishes inside the counted set",
+            ),
+        ],
+    )
+    async def test_closes_the_session_with_protocol_violation(self, server: bool, script: list[bytes | str]) -> None:
+        harness = await _active_count_harness(server=server)
+        events, request = await _record_namespaces(harness)
+
+        for step in script:
+            if step == "fin":
+                await request.fin()
+            else:
+                assert isinstance(step, bytes)
+                await request.send(step)
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert "synced" not in events
+        assert not any(_is_end(event) for event in events)
+
+    async def test_ends_the_request_without_closing_the_session_when_the_stream_resets_in_the_counted_set(
+        self,
+    ) -> None:
+        harness = await _active_count_harness()
+        events, request = await _record_namespaces(harness)
+
+        await request.send(encode_request_ok(MessageParameters(active_count=2)))
+        await request.send(encode_namespace(["alice"]))
+        request.reset(RuntimeError("gone"))
+
+        await wait_for(lambda: len(events) == 4)
+        assert events == [("ok", 2), ("namespace", ["alice"]), ("done", ["alice"]), ("end", True)]
+        assert harness.fake.close_info is None
+        harness.session.destroy()
+
+    @pytest.mark.parametrize("negotiated", [True, False])
+    async def test_closes_the_session_when_a_request_ok_answering_track_status_carries_the_count(
+        self, negotiated: bool
+    ) -> None:
+        harness = await _active_count_harness(server=negotiated)
+        on_ok = Recorder()
+
+        harness.session.track_status(options(["room"], "video"), TrackStatusHandlers(on_ok=on_ok))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok(MessageParameters(active_count=0)))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert not on_ok.called
+
+    async def test_closes_the_session_when_a_request_update_ok_carries_the_count_and_accepts_one_without(
+        self,
+    ) -> None:
+        harness = await _active_count_harness()
+        on_update_ok = Recorder()
+        subscription = harness.session.subscribe(
+            options(["room"], "video"), SubscriptionHandlers(on_update_ok=on_update_ok)
+        )
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_subscribe_ok(7))
+        subscription.update(MessageParameters(forward=1))
+        await request.send(encode_request_ok())
+        await wait_for(lambda: len(on_update_ok.calls) == 1)
+
+        subscription.update(MessageParameters(forward=0))
+        await request.send(encode_request_ok(MessageParameters(active_count=0)))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert len(on_update_ok.calls) == 1

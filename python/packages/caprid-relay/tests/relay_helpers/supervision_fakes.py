@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from caprid_relay import (
     NamespaceEvent,
@@ -19,6 +20,7 @@ from caprid_relay import (
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
 )
+from caprid_relay.namespace_events import _RequestMarks
 from moq_core import Closed, KeyValuePair, MoqtObject, PublishDone, RequestError, SubscribeOk
 
 
@@ -266,12 +268,19 @@ class FakeDiscovery:
     _queue: list[NamespaceEvent] = field(default_factory=list)
     _failure: list[BaseException] = field(default_factory=list)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
+    _marks: _RequestMarks = field(default_factory=lambda: _RequestMarks(lambda: False))
 
-    def push(self, kind: str, namespace: Sequence[str]) -> None:
-        self._queue.append(NamespaceEvent(kind, tuple(namespace)))  # ty: ignore[invalid-argument-type]
+    @property
+    def failed(self) -> bool:
+        return bool(self._failure)
+
+    def push(self, kind: Literal["announced", "unannounced", "loaded"], namespace: Sequence[str] | None = None) -> None:
+        event = NamespaceEvent(kind, None if namespace is None else tuple(namespace))
+        self._queue.append(event)
         self._wake.set()
 
     def fail(self, error: BaseException) -> None:
+        self._marks.stopped = True
         self._failure.append(error)
         self._wake.set()
 

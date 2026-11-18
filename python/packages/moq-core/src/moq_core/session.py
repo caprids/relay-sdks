@@ -26,7 +26,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field, fields, replace
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from ._tasks import call_later, observe, spawn
 from .bytes import StreamReader, utf8_encode
@@ -198,8 +198,18 @@ class NamespaceSubscriptionHandlers:
     prefix; an empty suffix is the prefix itself.
     """
 
-    on_ok: Callable[[], None] | None = None
-    """REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream."""
+    on_ok: Callable[[int | None], None] | None = None
+    """REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream.
+
+    The argument is MoQ Active Count's promise, how many NAMESPACE messages come before the first change; ``None``
+    when the session did not negotiate the extension.
+    """
+    on_synced: Callable[[], None] | None = None
+    """MoQ Active Count only: the NAMESPACE messages REQUEST_OK promised have all been passed to ``on_namespace``.
+
+    Repeats count, so the peer's view as of its answer is complete. Called right after the last of them, or right
+    after ``on_ok`` on a count of 0. Never called when ``on_ok`` had no count.
+    """
     on_error: Callable[[RequestError], None] | None = None
     """The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure or timeout."""
     on_namespace: Callable[[list[str]], None] | None = None
@@ -207,11 +217,12 @@ class NamespaceSubscriptionHandlers:
 
     A peer may name one again (moq-relay does when its route changes); each call is passed on.
     """
-    on_namespace_done: Callable[[list[str]], None] | None = None
+    on_namespace_done: Callable[[list[str], bool], None] | None = None
     """NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available.
 
     Also called for each namespace still active when the accepted request ends (§9.15), just before
-    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§9.15).
+    ``on_end``, with the second argument (``request_ended``) true. One for a namespace never named
+    closes the session with PROTOCOL_VIOLATION (§9.15).
     """
     on_end: Callable[[BaseException | None], None] | None = None
     """The accepted request ended; no entry follows.
@@ -436,6 +447,37 @@ class _NamespaceSubscriptionRecord(_RequestRecord):
     """REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too."""
     active: dict[tuple[str, ...], list[str]] = field(default_factory=dict)
     """Suffixes named by NAMESPACE and not yet withdrawn."""
+    owed: int = 0
+    """NAMESPACE messages ACTIVE_COUNT promised that have not arrived yet."""
+
+
+_RequestKind: TypeAlias = Literal["subscribe", "fetch", "track-status", "subscribe-namespace"]
+
+
+def _declares(options: Sequence[KeyValuePair], option_type: int) -> bool:
+    return any(option.type == option_type for option in options)
+
+
+def _active_count_violation(answers: _RequestKind, negotiated: bool, parameters: MessageParameters) -> str | None:
+    carried = parameters.active_count is not None
+
+    if answers != "subscribe-namespace":
+        return f"ACTIVE_COUNT on a REQUEST_OK answering {answers}" if carried else None
+
+    if negotiated and not carried:
+        return "REQUEST_OK omits ACTIVE_COUNT, which the session negotiated"
+    if not negotiated and carried:
+        return "REQUEST_OK carries ACTIVE_COUNT, which the session did not negotiate"
+    return None
+
+
+_CountedInput: TypeAlias = Literal["namespace", "namespace-done", "goaway", "fin"]
+
+_COUNTED_SET_VIOLATIONS: dict[_CountedInput, str] = {
+    "namespace-done": "NAMESPACE_DONE inside the ACTIVE_COUNT set",
+    "goaway": "GOAWAY inside the ACTIVE_COUNT set",
+    "fin": "subscribe-namespace stream finished inside the ACTIVE_COUNT set",
+}
 
 
 @dataclass(slots=True)
@@ -553,6 +595,7 @@ class MoqtSession:
         self._control_writer = None
         self._received_server_setup = False
         self._max_age_supported = False
+        self._active_count_negotiated = False
         self._received_control_goaway = False
         self._destroyed = False
 
@@ -771,7 +814,12 @@ class MoqtSession:
 
         spawn(
             self._open_request(
-                message, record, lambda msg: self._handle_subscription_message(record, msg), on_failure, on_end
+                "subscribe",
+                message,
+                record,
+                lambda msg: self._handle_subscription_message(record, msg),
+                on_failure,
+                on_end,
             )
         )
 
@@ -804,7 +852,11 @@ class MoqtSession:
             self._fetches.pop(request_id, None)
             _call(handlers.on_error, error)
 
-        spawn(self._open_request(message, record, lambda msg: self._handle_fetch_message(record, msg), on_failure))
+        spawn(
+            self._open_request(
+                "fetch", message, record, lambda msg: self._handle_fetch_message(record, msg), on_failure
+            )
+        )
 
         return FetchHandle(self, record)
 
@@ -846,7 +898,7 @@ class MoqtSession:
             self._track_statuses.pop(request_id, None)
             _call(handlers.on_error, error)
 
-        spawn(self._open_request(message, record, on_message, on_failure))
+        spawn(self._open_request("track-status", message, record, on_message, on_failure))
 
     def subscribe_namespace(
         self, options: MoqtSubscribeNamespaceOptions, handlers: NamespaceSubscriptionHandlers | None = None
@@ -881,7 +933,7 @@ class MoqtSession:
             active = list(record.active.values())
             record.active.clear()
             for suffix in active:
-                _call(handlers.on_namespace_done, list(suffix))
+                _call(handlers.on_namespace_done, list(suffix), True)
             _call(handlers.on_end, error)
 
         def on_failure(error: RequestError) -> None:
@@ -892,6 +944,8 @@ class MoqtSession:
             _call(handlers.on_error, error)
 
         def on_end() -> None:
+            if self._count(record, "fin") is None:
+                return
             # §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request.
             if record.stream is not None:
                 spawn(record.stream.fin_write())
@@ -899,6 +953,7 @@ class MoqtSession:
 
         spawn(
             self._open_request(
+                "subscribe-namespace",
                 message,
                 record,
                 lambda msg: self._handle_namespace_message(record, msg),
@@ -912,6 +967,7 @@ class MoqtSession:
 
     async def _open_request(
         self,
+        kind: _RequestKind,
         message: bytes,
         record: _RequestRecord,
         on_message: Callable[[ControlMessage], None],
@@ -983,11 +1039,23 @@ class MoqtSession:
             elif on_end is not None and not record.cancelled and not self._destroyed:
                 on_end()
 
+        def on_any_message(msg: ControlMessage) -> None:
+            violation = (
+                _active_count_violation(kind, self._active_count_negotiated, msg.parameters)
+                if isinstance(msg, RequestOk)
+                else None
+            )
+
+            if violation is None:
+                on_message(msg)
+            else:
+                self._fatal(MoqtProtocolError(violation))
+
         record.stream = open_request_stream(
             stream,
             message,
             RequestStreamHandlers(
-                on_message=on_message,
+                on_message=on_any_message,
                 on_fin=on_fin,
                 on_error=on_error,
             ),
@@ -1088,7 +1156,10 @@ class MoqtSession:
 
                 self._settle_request(record)
                 record.accepted = True
-                _call(record.handlers.on_ok)
+                record.owed = message.parameters.active_count or 0
+                _call(record.handlers.on_ok, message.parameters.active_count)
+                if message.parameters.active_count == 0 and not record.cancelled:
+                    _call(record.handlers.on_synced)
             case RequestError():
                 # After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
                 if record.settled:
@@ -1111,21 +1182,44 @@ class MoqtSession:
                     )
                     return
 
+                synced = self._count(record, "namespace" if isinstance(message, Namespace) else "namespace-done")
+                if synced is None:
+                    return
+
                 suffix = list(message.track_namespace_suffix)
                 if isinstance(message, Namespace):
                     record.active[tuple(suffix)] = suffix
                     _call(record.handlers.on_namespace, list(suffix))
+                    if synced and not record.cancelled:
+                        _call(record.handlers.on_synced)
                 elif record.active.pop(tuple(suffix), None) is not None:
-                    _call(record.handlers.on_namespace_done, suffix)
+                    _call(record.handlers.on_namespace_done, suffix, False)
                 else:
                     # §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
                     self._fatal(
                         MoqtProtocolError("NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream")
                     )
             case Goaway():
+                if self._count(record, "goaway") is None:
+                    return
                 _call(record.handlers.on_goaway, message)
             case _:
                 self._fatal(MoqtProtocolError(f"unexpected {message.kind} on a subscribe-namespace request stream"))
+
+    def _count(self, record: _NamespaceSubscriptionRecord, step: _CountedInput) -> bool | None:
+        """Advance the ACTIVE_COUNT set by one message.
+
+        True when it was the last NAMESPACE owed; ``None`` when it broke the set, which closes the session.
+        """
+        if record.owed == 0:
+            return False
+
+        if step != "namespace":
+            self._fatal(MoqtProtocolError(_COUNTED_SET_VIOLATIONS[step]))
+            return None
+
+        record.owed -= 1
+        return record.owed == 0
 
     def _cancel_namespace_subscription(self, record: _NamespaceSubscriptionRecord, reason: object = None) -> None:
         if record.cancelled:
@@ -1238,7 +1332,10 @@ class MoqtSession:
 
         self._received_server_setup = True
         # The option's value is reserved and ignored on receipt: its presence is the declaration.
-        self._max_age_supported = any(option.type == SETUP_OPTION.MAX_AGE for option in setup.options)
+        self._max_age_supported = _declares(setup.options, SETUP_OPTION.MAX_AGE)
+        self._active_count_negotiated = _declares(self._config.setup_options, SETUP_OPTION.ACTIVE_COUNT) and _declares(
+            setup.options, SETUP_OPTION.ACTIVE_COUNT
+        )
         if not self.ready.done():
             self.ready.set_result(None)
         _call(self._callbacks.on_ready, setup.options)

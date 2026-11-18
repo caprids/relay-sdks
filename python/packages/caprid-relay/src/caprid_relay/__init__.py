@@ -33,9 +33,10 @@ from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayCredential, RelayTransportFactory
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
-from .namespace_events import NamespaceEvent, NamespaceEvents
+from .namespace_events import SNAPSHOT_LIMIT, SNAPSHOT_QUIET, NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
 from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
+from .publishing_roots import PublishingRoot, PublishingRoots, PublishingRootsChange, PublishingRootsHandlers
 from .room_endpoint import DEFAULT_ENDPOINT, room_endpoint
 from .subscription_events import (
     GoawayEvent,
@@ -64,6 +65,8 @@ from .switchable import SwitchableHandlers, SwitchableSubscription, SwitchedInfo
 
 __all__ = [
     "DEFAULT_ENDPOINT",
+    "SNAPSHOT_LIMIT",
+    "SNAPSHOT_QUIET",
     "CancellationToken",
     "Cancelled",
     "Closed",
@@ -82,6 +85,10 @@ __all__ = [
     "PublishDone",
     "PublisherDoneEvent",
     "PublisherGeneration",
+    "PublishingRoot",
+    "PublishingRoots",
+    "PublishingRootsChange",
+    "PublishingRootsHandlers",
     "RelayAwaitable",
     "RelayCredential",
     "RelayError",

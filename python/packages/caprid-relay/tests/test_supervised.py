@@ -17,10 +17,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
-from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, FakeSubscription, until
+from relay_helpers.supervision_fakes import FakeDiscovery, FakePublisher, FakeSubscriber, FakeSubscription, until
 
 from caprid_relay import (
     CancellationToken,
+    PublishingRootsHandlers,
     RelayError,
     RequestError,
     SubscriptionConnectionClosedError,
@@ -679,7 +680,7 @@ async def test_surfaces_a_discovery_that_fails_for_good_while_subscribed(cleanup
     assert s.first.subscriptions[0].cancelled
 
 
-async def test_an_overlapping_root_replaces_one_whose_last_want_went_away(
+async def test_serves_a_want_on_a_narrower_root_from_the_request_its_last_want_left_behind(
     cleanup: list[Callable[[], object]],
 ) -> None:
     subscriber, s = await start_subscriber(cleanup)
@@ -687,9 +688,100 @@ async def test_an_overlapping_root_replaces_one_whose_last_want_went_away(
     subscriber.want("a", ["room"], "v", r.handlers, generations=True)
     await until(lambda: len(s.first.discoveries) == 1, "first discovery")
     subscriber.want("a", ["room", "alice"], "v", r.handlers, generations=True)
-    await until(lambda: len(s.first.discoveries) == 2, "second discovery")
-    assert s.first.discoveries[0].closed
+    generation = new_generation()
+    s.first.discoveries[0].push("announced", ["room", "alice", generation])
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe under the new root")
+    assert s.first.subscriptions[0].namespace == ("room", "alice", generation)
+    assert len(s.first.discoveries) == 1
+    assert not s.first.discoveries[0].closed
     assert r.errors == []
+
+
+async def test_serves_a_want_under_another_wants_root_from_the_same_request(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    room, alice = Recorder(), Recorder()
+    subscriber.want("room", ["room"], "v", room.handlers, generations=True)
+    await until(lambda: len(s.first.discoveries) == 1, "discovery")
+    subscriber.want("alice", ["room", "alice"], "audio", alice.handlers, generations=True)
+    rooms, alices = new_generation(1_000), new_generation(2_000)
+    s.first.discoveries[0].push("announced", ["room", rooms])
+    s.first.discoveries[0].push("announced", ["room", "alice", alices])
+    await until(lambda: len(s.first.subscriptions) == 2, "both subscribed")
+    assert {subscription.namespace for subscription in s.first.subscriptions} == {
+        ("room", rooms),
+        ("room", "alice", alices),
+    }
+    assert len(s.first.discoveries) == 1
+    assert room.errors == alice.errors == []
+
+
+class _Covered:
+    """A want on a narrower root, subscribed and delivering, whose request a wider want's request just replaced."""
+
+    def __init__(self, s: Subscribers, alice: Recorder, generation: str) -> None:
+        self.s = s
+        self.alice = alice
+        self.generation = generation
+
+    @property
+    def covering(self) -> FakeDiscovery:
+        return self.s.first.discoveries[1]
+
+    @property
+    def subscription(self) -> FakeSubscription:
+        return self.s.first.subscriptions[0]
+
+
+async def _covered(cleanup: list[Callable[[], object]]) -> _Covered:
+    subscriber, s = await start_subscriber(cleanup)
+    alice = Recorder()
+    subscriber.want("alice", ["room", "alice"], "audio", alice.handlers, generations=True, retry=FAST)
+    await until(lambda: len(s.first.discoveries) == 1, "the narrower discovery")
+    narrow = s.first.discoveries[0]
+    generation = new_generation()
+    narrow.push("announced", ["room", "alice", generation])
+    narrow.push("loaded")
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(0)
+    subscriber.want("room", ["room"], "video", generations=True, retry=FAST)
+    await until(lambda: len(s.first.discoveries) == 2, "the covering discovery")
+    assert s.first.discoveries[1].prefix == ("room",)
+    assert narrow.closed
+    s.first.subscriptions[0].send_object(1)
+    await asyncio.sleep(0.01)
+    assert not s.first.subscriptions[0].cancelled
+    return _Covered(s, alice, generation)
+
+
+async def test_keeps_a_want_on_a_narrower_root_subscribed_when_a_covering_request_confirms_its_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    c = await _covered(cleanup)
+    c.covering.push("announced", ["room", "alice", c.generation])
+    c.covering.push("loaded")
+    await asyncio.sleep(0.02)
+    assert c.alice.seen == [f"subscribed room/alice/{c.generation}", "object 0", "object 1"]
+    assert not c.subscription.cancelled
+    assert len(c.s.first.subscriptions) == 1
+
+
+async def test_restarts_a_want_on_a_narrower_root_once_the_covering_request_loads_without_its_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    c = await _covered(cleanup)
+    c.covering.push("loaded")
+    await until(lambda: "restarted generation" in c.alice.seen, "the withdrawal reported at the load")
+    assert c.alice.seen == [
+        f"subscribed room/alice/{c.generation}",
+        "object 0",
+        "object 1",
+        "restarted generation",
+    ]
+    assert c.subscription.cancelled
+    assert len(c.s.first.discoveries) == 2
 
 
 async def test_a_newer_generation_cuts_a_retry_delay_short(cleanup: list[Callable[[], object]]) -> None:
@@ -1063,7 +1155,9 @@ async def test_does_not_wake_on_what_another_wants_shared_watch_saw_before_its_l
     await until(lambda: len(of("b")) == 2, "b woken by a later return")
 
 
-async def test_closes_an_unused_overlapping_watch_kept_for_reuse(cleanup: list[Callable[[], object]]) -> None:
+async def test_waits_on_the_watch_kept_for_reuse_when_it_covers_the_namespace(
+    cleanup: list[Callable[[], object]],
+) -> None:
     subscriber, s = await start_subscriber(cleanup)
 
     def of(track: str) -> list[FakeSubscription]:
@@ -1083,9 +1177,11 @@ async def test_closes_an_unused_overlapping_watch_kept_for_reuse(cleanup: list[C
     await until(lambda: len(of("y")) == 1, "y subscribed")
     of("y")[0].accept()
     done_with(of("y")[0], 0)
-    await until(lambda: len(s.first.discoveries) == 2, "y watches its namespace")
-    assert s.first.discoveries[0].closed
-    assert s.first.discoveries[1].prefix == ("room", "alice")
+    await asyncio.sleep(0.01)
+    assert len(s.first.discoveries) == 1
+    assert not s.first.discoveries[0].closed
+    s.first.discoveries[0].push("announced", ["room", "alice"])
+    await until(lambda: len(of("y")) == 2, "y woken by the shared watch")
 
 
 async def test_falls_back_to_the_backoff_when_the_watch_fails(cleanup: list[Callable[[], object]]) -> None:
@@ -1099,7 +1195,9 @@ async def test_falls_back_to_the_backoff_when_the_watch_fails(cleanup: list[Call
     await until(lambda: len(s.first.subscriptions) == 2, "resubscribed after the backoff")
 
 
-async def test_the_watch_gives_way_to_a_followed_roots_discovery(cleanup: list[Callable[[], object]]) -> None:
+async def test_the_watch_moves_under_a_followed_roots_discovery_and_still_wakes(
+    cleanup: list[Callable[[], object]],
+) -> None:
     subscriber, s = await start_subscriber(cleanup)
     r = Recorder()
     subscriber.want("v", ["room", "alice"], "v", retry=WAKE_SLOW)
@@ -1112,6 +1210,51 @@ async def test_the_watch_gives_way_to_a_followed_roots_discovery(cleanup: list[C
     assert s.first.discoveries[0].closed
     assert s.first.discoveries[1].prefix == ("room",)
     assert r.errors == []
+
+    def v() -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == "v"]
+
+    s.first.discoveries[1].push("announced", ["room", "alice"])
+    await until(lambda: len(v()) == 2, "v woken through the root discovery")
+
+
+async def test_a_publishing_roots_view_and_a_wake_on_the_namespace_share_one_request(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    changes: list[tuple[list[str], list[str]]] = []
+    errors: list[BaseException] = []
+    subscriber.publishing_roots(
+        ["room"],
+        PublishingRootsHandlers(
+            on_changed=lambda change: changes.append(([m.id for m in change.added], [m.id for m in change.removed])),
+            on_error=errors.append,
+        ),
+    )
+    await until(lambda: len(s.first.discoveries) == 1, "the view discovers the root")
+    s.first.discoveries[0].push("announced", ["room", "alice"])
+    s.first.discoveries[0].push("loaded")
+    await until(lambda: len(changes) == 1, "the view loads")
+
+    def v() -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == "v"]
+
+    subscriber.want("v", ["room", "alice"], "v", retry=WAKE_SLOW)
+    await until(lambda: len(v()) == 1, "subscribed")
+    v()[0].accept()
+    v()[0].done()  # TRACK_ENDED
+    await asyncio.sleep(0.01)
+    assert len(s.first.discoveries) == 1
+    assert len(v()) == 1
+    s.first.discoveries[0].push("unannounced", ["room", "alice"])
+    await until(lambda: len(changes) == 2, "alice leaves")
+    assert len(v()) == 1
+    s.first.discoveries[0].push("announced", ["room", "alice"])
+    await until(lambda: len(v()) == 2, "v woken by the return")
+    await until(lambda: len(changes) == 3, "alice returns")
+    assert changes == [(["alice"], []), ([], ["alice"]), (["alice"], [])]
+    assert errors == []
+    assert not s.first.discoveries[0].closed
 
 
 # Make-before-break moves (#282)
