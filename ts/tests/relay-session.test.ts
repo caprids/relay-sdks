@@ -3,6 +3,7 @@ import { StreamReader } from '../packages/moq-core/src/protocol/bytes.js';
 import {
   ControlMessageDeframer,
   decodeControlMessage,
+  encodeGoaway,
   encodeSetup,
   encodeSubscribeOk,
   SETUP_OPTION,
@@ -208,5 +209,17 @@ describe('connectRelay', () => {
     const closing = session.close();
     expect(() => session.publish(HOST)).toThrow(RelayError);
     await closing;
+  });
+  it('ends the connection on a GOAWAY the relay sends on its solicitation', async () => {
+    const { session, server } = await connect();
+    const own = session.publish(OWN);
+    own.registerTrack({ track: 'video' });
+    const solicitation = await solicitNamespace(server, [], 1);
+    await own.announced;
+
+    await solicitation.send(encodeGoaway(1000));
+    const { error } = await session.closed;
+    expect(error).toMatchObject({ code: 'GOAWAY' });
+    await expect(own.closed).resolves.toMatchObject({ error });
   });
 });

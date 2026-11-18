@@ -24,7 +24,7 @@ import { encodeGoaway, encodeSetup, type KeyValuePair, MESSAGE_TYPE } from './co
 import { createMoqtPublishSession, type MoqtPublishSession, type MoqtPublishSessionConfig } from './publish-session.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
 import { createMoqtSession, type MoqtSession, type MoqtSessionConfig, type MoqtTransport } from './session.js';
-import { decodeVarint } from './varint.js';
+import { decodeVarint, varintLengthFromFirstByte } from './varint.js';
 
 /** Peer-initiated requests the publish driver serves; every other request type goes to the subscribe driver. */
 const PUBLISHER_REQUESTS: ReadonlySet<number> = new Set([
@@ -60,9 +60,6 @@ export interface MoqtDuplexSession {
   destroy(error?: unknown): void;
 }
 
-/** A varint's encoded length by its two high bits (RFC 9000 §16). */
-const VARINT_LENGTHS = [1, 2, 4, 8] as const;
-
 const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
   const out = new Uint8Array(a.length + b.length);
   out.set(a);
@@ -83,9 +80,10 @@ async function peekRequestType(
   let failure: { error: unknown } | undefined;
 
   for (;;) {
-    // The first byte gives the varint's length; once a whole one is in, the router has what it needs.
+    // The first byte gives the varint's length (MOQT's leading-ones prefix, up to nine bytes); once a whole one is
+    // in, the router has what it needs.
     const first = buffered[0];
-    if (first !== undefined && buffered.length >= (VARINT_LENGTHS[first >> 6] ?? 8)) {
+    if (first !== undefined && buffered.length >= varintLengthFromFirstByte(first)) {
       try {
         type = decodeVarint(buffered).value;
       } catch {

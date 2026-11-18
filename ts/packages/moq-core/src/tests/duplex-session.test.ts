@@ -6,6 +6,7 @@ import {
   encodeGoaway,
   encodePublish,
   encodeSetup,
+  encodeSubscribe,
   MESSAGE_TYPE,
   type MoqtProtocolId,
   SETUP_OPTION,
@@ -237,5 +238,28 @@ describe('createMoqtDuplexSession', () => {
     // The subscriber reads it and refuses the session; nothing waits for more bytes.
     await vi.waitFor(() => expect(closed).toHaveLength(1));
     expect(closed[0]!.error).toBeDefined();
+  });
+  it('waits for a whole nine-byte request type before routing it', async () => {
+    const { pair, session } = await harness();
+    session.publisher.announce(OWN);
+    session.publisher.registerTrack({ trackNamespace: OWN, trackName: 'video' });
+    await solicitNamespace(pair.server, [], 1);
+
+    // SUBSCRIBE (0x03) spelled with MOQT's longest prefix, 0xff and eight value bytes, split after eight bytes.
+    const subscribe = encodeSubscribe({ requestId: 3, trackNamespace: OWN, trackName: 'video' });
+    const longType = new Uint8Array([0xff, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+    const bytes = new Uint8Array(longType.length + subscribe.length - 1);
+    bytes.set(longType);
+    bytes.set(subscribe.subarray(1), longType.length);
+    const stream = await pair.server.createBidirectionalStream();
+    const writer = stream.writable.getWriter();
+    await writer.write(bytes.subarray(0, 8));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await writer.write(bytes.subarray(8));
+
+    const { value } = await stream.readable.getReader().read();
+    const [frame] = new ControlMessageDeframer().push(value!);
+    expect(decodeControlMessage(frame!).kind).toBe('subscribe-ok');
+    session.destroy();
   });
 });

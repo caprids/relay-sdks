@@ -16,7 +16,7 @@ import {
 } from './delivery-timeouts.js';
 import { RelayError } from './errors.js';
 import { trackSendOptions } from './send-order.js';
-import { createSettlingGroups } from './settling-groups.js';
+import { createSettlingGroups, type SettlingGroups } from './settling-groups.js';
 import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
@@ -314,6 +314,20 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     { session, assertOpen, closed: connectionClosed }: NonNullable<typeof bound>,
   ): Publication => {
     const tracks = new Map<string, WriteSlot>();
+    // The connection's limit applies to every publication's groups, but closing one waits only for its own.
+    const ownGroups = createSettlingGroups(Number.POSITIVE_INFINITY);
+    const groups: SettlingGroups = {
+      hasRoom: () => settlingGroups.hasRoom(),
+      waitForRoom: (interrupted) => settlingGroups.waitForRoom(interrupted),
+      add(settled) {
+        settlingGroups.add(settled);
+        ownGroups.add(settled);
+      },
+      drain: (timeoutMs, stop) => ownGroups.drain(timeoutMs, stop),
+      get size() {
+        return ownGroups.size;
+      },
+    };
     /** Set when the namespace was lost while the connection lives: every later operation fails with it. */
     let lost: { error: unknown } | undefined;
     const assertPublished = () => {
@@ -342,7 +356,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
       for (const slot of tracks.values()) slot.writer.close();
       // Chromium resets every stream still awaiting its acknowledgment when the session closes, so give the last
       // groups up to one write deadline to settle; after that they may be lost.
-      await settlingGroups.drain(drainMs, connectionClosed);
+      await groups.drain(drainMs, connectionClosed);
     };
 
     session.announce(namespace);
@@ -396,7 +410,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
                 }),
                 registered,
               ),
-            settlingGroups,
+            settlingGroups: groups,
             namespaceSolicited: () => session.isSolicited(namespace),
             assertOpen: assertPublished,
             endTrack: () => registered.end(),

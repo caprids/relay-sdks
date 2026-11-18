@@ -57,7 +57,12 @@ export async function connectRelay(options: ConnectRelaySessionOptions): Promise
       },
       // A protocol failure on the publishing side ends the connection like one on the subscribing side.
       publisher: {
-        callbacks: { ...host.callbacks, ...(callbacks.onClosed ? { onClosed: callbacks.onClosed } : {}) },
+        // A GOAWAY on one of the relay's requests to it ends the connection, as on a publisher connection.
+        callbacks: {
+          ...host.callbacks,
+          ...(callbacks.onClosed ? { onClosed: callbacks.onClosed } : {}),
+          ...(callbacks.onGoaway ? { onGoaway: callbacks.onGoaway } : {}),
+        },
       },
     });
     return {
