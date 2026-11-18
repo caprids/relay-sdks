@@ -167,6 +167,7 @@ export function createMoqtDuplexSession(
 
   /** Set by `destroy()`: the subscriber's own close must not cut the publisher's drain short. */
   let deferSubscriberClose = false;
+  let destroyed = false;
   const peerRequestIds = new Set<number>();
   let controlTaken = false;
   const publisherView: MoqtTransport = {
@@ -241,11 +242,15 @@ export function createMoqtDuplexSession(
         const { done, value } = await reader.read();
         if (done) break;
         void peekRequestType(value).then(({ type, stream }) => {
-          const target = type !== undefined && PUBLISHER_REQUESTS.has(type) ? toPublisher : toSubscriber;
+          const forPublisher = type !== undefined && PUBLISHER_REQUESTS.has(type);
+          // After `destroy()` the subscriber has reported its end: a request for it is refused, not delivered, while the
+          // publisher drains.
           try {
-            target.enqueue(stream);
+            if (!forPublisher && destroyed) throw new Error('the subscriber has ended');
+            (forPublisher ? toPublisher : toSubscriber).enqueue(stream);
           } catch {
             void stream.readable.cancel().catch(() => {});
+            void stream.writable.abort().catch(() => {});
           }
         });
       }
@@ -259,7 +264,6 @@ export function createMoqtDuplexSession(
     }
   })();
 
-  let destroyed = false;
   return {
     subscriber,
     publisher,

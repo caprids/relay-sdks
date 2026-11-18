@@ -287,4 +287,21 @@ describe('createMoqtDuplexSession', () => {
     await vi.waitFor(() => expect(closed).toHaveLength(1));
     expect(closed[0]).toEqual({});
   });
+  it('delivers nothing more to the subscriber once destroyed, while the publisher drains', async () => {
+    const offered = vi.fn();
+    const { pair, session } = await harness({ subscriber: { callbacks: { onIncomingPublish: offered } } });
+    session.publisher.announce(OWN);
+    session.publisher.registerTrack({ trackNamespace: OWN, trackName: 'video' });
+    const solicitation = await solicitNamespace(pair.server, [], 1);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+
+    session.destroy();
+    const stream = await pair.server.createBidirectionalStream();
+    await stream.writable
+      .getWriter()
+      .write(encodePublish({ requestId: 5, trackNamespace: OTHER, trackName: 'offered', trackAlias: 9 }))
+      .catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(offered).not.toHaveBeenCalled();
+  });
 });
