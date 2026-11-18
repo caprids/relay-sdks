@@ -763,8 +763,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       if (index === -1) continue;
 
       const [entry] = stream.announced.splice(index, 1);
-      // A failed write means the carrier is dead, which its own failure path reports.
-      const write = stream.writer.write(encodeNamespaceDone(entry!)).catch(() => {});
+      // A failed write means the carrier is dead: drop it and report what it still carried, as a failed announce does.
+      const write = stream.writer
+        .write(encodeNamespaceDone(entry!))
+        .catch((error: unknown) => this.#dropCarrier(stream, error));
       this.#pendingWithdrawals.add(write);
       void write.then(() => this.#pendingWithdrawals.delete(write));
     }
@@ -802,21 +804,22 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         record.fired = true;
         this.#callbacks.onAnnounced?.({ namespace });
       })
-      .catch((error: unknown) => {
-        // The response half died alone (a reset the request half may
-        // never mirror): the entry never reached the peer, no future
-        // write can, and the read loop may stay open forever — the
-        // carrier is dead. Deregister it so the peer's replacement
-        // solicitation is a fresh start rather than a PREFIX_OVERLAP
-        // against a corpse; if another path already swept it, the loss
-        // was reported there.
-        if (!this.#namespaceStreams.delete(stream)) return;
+      .catch((error: unknown) => this.#dropCarrier(stream, error));
+  }
 
-        const lost = this.#carriedBy(stream);
-        stream.announced = [];
-        void stream.writer.close().catch(() => {});
-        void this.#reportAnnounceLoss(error, lost);
-      });
+  /**
+   * A write on a solicitation stream failed: the response half died alone (a reset the request half may never mirror),
+   * so no future write can reach the peer and the read loop may stay open forever. Deregister the carrier, so the peer's
+   * replacement solicitation is a fresh start rather than a PREFIX_OVERLAP against a corpse, and report the namespaces
+   * it carried. If another path already swept it, the loss was reported there.
+   */
+  #dropCarrier(stream: NamespaceStream, error: unknown): void {
+    if (!this.#namespaceStreams.delete(stream)) return;
+
+    const lost = this.#carriedBy(stream);
+    stream.announced = [];
+    void stream.writer.close().catch(() => {});
+    void this.#reportAnnounceLoss(error, lost);
   }
 
   /** The announced namespaces a solicitation stream carries entries for. */
@@ -847,7 +850,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // A replacement solicitation may have picked an announce up during that turn.
     if (this.#announceLossSilenced()) return;
 
-    for (const { namespace } of stillLost()) {
+    for (const record of stillLost()) {
+      // A handler may withdraw another namespace or end the session: check each again before telling it.
+      if (this.#announceLossSilenced() || !stillLost().includes(record)) continue;
+      const { namespace } = record;
       const error = new MoqtProtocolError('the namespace solicitation carrying the announce ended');
       error.cause = cause;
       this.#callbacks.onAnnounceEnded?.({ namespace, error });

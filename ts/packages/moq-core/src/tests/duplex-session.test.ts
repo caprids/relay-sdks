@@ -325,4 +325,27 @@ describe('createMoqtDuplexSession', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(order).toEqual(['closed']);
   });
+  it('still drains and closes the publisher when a subscriber callback throws during destroy', async () => {
+    const publisherClosed = vi.fn();
+    const { pair, session } = await harness({
+      subscriber: {
+        callbacks: {
+          onClosed: () => {
+            throw new Error('application bug');
+          },
+        },
+      },
+      publisher: { callbacks: { onClosed: publisherClosed } },
+    });
+    session.publisher.announce(OWN);
+    session.publisher.registerTrack({ trackNamespace: OWN, trackName: 'video' });
+    const solicitation = await solicitNamespace(pair.server, [], 1);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+
+    expect(() => session.destroy()).toThrow('application bug');
+    await vi.waitFor(() => {
+      expect(solicitation.received.map((m) => m.kind)).toContain('namespace-done');
+      expect(publisherClosed).toHaveBeenCalled();
+    });
+  });
 });

@@ -55,7 +55,8 @@ export interface MoqtDuplexSession {
    * End the session. The subscriber ends at once, its requests with it, but leaves the transport open; the publisher
    * ends its subscriptions and retracts its announces within its bounded drain, then closes the transport. Call this
    * rather than the subscriber's own `close()` or `destroy()`, which would cut the publisher's drain short. `error`, if
-   * given, is the local closure error both drivers report.
+   * given, is the local closure error both drivers report. Each driver's callbacks end at its own `onClosed`: the
+   * subscriber's at once, the publisher's (subscription ends, bindings) once its drain is over.
    */
   destroy(error?: unknown): void;
 }
@@ -224,11 +225,13 @@ export function createMoqtDuplexSession(
         callbacks.onReady?.(serverOptions);
       },
       onGoaway: (goaway) => {
-        try {
-          toPublisherControl.enqueue(encodeGoaway(goaway.timeout, goaway.newSessionUri));
-        } catch {
-          // The publish driver's control stream is gone with the session.
-        }
+        // After `destroy()` the publisher is draining, and a GOAWAY changes nothing for it.
+        if (!destroyed)
+          try {
+            toPublisherControl.enqueue(encodeGoaway(goaway.timeout, goaway.newSessionUri));
+          } catch {
+            // The publish driver's control stream is gone with the session.
+          }
         callbacks.onGoaway?.(goaway);
       },
     },
@@ -272,8 +275,12 @@ export function createMoqtDuplexSession(
       destroyed = true;
       // The subscriber ends now, with `error`, but leaves the transport to the publisher, which closes it after its drain.
       deferSubscriberClose = true;
-      subscriber.destroy(error);
-      publisher.destroy(error);
+      // A throwing subscriber callback must not leave the publisher, and with it the transport, open.
+      try {
+        subscriber.destroy(error);
+      } finally {
+        publisher.destroy(error);
+      }
     },
   };
 }

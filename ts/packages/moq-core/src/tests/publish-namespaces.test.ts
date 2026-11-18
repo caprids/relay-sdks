@@ -162,4 +162,50 @@ describe('a publish session announcing several namespaces', () => {
     expect(bindings).toEqual([{ trackNamespace: ['a/b'], trackAlias: 3 }]);
     done();
   });
+  it('drops a carrier whose withdrawal write fails, and reports what it still carried', async () => {
+    const endings: TrackNamespace[] = [];
+    const { pair, session, done } = harness({ onAnnounceEnded: ({ namespace }) => endings.push(namespace) });
+
+    await session.ready;
+    session.announce(PERSON);
+    session.announce(HOST);
+    session.registerTrack({ trackNamespace: PERSON, trackName: 'video' });
+    session.registerTrack({ trackNamespace: HOST, trackName: 'control' });
+    const solicitation = await solicitNamespace(pair.server, ['room'], 1);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(3));
+
+    await solicitation.abandonReads();
+    session.withdraw(HOST);
+    await vi.waitFor(() => expect(endings).toEqual([PERSON]));
+    expect(session.isSolicited(PERSON)).toBe(false);
+
+    // A replacement solicitation is a fresh start, not a PREFIX_OVERLAP against the dead carrier.
+    const replacement = await solicitNamespace(pair.server, ['room'], 3);
+    await vi.waitFor(() => expect(replacement.received.map((m) => m.kind)).toEqual(['request-ok', 'namespace']));
+    done();
+  });
+
+  it('does not report a loss for a namespace an earlier loss handler withdrew', async () => {
+    const endings: TrackNamespace[] = [];
+    const { pair, session, done } = harness({
+      onAnnounceEnded: ({ namespace }) => {
+        endings.push(namespace);
+        session.withdraw(namespace.join('/') === PERSON.join('/') ? HOST : PERSON);
+      },
+    });
+
+    await session.ready;
+    session.announce(PERSON);
+    session.announce(HOST);
+    session.registerTrack({ trackNamespace: PERSON, trackName: 'video' });
+    session.registerTrack({ trackNamespace: HOST, trackName: 'control' });
+    const solicitation = await solicitNamespace(pair.server, ['room'], 1);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(3));
+
+    void solicitation.reset();
+    await vi.waitFor(() => expect(endings).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(endings).toHaveLength(1);
+    done();
+  });
 });

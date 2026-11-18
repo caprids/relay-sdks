@@ -295,7 +295,10 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     announce(): void;
     /** The connection ended, or (`live`) the namespace was lost while it lives: its tracks end at the core too. */
     disconnect(error: unknown, live?: boolean): void;
-    end(): Promise<void>;
+    /** End the tracks and drain their groups for at least `drainMs`, or the tracks' own largest deadline. */
+    end(drainMs?: number): Promise<void>;
+    /** The largest write deadline among the tracks. */
+    readonly drainMs: number;
   };
   const publications = new Map<string, Publication>();
   // Each relay subscription's delivery timeouts (§5.2), by its request ID, which the core also uses as its track alias:
@@ -351,12 +354,12 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
     void announced.catch(() => {});
 
-    const endTracks = async () => {
+    const endTracks = async (atLeastMs = 0) => {
       closing = true;
       for (const slot of tracks.values()) slot.writer.close();
       // Chromium resets every stream still awaiting its acknowledgment when the session closes, so give the last
       // groups up to one write deadline to settle; after that they may be lost.
-      await groups.drain(drainMs, connectionClosed);
+      await groups.drain(Math.max(drainMs, atLeastMs), connectionClosed);
     };
 
     session.announce(namespace);
@@ -381,6 +384,9 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
         resolveClosed(error === undefined ? {} : { error });
       },
       end: endTracks,
+      get drainMs() {
+        return drainMs;
+      },
       api: {
         namespace,
         announced,
@@ -478,7 +484,10 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     },
     async endAll() {
       shuttingDown = true;
-      await Promise.all([...publications.values()].map((publication) => publication.end()));
+      // The connection's groups get the largest deadline among all its tracks, as a publisher connection's do.
+      const all = [...publications.values()];
+      const drainMs = Math.max(0, ...all.map((publication) => publication.drainMs));
+      await Promise.all(all.map((publication) => publication.end(drainMs)));
     },
   };
 }
