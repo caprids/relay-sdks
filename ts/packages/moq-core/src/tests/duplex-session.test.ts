@@ -11,6 +11,7 @@ import {
   SETUP_OPTION,
 } from '../protocol/control-messages.js';
 import { createMoqtDuplexSession, type MoqtDuplexSessionConfig } from '../protocol/duplex-session.js';
+import { SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtTransport } from '../protocol/session.js';
 import { createSubgroupWriter } from '../protocol/subgroup-writer.js';
 import { decodeVarint } from '../protocol/varint.js';
@@ -186,21 +187,55 @@ describe('createMoqtDuplexSession', () => {
       expect(closed).toHaveBeenCalled();
     });
   });
-  it('destroys the publisher first, so its announces are retracted before the subscriber ends', async () => {
-    const order: string[] = [];
-    const { pair, session } = await harness({ subscriber: { callbacks: { onClosed: () => order.push('closed') } } });
+  it('ends the subscriber at once with the error, and leaves the transport to the publisher’s drain', async () => {
+    const subscriberClosed: unknown[] = [];
+    const publisherClosed: unknown[] = [];
+    const { pair, session } = await harness({
+      subscriber: { callbacks: { onClosed: (info) => subscriberClosed.push(info) } },
+      publisher: { callbacks: { onClosed: (info) => publisherClosed.push(info) } },
+    });
     session.publisher.announce(OWN);
     session.publisher.registerTrack({ trackNamespace: OWN, trackName: 'video' });
     const solicitation = await solicitNamespace(pair.server, [], 1);
     await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
 
+    const reason = new Error('going');
+    session.destroy(reason);
     session.destroy();
-    session.destroy();
-    // The subscriber is not torn down with the call: that would close the transport under the publisher's drain.
-    expect(order).toEqual([]);
+    expect(subscriberClosed).toEqual([{ error: reason }]);
+    // The retraction still reaches the peer: the subscriber's end did not close the transport under the drain.
     await vi.waitFor(() => {
       expect(solicitation.received.map((m) => m.kind)).toContain('namespace-done');
-      expect(order).toEqual(['closed']);
+      expect(publisherClosed).toEqual([{ error: reason }]);
     });
+  });
+
+  it('closes the session on a peer request ID reused across the two drivers (§6.4.2.1)', async () => {
+    const closed: { error?: unknown }[] = [];
+    const { pair } = await harness({ subscriber: { callbacks: { onClosed: (info) => closed.push(info) } } });
+
+    const subscribe = await rawSubscribe(pair.server, OWN, 'video', 1);
+    await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+    const stream = await pair.server.createBidirectionalStream();
+    await stream.writable
+      .getWriter()
+      .write(encodePublish({ requestId: 1, trackNamespace: OTHER, trackName: 'offered', trackAlias: 9 }));
+
+    await vi.waitFor(() => expect(closed).toHaveLength(1));
+    expect(closed[0]!.error).toMatchObject({ code: SESSION_ERROR.INVALID_REQUEST_ID });
+  });
+
+  it('routes a request stream with an unrepresentable type at once instead of buffering it', async () => {
+    const closed: { error?: unknown }[] = [];
+    const { pair } = await harness({ subscriber: { callbacks: { onClosed: (info) => closed.push(info) } } });
+
+    const stream = await pair.server.createBidirectionalStream();
+    const writer = stream.writable.getWriter();
+    await writer.write(new Uint8Array(9).fill(0xff));
+    await writer.write(new Uint8Array(64));
+
+    // The subscriber reads it and refuses the session; nothing waits for more bytes.
+    await vi.waitFor(() => expect(closed).toHaveLength(1));
+    expect(closed[0]!.error).toBeDefined();
   });
 });

@@ -182,4 +182,31 @@ describe('connectRelay', () => {
     const { session } = await connect();
     expect(() => session.publish(new Array(33).fill('field'))).toThrow(RangeError);
   });
+  it('fails an open group with the namespace loss, not a subscription change', async () => {
+    const { session, server } = await connect();
+    const host = session.publish(HOST);
+    const control = host.registerTrack({ track: 'control' });
+    const hosts = await solicitNamespace(server, ['room', 'host'], 1);
+    await host.announced;
+    const upstream = await rawSubscribe(server, HOST, 'control', 3);
+    await vi.waitFor(() => expect(upstream.received.map((m) => m.kind)).toEqual(['subscribe-ok']));
+    const group = await control.openGroup({ payload: new Uint8Array([1]) });
+
+    void hosts.reset();
+    const { error } = await host.closed;
+    expect((error as RelayError).code).toBe('NAMESPACE_ENDED');
+    await expect(group.write(new Uint8Array([2]))).rejects.toBe(error);
+  });
+
+  it('refuses a publication once closing has begun', async () => {
+    const { session, server } = await connect();
+    const own = session.publish(OWN);
+    own.registerTrack({ track: 'video' });
+    await solicitNamespace(server, [], 1);
+    await own.announced;
+
+    const closing = session.close();
+    expect(() => session.publish(HOST)).toThrow(RelayError);
+    await closing;
+  });
 });

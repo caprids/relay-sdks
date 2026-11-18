@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TrackNamespace } from '../protocol/control-messages.js';
 import { createMoqtPublishSession, type MoqtPublishSessionCallbacks } from '../protocol/publish-session.js';
 import { createMoqtSession } from '../protocol/session.js';
-import { solicitNamespace } from './helpers/raw-peer.js';
+import { rawSubscribe, solicitNamespace } from './helpers/raw-peer.js';
 import { createTransportPair } from './helpers/transport-pair.js';
 
 const PERSON = ['room', 'p', 'alice'];
@@ -143,5 +143,23 @@ describe('a publish session announcing several namespaces', () => {
         solicitation.received.filter((m) => m.kind === 'namespace-done').map((m) => m.trackNamespaceSuffix)
       ).toEqual(expect.arrayContaining([['p', 'alice'], ['host']]))
     );
+  });
+  it('keeps namespaces apart whose fields joined with a slash would match', async () => {
+    const bindings: { trackNamespace: TrackNamespace; trackAlias: number | undefined }[] = [];
+    const { pair, session, done } = harness({
+      onTrackBinding: ({ trackNamespace, trackAlias }) => bindings.push({ trackNamespace, trackAlias }),
+    });
+
+    await session.ready;
+    session.announce(['a/b']);
+    session.announce(['a', 'b']);
+    session.registerTrack({ trackNamespace: ['a/b'], trackName: 'video' });
+    session.registerTrack({ trackNamespace: ['a', 'b'], trackName: 'video' });
+    await solicitNamespace(pair.server, [], 1);
+
+    const first = await rawSubscribe(pair.server, ['a/b'], 'video', 3);
+    await vi.waitFor(() => expect(first.received.map((m) => m.kind)).toEqual(['subscribe-ok']));
+    expect(bindings).toEqual([{ trackNamespace: ['a/b'], trackAlias: 3 }]);
+    done();
   });
 });

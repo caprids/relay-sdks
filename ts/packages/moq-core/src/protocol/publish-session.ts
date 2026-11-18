@@ -140,6 +140,11 @@ export interface MoqtPublishSessionCallbacks {
 
 /** Options for {@link createMoqtPublishSession}. */
 export interface MoqtPublishSessionConfig {
+  /**
+   * The peer's consumed Request IDs (§6.4.2.1). Sessions sharing one transport pass the same set, so an ID one of them
+   * consumed is a reuse to the other; `createMoqtDuplexSession` does. Default: the session's own.
+   */
+  peerRequestIds?: Set<number>;
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§9.1.5). */
@@ -444,8 +449,9 @@ interface AnnounceRecord {
   fired: boolean;
 }
 
+/** A track as a map key: namespace fields and the name may contain any character, so nothing is joined. */
 function trackKey(namespace: TrackNamespace, name: string): string {
-  return `${namespace.join('/')}--${name}`;
+  return JSON.stringify([namespace, name]);
 }
 
 function isNamespacePrefix(prefix: TrackNamespace, namespace: TrackNamespace): boolean {
@@ -495,7 +501,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * request IDs, a reused ID would hand two subscriptions the same alias and make their subgroup streams
    * indistinguishable — session-fatal, per the draft.
    */
-  #peerRequestIds = new Set<number>();
+  #peerRequestIds: Set<number>;
   /** The namespaces to announce, by {@link namespaceKey}. */
   #announces = new Map<string, AnnounceRecord>();
   /** Namespaces with at least one registered track, by {@link namespaceKey}: an announce waits for its first. */
@@ -517,6 +523,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#transport = transport;
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
+    this.#peerRequestIds = config.peerRequestIds ?? new Set();
     this.#callbacks = config.callbacks ?? {};
     this.ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve;

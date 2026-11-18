@@ -11,8 +11,8 @@
  * driver's own control stream is swallowed, and it is handed the peer's SETUP options and any control-stream GOAWAY
  * the subscribe driver reads, so its readiness and migration silence follow the real session.
  *
- * Request IDs need no coordination. Neither driver both starts and serves the same kind of request; this endpoint's
- * IDs are allocated by the subscribe driver alone, and each peer request is claimed by the driver it is routed to.
+ * This endpoint's Request IDs are allocated by the subscribe driver alone. The peer's are consumed session-wide
+ * (§6.4.2.1), so both drivers claim them in one shared set: an ID one driver consumed is a reuse to the other.
  *
  * Measured against moq-relay on 2026-11-18 (spec/behavior.md, "One connection that publishes and subscribes"): one
  * session announced, served the
@@ -37,9 +37,9 @@ const PUBLISHER_REQUESTS: ReadonlySet<number> = new Set([
 /** How to configure the two drivers that share the transport. */
 export interface MoqtDuplexSessionConfig {
   /** The subscribe driver, which sends SETUP: its `setupOptions` and `implementationName` are the session's. */
-  subscriber?: Omit<MoqtSessionConfig, 'perspective'>;
+  subscriber?: Omit<MoqtSessionConfig, 'perspective' | 'peerRequestIds'>;
   /** The publish driver. It sends no SETUP of its own, so setup options and the implementation name do not apply. */
-  publisher?: Omit<MoqtPublishSessionConfig, 'setupOptions' | 'implementationName'>;
+  publisher?: Omit<MoqtPublishSessionConfig, 'setupOptions' | 'implementationName' | 'peerRequestIds'>;
 }
 
 /** One session, seen through each driver. Created by {@link createMoqtDuplexSession}. */
@@ -52,13 +52,16 @@ export interface MoqtDuplexSession {
    */
   readonly publisher: MoqtPublishSession;
   /**
-   * End the session: the publisher first, which ends its subscriptions and retracts its announces within its bounded
-   * drain and then closes the transport, and the subscriber once the transport has closed. Neither driver's own
-   * `close()` or `destroy()` may be called before the transport closes: the subscriber's would cut the publisher's
-   * drain short. `error`, if given, is the local closure error both drivers report.
+   * End the session. The subscriber ends at once, its requests with it, but leaves the transport open; the publisher
+   * ends its subscriptions and retracts its announces within its bounded drain, then closes the transport. Call this
+   * rather than the subscriber's own `close()` or `destroy()`, which would cut the publisher's drain short. `error`, if
+   * given, is the local closure error both drivers report.
    */
   destroy(error?: unknown): void;
 }
+
+/** A varint's encoded length by its two high bits (RFC 9000 §16). */
+const VARINT_LENGTHS = [1, 2, 4, 8] as const;
 
 const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
   const out = new Uint8Array(a.length + b.length);
@@ -80,13 +83,15 @@ async function peekRequestType(
   let failure: { error: unknown } | undefined;
 
   for (;;) {
-    if (buffered.length > 0) {
+    // The first byte gives the varint's length; once a whole one is in, the router has what it needs.
+    const first = buffered[0];
+    if (first !== undefined && buffered.length >= (VARINT_LENGTHS[first >> 6] ?? 8)) {
       try {
         type = decodeVarint(buffered).value;
-        break;
       } catch {
-        // Not a whole varint yet.
+        // A varint this endpoint cannot represent: no driver serves it, and the subscriber's reader refuses it.
       }
+      break;
     }
 
     try {
@@ -162,6 +167,9 @@ export function createMoqtDuplexSession(
     },
   });
 
+  /** Set by `destroy()`: the subscriber's own close must not cut the publisher's drain short. */
+  let deferSubscriberClose = false;
+  const peerRequestIds = new Set<number>();
   let controlTaken = false;
   const publisherView: MoqtTransport = {
     get protocol() {
@@ -198,7 +206,9 @@ export function createMoqtDuplexSession(
     incomingBidirectionalStreams: subscriberRequests,
     createUnidirectionalStream: (options) => transport.createUnidirectionalStream(options),
     createBidirectionalStream: () => transport.createBidirectionalStream(),
-    close: (closeInfo) => transport.close(closeInfo),
+    close: (closeInfo) => {
+      if (!deferSubscriberClose) transport.close(closeInfo);
+    },
     get closed() {
       return transport.closed;
     },
@@ -207,6 +217,7 @@ export function createMoqtDuplexSession(
   const callbacks = config.subscriber?.callbacks ?? {};
   const subscriber = createMoqtSession(subscriberView, {
     ...config.subscriber,
+    peerRequestIds,
     callbacks: {
       ...callbacks,
       onReady: (serverOptions: KeyValuePair[]) => {
@@ -223,7 +234,7 @@ export function createMoqtDuplexSession(
       },
     },
   });
-  const publisher = createMoqtPublishSession(publisherView, config.publisher);
+  const publisher = createMoqtPublishSession(publisherView, { ...config.publisher, peerRequestIds });
 
   void (async () => {
     const reader = transport.incomingBidirectionalStreams.getReader();
@@ -257,9 +268,10 @@ export function createMoqtDuplexSession(
     destroy(error) {
       if (destroyed) return;
       destroyed = true;
+      // The subscriber ends now, with `error`, but leaves the transport to the publisher, which closes it after its drain.
+      deferSubscriberClose = true;
+      subscriber.destroy(error);
       publisher.destroy(error);
-      const after = () => subscriber.destroy(error);
-      void transport.closed.then(after, after);
     },
   };
 }

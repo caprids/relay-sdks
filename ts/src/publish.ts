@@ -303,6 +303,8 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
   const subscriptionTimeouts = new Map<number, DeliveryTimeouts>();
   // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track on the connection.
   const settlingGroups = createSettlingGroups();
+  /** Set once the connection starts closing: no publication may start after `endAll()` took its snapshot. */
+  let shuttingDown = false;
   let bound: { session: MoqtPublishSession; assertOpen(): void; closed: Promise<{ error?: unknown }> } | undefined;
   let ended = false;
   const key = (namespace: readonly string[]) => JSON.stringify(namespace);
@@ -312,7 +314,6 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     { session, assertOpen, closed: connectionClosed }: NonNullable<typeof bound>,
   ): Publication => {
     const tracks = new Map<string, WriteSlot>();
-    const registeredTracks: RegisteredTrack[] = [];
     /** Set when the namespace was lost while the connection lives: every later operation fails with it. */
     let lost: { error: unknown } | undefined;
     const assertPublished = () => {
@@ -350,17 +351,19 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
       announce: () => announce(),
       disconnect(error, live = false) {
         closing = true;
-        if (live) {
-          lost = { error };
-          for (const registered of registeredTracks) registered.end();
-        }
+        if (live) lost = { error };
         // Only a clean shutdown (no error at all) becomes CLOSED; a closure reason of `null` is preserved.
         abandonAnnounce(
           error === undefined
             ? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection')
             : error,
         );
-        for (const slot of tracks.values()) slot.disconnect(error);
+        // A namespace lost while the connection lives ends its tracks as `close()` would, failing what is in flight with
+        // `error` before the core ends the track; the transport goes on, and so do the delivery timeouts it still needs.
+        for (const slot of tracks.values()) {
+          if (live) slot.end(error);
+          else slot.disconnect(error);
+        }
         resolveClosed(error === undefined ? {} : { error });
       },
       end: endTracks,
@@ -382,7 +385,6 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
             trackName: name,
             trackProperties: properties,
           });
-          registeredTracks.push(registered);
           const sendOptions = trackSendOptions(properties);
           const slot = createWriteSlot({
             openSubgroup: async (trackAlias, groupId) =>
@@ -445,7 +447,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
     publish(namespace) {
       if (!bound) throw new Error('publish before the connection is up');
       bound.assertOpen();
-      if (ended) throw new RelayError('CLOSED', 'Relay connection is closed', 'connection');
+      if (ended || shuttingDown) throw new RelayError('CLOSED', 'Relay connection is closed', 'connection');
       if (publications.has(key(namespace)))
         throw new RangeError(
           'Namespace is already published on this connection, including after its publication closed',
@@ -461,6 +463,7 @@ function createPublishHost(onNamespaceEnded: (namespace: readonly string[], erro
       publication.disconnect(error, true);
     },
     async endAll() {
+      shuttingDown = true;
       await Promise.all([...publications.values()].map((publication) => publication.end()));
     },
   };

@@ -372,6 +372,11 @@ export interface MoqtSessionCallbacks {
 
 /** Options for {@link createMoqtSession}. */
 export interface MoqtSessionConfig {
+  /**
+   * The peer's consumed Request IDs (§6.4.2.1). Sessions sharing one transport pass the same set, so an ID one of them
+   * consumed is a reuse to the other; `createMoqtDuplexSession` does. Default: the session's own.
+   */
+  peerRequestIds?: Set<number>;
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§9.1.5). */
@@ -587,7 +592,7 @@ class MoqtSessionImpl implements MoqtSession {
   /** Client request IDs are even, starting at 0; a server's are odd, starting at 1 (§6.4.2.1). */
   #nextRequestId: number;
   /** Every inbound request ID ever seen. Reuse, or this endpoint's own parity, closes the session (§6.4.2.1). */
-  #peerRequestIds = new Set<number>();
+  #peerRequestIds: Set<number>;
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
   #trackStatuses = new Map<number, TrackStatusRecord>();
@@ -609,6 +614,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#transport = transport;
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
+    this.#peerRequestIds = config.peerRequestIds ?? new Set();
     this.#callbacks = config.callbacks ?? {};
     this.#nextRequestId = config.perspective === 'server' ? 1 : 0;
     this.ready = new Promise((resolve, reject) => {
