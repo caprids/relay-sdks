@@ -258,9 +258,9 @@ function follow(
   return { phase: { ...phase, settled }, effects: [emit([added], [], settled)] };
 }
 
-function leaveDue(phase: Live | Replacing, id: string, followed: Presence): Step {
+function leaveDue(phase: Live | Replacing, id: string): Step {
   const gone = phase.settled.get(id);
-  if (!gone || !phase.leaving.has(id) || followed.has(id)) return stay(phase);
+  if (!gone || !phase.leaving.has(id) || sourcesOf(phase).some(({ presence }) => presence.has(id))) return stay(phase);
   const settled = new Map(phase.settled);
   settled.delete(id);
   const leaving = new Set(phase.leaving);
@@ -332,7 +332,7 @@ function fromLive(phase: Live, input: Arrival, prefix: readonly string[]): Step 
     case 'namespace':
       return input.source === source ? follow(phase, source, input, prefix) : stay(phase);
     case 'leave-due':
-      return input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
+      return input.following(source) ? leaveDue(phase, input.id) : stay(phase);
     case 'loaded':
       return input.source === source ? resume(phase) : stay(phase);
     case 'retiring': {
@@ -417,7 +417,7 @@ function fromReplacing(phase: Replacing, input: Arrival, prefix: readonly string
       return source && input.source === source ? follow(phase, source, input, prefix) : stay(phase);
     }
     case 'leave-due':
-      return source && input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
+      return source && input.following(source) ? leaveDue(phase, input.id) : stay(phase);
     case 'loaded':
       if (candidate && input.source === candidate) return adopt(phase, candidate, prefix);
       return source && input.source === source ? resume(phase) : stay(phase);
