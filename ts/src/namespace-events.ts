@@ -59,7 +59,7 @@ const stopped = new WeakSet<NamespaceEvents>();
 
 /**
  * Whether the request's stream has failed and its ending waits out the closure grace: nothing more arrives. The
- * supervised subscriber's discovery reads it so a member's 100 ms does not run out on a stream that is gone.
+ * supervised subscriber's discovery reads it so a publishing root's 100 ms does not run out on a stream that is gone.
  */
 export function isStopped(events: NamespaceEvents): boolean {
   return stopped.has(events);

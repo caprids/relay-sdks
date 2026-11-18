@@ -857,8 +857,9 @@ taken over.
     ended the track, so only an announcement the watch saw follow a withdrawal wakes the wait. In
     every case the backoff still runs as the fallback. A watch that cannot open or that ends
     leaves the backoff alone. The watch is one more user of the connection's
-    [shared discovery](#shared-discovery): a followed root or member view over the namespace
-    serves it, and a wider one opened later takes it over without losing what it saw. Measured through
+    [shared discovery](#shared-discovery): a followed root or publishing-roots view over the
+    namespace serves it, and a wider one opened later takes it over without losing what it saw.
+    Measured through
     relay.mux.global, this picks up a replacement 60-145 ms after it announces, against 1.6-7.2 s
     once the backoff has grown ([relay-interop.md](relay-interop.md#on-0179-behind-relaymuxglobal)).
   - **Surfaced, after which the want stops and is forgotten:** a rejection that no wait fixes.
@@ -946,94 +947,96 @@ taken over.
   the want's parameters, so objects published between two subscriptions are not delivered. A move
   leaves no gap only as far as its `until` and drain allow. Trailing objects
   after a `PUBLISH_DONE` are discarded when the subscription is cancelled for its replacement.
-- `close()` cancels every want, closes every member view without calling its handlers, and closes
-  the connection.
+- `close()` cancels every want, closes every publishing-roots view without calling its handlers,
+  and closes the connection.
 
-### Members
+### Publishing roots
 
-A supervised subscriber can report who is present under a root, so an application can build a room
-roster with no server state beyond minting tokens ([issue #422](https://github.com/muxinc/relay-sdks/issues/422)).
-`subscriber.members({ root }, { onChanged, onError })` in TS and
-`subscriber.members(root, MembersHandlers(on_changed=..., on_error=...))` in Python return `Members`
-(`loaded`, `present`, `close()`). TS gives `present` as a map by id, Python as a tuple of `Member`
-in the same order.
+A supervised subscriber can report the roots that are publishing now under a prefix, so an
+application can build a room roster with no server state beyond minting tokens
+([issue #422](https://github.com/muxinc/relay-sdks/issues/422)). Publishing means announced, not
+necessarily sending objects. `subscriber.publishingRoots({ prefix }, { onChanged, onError })` in TS
+and `subscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))` in
+Python return `PublishingRoots` (`loaded`, `present`, `close()`). TS gives `present` as a map by id,
+Python as a tuple of `PublishingRoot` in the same order.
 
-- **Who is a member.** Each namespace one field below the root is a member, named by that field
-  (`Member`: `id`, and `namespace`, the root followed by `id`). A namespace two fields below the root
-  is one of the member's generations, as a supervised publisher announces them. A member with only
-  its own namespace announced is an unsupervised publisher. Deeper namespaces, and the root itself,
-  are ignored.
-- **Joining and leaving.** A member joins when its first namespace is announced. When its last
-  namespace is withdrawn, it leaves once it has had none for 100 ms, so a namespace announced
+- **What a root is.** Each namespace one field below the prefix is a root, named by that field
+  (`PublishingRoot`: `id`, and `namespace`, the prefix followed by `id`). The layout is a contract:
+  a namespace two fields below the prefix is read as one of the root's generations, as a supervised
+  publisher announces them. A root with only its own namespace announced is an unsupervised
+  publisher (depth 1). Deeper namespaces, and the prefix itself, are ignored.
+- **Added and removed.** A root is added when its first namespace is announced. When its last
+  namespace is withdrawn, it is removed once it has had none for 100 ms, so a namespace announced
   within that time keeps it present with nothing reported. A supervised publisher's rotation
   announces the next generation as the old one goes, so it reports nothing, and neither do the
   relay's repeats. The 100 ms exists because the relay does not order two sessions' messages:
   when the rotating publisher had no demand, the subscriber saw the old generation withdrawn before
   the new one was announced in 24 of 75 rotations on 2026-11-03, by at most 0.2 ms, on ord and from
   fra
-  ([issue #424](https://github.com/muxinc/relay-sdks/issues/424)). A member leaves about 100 ms after
-  its publisher's clean `close()` reaches the relay (about 105 ms on the same relay, 210 ms from
-  another), and at the relay's idle timeout, about 10 to 12 s, after a crash. The 100 ms counts
+  ([issue #424](https://github.com/muxinc/relay-sdks/issues/424)). A root is removed about 100 ms
+  after its publisher's clean `close()` reaches the relay (about 105 ms on the same relay, 210 ms
+  from another), and at the relay's idle timeout, about 10 to 12 s, after a crash. The 100 ms counts
   only while the view's discovery is delivering. While its request is replaced by a covering one
-  ([shared discovery](#shared-discovery)), or after its stream has failed, a pending leave waits for
-  the next load, which settles it or starts the 100 ms again.
-- **`onChanged(change)`.** The first call is the load: `initial` is true and `joined` lists everyone
-  present, possibly nobody. It runs once, even for an empty root. Every later call names at least one
-  member in `joined` or `left`. `present` is everyone after the change, by id, in the order the view
-  first saw them. It is the same object until membership changes, so a UI can compare it by identity.
+  ([shared discovery](#shared-discovery)), or after its stream has failed, a pending removal waits
+  for the next load, which settles it or starts the 100 ms again.
+- **`onChanged(change)`.** The first call is the load: `initial` is true and `added` lists every
+  root publishing, possibly none. It runs once, even for an empty prefix. Every later call names at
+  least one root in `added` or `removed`. `present` is every root after the change, by id, in the
+  order the view first saw them. It is the same object until the set of roots changes, so a UI can
+  compare it by identity.
 - **`loaded` and `present`.** `loaded` is false and `present` is empty until the first load. After
-  it, `present` is empty only when nobody is there. The first load waits for
+  it, `present` is empty only when no root is publishing. The first load waits for
   [the snapshot boundary](#discovery), so it comes about one round trip plus `SNAPSHOT_QUIET_MS`
   after the connection is up, or right after the counted snapshot with MoQ Active Count.
-- **Across connections.** A member view never reports the connection changing.
+- **Across connections.** A publishing-roots view never reports the connection changing.
   - A [rotation](#rotation): the view follows the old connection's discovery until the new
-    connection's discovery has loaded, then reports the difference, normally none. Newcomers join at
-    once. A member the old discovery still shows but the new snapshot does not leaves only once the
-    new discovery has shown it no namespace for 100 ms, since a member who announced just after the
-    new snapshot was taken reaches the old session first. The view keeps the old connection open
-    meanwhile, as a want's subscription does, for at most the 10 s overlap.
+    connection's discovery has loaded, then reports the difference, normally none. New roots are
+    added at once. A root the old discovery still shows but the new snapshot does not is removed
+    only once the new discovery has shown it no namespace for 100 ms, since a root announced just
+    after the new snapshot was taken reaches the old session first. The view keeps the old
+    connection open meanwhile, as a want's subscription does, for at most the 10 s overlap.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
     connection is up and while the next connection's discovery loads. Then it reports the
-    difference in one `onChanged`: newcomers in `joined`, and members who left meanwhile in `left`,
-    with no 100 ms wait, since the new discovery's snapshot is the relay's state at one instant. A
-    member whose 100 ms was running, or ran out while no discovery was followed, stays when the
-    snapshot shows it. When the snapshot does not, its 100 ms starts again on the new discovery,
-    and its leave comes in a later `onChanged`, since a snapshot taken between a publisher
-    rotation's withdrawal and its next announce misses it. Members still there report nothing,
+    difference in one `onChanged`: new roots in `added`, and roots that stopped meanwhile in
+    `removed`, with no 100 ms wait, since the new discovery's snapshot is the relay's state at one
+    instant. A root whose 100 ms was running, or ran out while no discovery was followed, stays when
+    the snapshot shows it. When the snapshot does not, its 100 ms starts again on the new discovery,
+    and its removal comes in a later `onChanged`, since a snapshot taken between a publisher
+    rotation's withdrawal and its next announce misses it. Roots still there report nothing,
     whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `NOT_SUPPORTED` from a relay without
     namespace discovery) calls `onError`, and the view is closed.
 - **Handlers** must be synchronous, as a want's are. A throw from `onChanged` is logged and the view
-  carries on. Handlers never run inside `members()` itself. `close()` is idempotent, and nothing is
-  delivered after it.
-- **Arguments** are checked at once: an options object in TS, `MembersHandlers` with an `on_changed`
-  in Python, and a root that follows the namespace rules with room for the two fields under it (1 to
-  30 fields). The token must allow discovering the root. A root outside the token's grant loads with
-  nobody, since the relay accepts the request and sends nothing
+  carries on. Handlers never run inside `publishingRoots()` itself. `close()` is idempotent, and
+  nothing is delivered after it.
+- **Arguments** are checked at once: an options object in TS, `PublishingRootsHandlers` with an
+  `on_changed` in Python, and a prefix that follows the namespace rules with room for the two fields
+  under it (1 to 30 fields). The token must allow discovering the prefix. A prefix outside the
+  token's grant loads with no roots, since the relay accepts the request and sends nothing
   ([namespace discovery](relay-interop.md#namespace-discovery)), and `onError` is never called. An
-  empty roster with no error can therefore mean the token does not grant the root.
+  empty view with no error can therefore mean the token does not grant the prefix.
 - **Limits.** Without MoQ Active Count the load is an estimate. A snapshot that loss splits by more
-  than `SNAPSHOT_QUIET_MS` shows its late members as later joins on the first load, and as a `left`
-  then a `joined` after a reconnect. A member who announces just before a subscriber rotation to
+  than `SNAPSHOT_QUIET_MS` shows its late roots as later additions on the first load, and as a
+  removal then an addition after a reconnect. A root announced just before a subscriber rotation to
   another relay can do the same when the new relay learns of it more than 100 ms after its snapshot.
 
 ### Shared discovery
 
 A supervised subscriber connection opens at most one SUBSCRIBE_NAMESPACE per prefix tree, shared by
 every want that follows generations, every want waiting for its namespace to be announced again,
-and every member view.
+and every publishing-roots view.
 
 - A root under the prefix of an open request is served from that request by filtering, and nothing
-  is sent. A want under a member view's root therefore subscribes on the generation the view's
-  request already saw.
+  is sent. A want under a publishing-roots view's prefix therefore subscribes on the generation
+  the view's request already saw.
 - A root that covers open requests replaces them with one request on the root. Draft-22 §9.15
   forbids overlapping requests on one session, so the replacement is break-before-make. Each want and
   view on a replaced request keeps what it saw while the new request loads, and only the differences
-  are reported: a want keeps its subscription, and a view reports nothing unless someone came or went
-  in between. A view reports them one by one, not as one change: a newcomer as soon as the new
-  request announces it, and a member the load does not confirm once it has had no namespace for
+  are reported: a want keeps its subscription, and a view reports nothing unless a root was added or
+  removed in between. A view reports them one by one, not as one change: a new root as soon as the
+  new request announces it, and a root the load does not confirm once it has had no namespace for
   100 ms after the load.
 - A request stays open 5 s after its last want or view goes, so one that resubscribes at once reuses
   it, and it never narrows while it is in use. `PREFIX_OVERLAP` therefore never arises between wants
@@ -1041,9 +1044,9 @@ and every member view.
   discovery.
 - A request's ending (a REQUEST_ERROR, or the relay finishing it) belongs to the wants and views on
   its own root. Each want or view under that root moves to a request on its own root the same way,
-  keeping what it saw, so a member view refused on its root never fails or restarts a want under it.
-  The `unannounced` events `namespaceEvents` yields for a clean end are part of that ending, so no
-  want or view sees them as withdrawals.
+  keeping what it saw, so a publishing-roots view refused on its prefix never fails or restarts a
+  want under it. The `unannounced` events `namespaceEvents` yields for a clean end are part of that
+  ending, so no want or view sees them as withdrawals.
 - A covering request follows the token's grant, and moq-relay answers a prefix outside the grant
   with REQUEST_OK and nothing. A want under such a root then loses its generation when the covering
   request loads. Give the subscriber a token that allows discovering the widest root it follows.

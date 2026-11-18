@@ -16,6 +16,16 @@ of that field, and the SDK never splits, joins or prefixes. The one exception is
 publisher, which appends one generation field to the application's root. It is never a single string.
 _Avoid_: path, prefix, channel, broadcast
 
+**Root**:
+The namespace one field below a prefix that a publisher announces at or under: a supervised
+publisher's own namespace, which it never announces itself, with its generations one field below
+it, or an unsupervised publisher's namespace with no generation field (depth 1), which it announces
+as is. A root is publishing while anything at or one field below it is announced, whether or not it
+sends objects. It is not the token's `root` claim, which is the prefix
+the token grants and the endpoint's path.
+_Avoid_: member (room-coupled, and the presence helper's member is a root with a document),
+publisher (the connection handle), peer, node, child
+
 **Track name**:
 The string that names one track within a namespace. The two together are the full track name the
 relay routes on. Non-empty, in both roles.

@@ -67,9 +67,9 @@ without a row here is a bug.
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
-| Follow who is present under a root, across reconnects and rotations | `subscriber.members(MembersOptions, MembersHandlers)` (`root`) returns `Members` (`loaded`, `present`, `close()`) | `subscriber.members(root, MembersHandlers)` returns `Members` (`loaded`, `present` as a tuple, `close()`) |
-| One participant under a root | `Member` (`id`, `namespace`) | `Member` (`id`, `namespace`) |
-| A member view loaded, or members joined or left | `onChanged(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `onError(error)` | `on_changed(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `on_error(error)` |
+| Follow the roots publishing under a prefix, across reconnects and rotations | `subscriber.publishingRoots(PublishingRootsOptions, PublishingRootsHandlers)` (`prefix`) returns `PublishingRoots` (`loaded`, `present`, `close()`) | `subscriber.publishing_roots(prefix, PublishingRootsHandlers)` returns `PublishingRoots` (`loaded`, `present` as a tuple, `close()`) |
+| One root publishing under a prefix | `PublishingRoot` (`id`, `namespace`) | `PublishingRoot` (`id`, `namespace`) |
+| A publishing-roots view loaded, or roots were added or removed | `onChanged(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `onError(error)` | `on_changed(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `on_error(error)` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | `subscriber.catch_up(key)`; `on_restarted` reason `"catch-up"` |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
@@ -82,7 +82,8 @@ without a row here is a bug.
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
 returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb. A
-standing request reports through synchronous handlers instead, as `subscribe`, `want` and `members` do.
+standing request reports through synchronous handlers instead, as `subscribe`, `want` and
+`publishingRoots` do.
 
 ## Connection roles: `connectRelaySubscriber`, `connectRelayPublisher`
 
@@ -308,27 +309,37 @@ for what it yields); `subscribeNamespace()` (the core's protocol name, which `tr
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
 
-## Members: `members`, `Member`, `onChanged`
+## Publishing roots: `publishingRoots`, `PublishingRoot`, `onChanged`
 
-`subscriber.members({ root }, { onChanged })` reports who is present under a root
-([behavior.md](behavior.md#members)). A member is a participant, named by the field one below the
-root, and the word is the one a room's roster uses. The call is a noun for what it keeps, as `want`
-is, because it is a standing request on the supervisor, not a single request: it outlives
-connections and reports through synchronous handlers, as a want does. `onChanged` takes one
-`MembersChange` (`joined`, `left`, `present`, `initial`), so the load and every later change go
-through one handler: a caller that acts on "this member is here" has one place to do it, and cannot
-forget the initial members. `present` and `loaded` on the returned `Members` are state, read as
-properties.
+`subscriber.publishingRoots({ prefix }, { onChanged })` reports the roots that are publishing now
+under a prefix ([behavior.md](behavior.md#publishing-roots)). A root is the namespace one field
+below the prefix that a publisher announces at or one field under, as CONTEXT.md defines it, and
+publishing means announced, not necessarily sending objects. The name says what the relay knows, a root with
+something announced, and claims nothing about who is behind it. The option is `prefix`, as on
+`namespaceEvents`. The call is a noun for what it keeps, as `want` is, because it is a standing
+request on the supervisor, not a single request: it outlives connections and reports through
+synchronous handlers, as a want does. `onChanged` takes one `PublishingRootsChange` (`added`,
+`removed`, `present`, `initial`), so the load and every later change go through one handler: a
+caller that acts on "this root is publishing" has one place to do it, and cannot forget the roots
+already there. `added` and `removed` describe a set changing, and leave `joined` and `left` to the
+presence helper, whose roster is people. `present` and `loaded` on the returned `PublishingRoots`
+are state, read as properties.
 
-Not adopted: `memberChanges()` returning an async iterator with coalesced changes (it suits a consumer
-that awaits per member, but it reads the roster one async hop behind the want handlers it would
-drive, and the supervised layer reports through handlers); separate `onLoaded`, `onJoined` and
-`onLeft` (two entry points for one fact, and forgetting `onLoaded` silently drops everyone already
-there); `presence` (the per-member document a later helper adds on top); `roster` (the application's
-list, which may hold more than the relay knows); `participants` (longer, no gain); `watchMembers()`
-and `followMembers()` (CONTEXT.md lists "watch" and "follow" among the words to avoid for a standing
-request); a `depth` option (no
-caller needs a member deeper than one field, and it can be added without breaking this shape).
+Names considered for the call and not adopted: `members` (room-coupled, and `PresenceMember` in the
+presence helper is a different member, one with a document); `peers` (rejected by the operator);
+`publishers` (reads as the `RelayPublisher` and `SupervisedPublisher` handles); `publisherRoots`
+(asserts one publisher per entry, where a root is whatever announced under it); `children` and
+`nodes` (too generic); `feeds` (rejected); `announcers` (the runner-up: accurate, but it names the
+actor where the entries are namespaces).
+
+Also not adopted: an iterator returning coalesced changes (it suits a consumer that awaits per root,
+but it reads the set one async hop behind the want handlers it would drive, and the supervised
+layer reports through handlers); separate `onLoaded`, `onAdded` and `onRemoved` (two entry points
+for one fact, and forgetting `onLoaded` silently drops every root already there); `presence` (the
+per-participant document a later helper adds on top); `roster` (the application's list, which may
+hold more than the relay knows); `watch…()` and `follow…()` (CONTEXT.md lists "watch" and "follow"
+among the words to avoid for a standing request); a `depth` option (no caller needs a root deeper
+than one field, and it can be added without breaking this shape).
 
 ## Room-rooted endpoints: `roomEndpoint`
 

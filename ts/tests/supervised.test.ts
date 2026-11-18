@@ -1271,16 +1271,16 @@ describe('waking on the namespace announced again', () => {
     await until(() => v().length === 2, 'v woken through the root discovery');
   });
 
-  it("shares one request with a member view over the namespace: the view and the want's wake both work", async () => {
+  it("shares one request with a publishing-roots view over the namespace: the view and the want's wake both work", async () => {
     const { subscriber, connections } = await start();
     const fake = () => connections[0]!;
-    const changes: { joined: string[]; left: string[] }[] = [];
+    const changes: { added: string[]; removed: string[] }[] = [];
     const errors: unknown[] = [];
-    subscriber.members(
-      { root: ['room'] },
+    subscriber.publishingRoots(
+      { prefix: ['room'] },
       {
         onChanged: (change) =>
-          changes.push({ joined: change.joined.map((m) => m.id), left: change.left.map((m) => m.id) }),
+          changes.push({ added: change.added.map((m) => m.id), removed: change.removed.map((m) => m.id) }),
         onError: (error) => errors.push(error),
       },
     );
@@ -1303,9 +1303,9 @@ describe('waking on the namespace announced again', () => {
     await until(() => v().length === 2, 'v woken by the return');
     await until(() => changes.length === 3, 'alice returns');
     expect(changes).toEqual([
-      { joined: ['alice'], left: [] },
-      { joined: [], left: ['alice'] },
-      { joined: ['alice'], left: [] },
+      { added: ['alice'], removed: [] },
+      { added: [], removed: ['alice'] },
+      { added: ['alice'], removed: [] },
     ]);
     expect(errors).toEqual([]);
     expect(fake().discoveries[0]!.closed).toBe(false);
