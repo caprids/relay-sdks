@@ -229,8 +229,8 @@ export interface SupervisedSubscriber {
   rotate(): void;
   /**
    * Follow the roots that are publishing now under a prefix, across reconnects and rotations, with no roster server.
-   * Publishing means announced, not necessarily sending objects. A root is the field one below the prefix, publishing
-   * while its own namespace or one a field below it is announced, and removed once its last namespace has been
+   * Publishing means announced, not necessarily sending objects. A root is the namespace one field below the prefix,
+   * publishing while it or a namespace one field below it is announced, and removed once its last namespace has been
    * withdrawn for 100 ms (soon after a clean close, at the relay's idle timeout after a crash). The layout is a
    * contract: a namespace one field below a root, two below the prefix, is read as that root's generation, so a
    * supervised publisher's generations count as one root, and anything deeper is ignored.
