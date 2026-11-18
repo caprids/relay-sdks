@@ -76,7 +76,7 @@ from caprid_relay import (
     connect_supervised_publisher,
     connect_supervised_subscriber,
 )
-from moq_core import SubscribeOk
+from moq_core import MoqtObject, SubscribeOk
 
 ROTATE_SETTLE = 1.0
 RAW_LOADED_WAIT_MS = 3000
@@ -637,26 +637,40 @@ class Probe:
         assert main is not None
         await await_joined(initial)
 
-        want = {"objects": 0, "subscribed": 0, "switched": 0, "restarted": 0, "errors": 0}
+        want = {"objects": 0, "repeated": 0, "missing": 0, "subscribed": 0, "switched": 0, "restarted": 0, "errors": 0}
+        # The largest group the want delivered on its current subscription: `beat` is one object per group, in order.
+        last_group: int | None = None
         want_subscriber: SupervisedSubscriber | None = None
         if flags.want_generations:
             want_subscriber = main.supervised or await connect_supervised_subscriber(
                 self.relay.sub_url, get_token=self.relay.get_token, create_transport=self.relay.dial
             )
 
-            def on_object(_: object) -> None:
+            def on_object(obj: MoqtObject) -> None:
+                nonlocal last_group
                 want["objects"] += 1
+                if last_group is not None and obj.group_id <= last_group:
+                    want["repeated"] += 1
+                elif last_group is not None:
+                    want["missing"] += obj.group_id - last_group - 1
+                last_group = max(last_group or obj.group_id, obj.group_id)
 
             def on_subscribed(_: SubscribeOk, namespace: tuple[str, ...]) -> None:
+                nonlocal last_group
+                last_group = None
                 want["subscribed"] += 1
                 self.emit("want-subscribed", {"generation": namespace[-1], "objects": want["objects"]})
 
             def on_switched(info: WantSwitchedInfo) -> None:
+                nonlocal last_group
+                last_group = None
                 want["switched"] += 1
                 fields = {"from": info.from_namespace[-1], "to": info.to_namespace[-1], "objects": want["objects"]}
                 self.emit("want-switched", fields)
 
             def on_restarted(reason: str, namespace: tuple[str, ...]) -> None:
+                nonlocal last_group
+                last_group = None
                 want["restarted"] += 1
                 fields = {"reason": reason, "generation": namespace[-1], "objects": want["objects"]}
                 self.emit("want-restarted", fields)

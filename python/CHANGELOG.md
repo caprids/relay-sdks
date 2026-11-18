@@ -6,14 +6,24 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when the old connection delivers every object first, as in the TypeScript SDK (#430). A want whose target is
+  unchanged now cuts over at the replacement's first object, not at the first object the old subscription had not
+  delivered. Both connections receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once
+  each, and a subgroup end the old subscription reported is not reported again. On ord, with one want on a track
+  written every 100 ms, the old connection closed about 10 s after `rotate()` in 5 of 24 rotations before (over 1 s in
+  8), and 0.18 to 0.28 s after in all 72 (median 0.19 s). Nothing to change in an
+  application.
 - `caprid-relay`: `SupervisedSubscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`
   reports the roots that are publishing now under a prefix, across reconnects and the subscriber's own rotations, as in
   the TypeScript SDK (#422). Publishing means announced, not necessarily sending objects. Each namespace one field below
   the prefix is a root (`PublishingRoot`: `id`, `namespace`), and one a field below a root is read as that root's
   generation, so a supervised publisher's rotations and reconnects report nothing. The first `on_changed` is the load
   (`PublishingRootsChange.initial` true, every root publishing in `added`, possibly none), and `PublishingRoots.loaded`
-  tells "no root here" from "not loaded yet". After a reconnect the view reports only the roots added or removed
-  meanwhile, in one call. An application can build a room roster with no roster server.
+  tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports only the roots added
+  or removed meanwhile. New roots come in one call at the load. A root the new discovery misses is removed in a later
+  call, once the new discovery has shown it nothing for 0.1 s, so a snapshot taken inside a publisher rotation's gap
+  reports nothing (#427). An application can build a room roster with no roster server.
   `SupervisedSubscriber.close()` also closes every publishing-roots view, without calling its handlers.
 - `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations, every want waiting for its namespace to be announced again, and every

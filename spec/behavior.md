@@ -787,12 +787,18 @@ taken over.
   the new connection while the old subscription keeps delivering. A want following generations
   discovers the root on the new connection first. Then:
   - **Same target** (namespace, track and parameters): the same publisher's stream continues. The
-    replacement starts at the latest group, so its objects at or before the last location the old
-    subscription delivered are dropped, and the first one after it cuts over without `until`. No
-    callback marks it, no `onSwitched`, `onRestarted` or `onSubscribed`, and nothing is lost or
-    repeated, so decoders keep their state. The old subscription is cancelled, not drained. Once
-    any of the want's subscriptions has heard `PUBLISH_DONE`, nothing is dropped: a restarted
-    publisher numbers its groups from 0 again.
+    replacement's first object cuts over without `until`. The replacement starts at the latest
+    group, so that object is usually one the old subscription delivered. It is dropped, as is every
+    object at or before the last location the old subscription delivered, and delivery carries on
+    from the first one after it. A subgroup end the old subscription reported is not reported
+    again. The cutover does not wait for a new object: both connections receive each object within
+    a fraction of a millisecond, and while the old one delivers each first the replacement would
+    never take over, holding the old connection for the whole overlap. No callback marks the cutover, no `onSwitched`, `onRestarted` or `onSubscribed`,
+    and nothing is lost or repeated, so decoders keep their state. The old subscription is
+    cancelled, not drained. Once any of the want's subscriptions has heard `PUBLISH_DONE`, nothing
+    is dropped: a restarted publisher numbers its groups from 0 again. A want whose track sends
+    nothing and has no group cached at the relay has no first object, and keeps the old connection
+    open until the overlap ends.
   - **Another target**, a newer generation announced on the new connection or a re-want: an
     ordinary move, with `until`, the drain and `onSwitched`.
   - The old connection closing under the old subscription leaves the replacement to carry on, and
@@ -992,19 +998,20 @@ Python as a tuple of `PublishingRoot` in the same order.
 - **Across connections.** A publishing-roots view never reports the connection changing.
   - A [rotation](#rotation): the view follows the old connection's discovery until the new
     connection's discovery has loaded, then reports the difference, normally none. New roots are
-    added at once. A root the old discovery still shows but the new snapshot does not is removed
-    only once the new discovery has shown it no namespace for 100 ms, since a root announced just
-    after the new snapshot was taken reaches the old session first. The view keeps the old
-    connection open meanwhile, as a want's subscription does, for at most the 10 s overlap.
+    added at once. A root the new snapshot misses is removed only once the new discovery has shown
+    it no namespace for 100 ms, since a root announced just after the new snapshot was taken
+    reaches the old session first. The view keeps the old connection open meanwhile, as a want's
+    subscription does, for at most the 10 s overlap.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
-    connection is up and while the next connection's discovery loads. Then it reports the
-    difference in one `onChanged`: new roots in `added`, and roots that stopped meanwhile in
-    `removed`, with no 100 ms wait, since the new discovery's snapshot is the relay's state at one
-    instant. A root whose 100 ms was running, or ran out while no discovery was followed, stays when
-    the snapshot shows it. When the snapshot does not, its 100 ms starts again on the new discovery,
-    and its removal comes in a later `onChanged`, since a snapshot taken between a publisher
-    rotation's withdrawal and its next announce misses it. Roots still there report nothing,
-    whatever their generations did.
+    connection is up and while the next connection's discovery loads. At the load it reports the
+    new roots in one `onChanged`. It removes a root the new snapshot misses in a later `onChanged`,
+    once the new discovery has shown that root no namespace for 100 ms. So the view removes a root
+    that stopped during the outage about 100 ms after the load. The view waits because a snapshot
+    taken between a publisher rotation's withdrawal and its next announce misses a root that is
+    still publishing ([issue #427](https://github.com/muxinc/relay-sdks/issues/427)). The same
+    rule covers a root whose 100 ms was running, or ran out, when the old discovery ended. It
+    stays when the snapshot shows it, and its 100 ms starts again when the snapshot does not.
+    Roots still there report nothing, whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `NOT_SUPPORTED` from a relay without
@@ -1019,9 +1026,11 @@ Python as a tuple of `PublishingRoot` in the same order.
   ([namespace discovery](relay-interop.md#namespace-discovery)), and `onError` is never called. An
   empty view with no error can therefore mean the token does not grant the prefix.
 - **Limits.** Without MoQ Active Count the load is an estimate. A snapshot that loss splits by more
-  than `SNAPSHOT_QUIET_MS` shows its late roots as later additions on the first load, and as a
-  removal then an addition after a reconnect. A root announced just before a subscriber rotation to
-  another relay can do the same when the new relay learns of it more than 100 ms after its snapshot.
+  than `SNAPSHOT_QUIET_MS` shows its late roots as later additions on the first load. After a
+  reconnect or a rotation, the view reports a root the new snapshot misses as removed and then
+  added again only when the root's announce comes more than 100 ms after the load. Three things
+  can delay an announce that long: loss that splits the snapshot, a publisher rotation with a gap
+  that long, and a subscriber rotation to another relay that learns of a new root late.
 
 ### Shared discovery
 

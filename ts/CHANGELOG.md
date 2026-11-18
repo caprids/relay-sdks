@@ -24,15 +24,22 @@ each section says what changed and what to do about it. How to cut a release is 
 - `@caprid/moq-core`, `@caprid/relay`: a subscriber connection ends at once when the relay stops its control stream
   (§6.3: the control stream lives as long as the session), as a publisher connection already did, instead of carrying
   on until the transport's own close.
+- `@caprid/relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when the old connection delivers every object first (#430). A want whose target is unchanged now cuts over at the
+  replacement's first object, not at the first object the old subscription had not delivered. Both connections
+  receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once each, and a subgroup
+  end the old subscription reported is not reported again. On ord, with one want on a track written every 100 ms,
+  the old connection closed 0.2 to 2.3 s after `rotate()` before (median 0.36 s, over 1 s in 6 of 23 rotations) and
+  0.18 to 0.28 s after (median 0.19 s, 72 rotations). Nothing to change in an application.
 - `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
   are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
   announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field
   below a root is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
   first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
   `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
-  only the roots added or removed meanwhile, in one call. A root whose removal was already pending, or that the old
-  connection still showed, is removed in a later call once the new discovery has shown it nothing for 100 ms. An
-  application can build a room roster with no roster server.
+  only the roots added or removed meanwhile. New roots come in one call at the load. A root the new discovery misses
+  is removed in a later call, once the new discovery has shown it nothing for 100 ms, so a snapshot taken inside a
+  publisher rotation's gap reports nothing (#427). An application can build a room roster with no roster server.
 - `@caprid/relay/media`: presence, a live room roster with no roster server (#422). Each participant calls
   `publishPresence(publisher, document)` on its supervised publisher: the document (JSON) goes out on every relay
   subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls
