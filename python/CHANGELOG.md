@@ -6,6 +6,14 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when the old connection delivers every object first, as in the TypeScript SDK (#430). A want whose target is
+  unchanged now cuts over at the replacement's first object, not at the first object the old subscription had not
+  delivered. Both connections receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once
+  each, and a subgroup end the old subscription reported is not reported again. On ord, with one want on a track
+  written every 100 ms, the old connection closed about 10 s after `rotate()` in 5 of 24 rotations before (over 1 s in
+  8), and 0.18 to 0.28 s after in all 48 (median 0.19 s). Nothing to change in an
+  application.
 - `caprid-relay`: `SupervisedSubscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`
   reports the roots that are publishing now under a prefix, across reconnects and the subscriber's own rotations, as in
   the TypeScript SDK (#422). Publishing means announced, not necessarily sending objects. Each namespace one field below

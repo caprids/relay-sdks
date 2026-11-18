@@ -2036,12 +2036,12 @@ describe('rotation before the credential expires (#261)', () => {
     old.object(2);
     expect(old.cancelled).toBe(false);
     expect(connections[0]!.subscriptions).toHaveLength(1);
-    // The replacement starts at the latest group, which the old subscription already delivered: not repeated.
+    // The replacement starts at the latest group, which the old subscription already delivered: it takes over there,
+    // and the group is not repeated.
     replacement.object(2);
-    expect(old.cancelled).toBe(false);
+    expect(old.cancelled).toBe(true);
     replacement.object(3);
     old.object(4);
-    await until(() => old.cancelled, 'old subscription cancelled');
     expect(seen).toEqual(['subscribed', 'object 1', 'object 2', 'object 3']);
     expect(statuses).toEqual(['live']);
     // The old connection closes once every want moved; nothing reconnects after it.
@@ -2126,6 +2126,14 @@ describe('rotation before the credential expires (#261)', () => {
       ]);
       expect(statuses).toEqual(['live']);
       expect(connections).toHaveLength(2);
+    });
+
+    it('closes the old connection at the cached group of a track that sends nothing new', async () => {
+      const { seen, replacement, oldClosed } = await rotated();
+      sendGroup(replacement, 1);
+      await until(oldClosed, 'old connection closed at the cached group', 1_000);
+      sendGroup(replacement, 2);
+      expect(seen).toEqual(['subscribed', 'object 1.0', 'end 1', 'object 2.0', 'end 2']);
     });
 
     it('skips what the old connection delivered when the replacement is groups behind it', async () => {

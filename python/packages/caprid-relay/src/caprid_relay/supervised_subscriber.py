@@ -418,9 +418,9 @@ class SupervisedSubscriber:
 
         A new connection opens, with a fresh token, and every want moves its subscription to it as a
         move would, keeping the old one delivering until the cutover. A want whose target is unchanged
-        cuts over on the first object the old one did not deliver, with no callback: nothing is lost
-        or repeated. The old connection closes once every want has moved, after 10 seconds at most. A
-        no-op while no connection is up.
+        cuts over on the replacement's first object, with no callback, and an object the old one
+        delivered is not delivered again: nothing is lost or repeated. The old connection closes once
+        every want has moved, after 10 seconds at most. A no-op while no connection is up.
         """
         state = self._state
         if state.stopped or state.current is None:
@@ -1149,8 +1149,14 @@ class _Slot:
     latest: tuple[int, int] | None = None
     """The latest object it delivered, by location: a rotation's replacement skips what is at or before it."""
     skip_through: tuple[int, int] | None = None
-    """After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object
-    arriving late on another stream was delivered already, and is skipped."""
+    """After a rotation's silent cutover, the latest object its predecessors delivered: the replacement repeats
+    the latest group from its start, and an earlier object arriving late on another stream was delivered
+    already. Both are skipped."""
+    ends: tuple[int, frozenset[int]] | None = None
+    """The subgroup ends it delivered, of the latest group it delivered one in: the group, and its subgroups."""
+    skip_ends: tuple[int, frozenset[int]] | None = None
+    """After a rotation's silent cutover, the subgroup ends its predecessors delivered, which it does not repeat.
+    Nor those of earlier groups, which were the predecessors' to deliver."""
     progressed: bool = False
     """Whether it delivered an object from a later group than its first."""
     drain_through: int | None = None
@@ -1176,6 +1182,20 @@ class _Slot:
         if not _at_or_before(obj, self.latest):
             self.latest = (obj.group_id, obj.object_id)
 
+    def delivered_end(self, info: SubgroupEnd) -> None:
+        """Record a subgroup end this slot delivered. Only the latest group's are kept: a replacement starts there."""
+        if self.ends is None or info.group_id > self.ends[0]:
+            self.ends = (info.group_id, frozenset({info.subgroup_id}))
+        elif info.group_id == self.ends[0]:
+            self.ends = (info.group_id, self.ends[1] | {info.subgroup_id})
+
+    def repeats_end(self, info: SubgroupEnd) -> bool:
+        """Whether a predecessor delivered this subgroup end, or it is of a group that was the predecessor's."""
+        if self.skip_ends is None:
+            return False
+        group_id, subgroup_ids = self.skip_ends
+        return info.group_id < group_id or (info.group_id == group_id and info.subgroup_id in subgroup_ids)
+
 
 def _is_progress(obj: MoqtObject, first_group: int | None) -> bool:
     """Whether ``obj`` shows the track moving on: an object with a payload in a group after ``first_group``. A status
@@ -1190,6 +1210,17 @@ def _later(a: tuple[int, int] | None, b: tuple[int, int] | None) -> tuple[int, i
     if b is None:
         return a
     return max(a, b)
+
+
+def _later_ends(
+    a: tuple[int, frozenset[int]] | None, b: tuple[int, frozenset[int]] | None
+) -> tuple[int, frozenset[int]] | None:
+    """The subgroup ends of the later group, or of both when they are of the same group."""
+    if a is None or b is None:
+        return a or b
+    if a[0] != b[0]:
+        return a if a[0] > b[0] else b
+    return (a[0], a[1] | b[1])
 
 
 def _at_or_before(obj: MoqtObject, latest: tuple[int, int] | None) -> bool:
@@ -1221,8 +1252,8 @@ async def _follow(
     A move (a newer generation, or a re-want with another track or parameters) is made before the
     break: the replacement opens pending while the active subscription keeps delivering, and takes
     over once one of its objects passes ``until``. A rotation is a move to the next connection: with
-    the target unchanged, the replacement takes over at the first object the active one had not
-    delivered, and no callback marks it.
+    the target unchanged, the replacement takes over at its first object, delivers only what the active
+    one had not, and no callback marks it.
     """
     loop = asyncio.get_running_loop()
     # The followed root's discovery on the active subscription's connection.
@@ -1389,7 +1420,9 @@ async def _follow(
         if on.ended.cancelled:
             closed()
 
-    def cutover(slot: _Slot, obj: MoqtObject) -> None:
+    def cutover(slot: _Slot, obj: MoqtObject, repeated: bool = False) -> None:
+        """``slot`` takes over at ``obj``, which is delivered unless the old subscription delivered it
+        (``repeated``)."""
         nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch
         nonlocal unwatch_next
         previous = active
@@ -1398,6 +1431,7 @@ async def _follow(
         # Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
         if silent and not target_ended(slot) and previous.ended != "publisher-done":
             slot.skip_through = _later(previous.latest, previous.skip_through)
+            slot.skip_ends = _later_ends(previous.ends, previous.skip_ends)
         ended_targets.clear()
         pending = None
         clear_retry()
@@ -1447,9 +1481,10 @@ async def _follow(
                 _log.exception("%s raised at a cutover; the want delivers regardless", name)
 
         # A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-        slot.delivered(obj)
-        if not over() and active is slot:
-            deliver("on_object", obj)
+        if not repeated:
+            slot.delivered(obj)
+            if not over() and active is slot:
+                deliver("on_object", obj)
         for held in replay:
             if over() or active is not slot:
                 break
@@ -1460,7 +1495,9 @@ async def _follow(
                 slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
                 deliver("on_object", held.value)
             elif isinstance(held, SubgroupEndEvent):
-                deliver("on_subgroup_end", held.value)
+                if not slot.repeats_end(held.value):
+                    slot.delivered_end(held.value)
+                    deliver("on_subgroup_end", held.value)
             else:
                 deliver("on_subgroup_reset", held.value)
 
@@ -1493,17 +1530,20 @@ async def _follow(
             on_ended(active, active.subscription.ended.result())
             if over() or pending is not slot:
                 return
-        # A rotation's replacement starts at the latest group, which the active subscription may have delivered:
-        # skip it. Not once the publisher ended or the subscription was ended by it: a restarted publisher
-        # numbers from 0 again.
+        # A rotation's replacement starts at the latest group, which the active subscription may have delivered.
+        # Its first object shows the same stream flowing on the new connection, so it cuts over there, and a
+        # repeated object is not delivered again. Waiting for a new object instead would hold the old connection
+        # for as long as it delivers each one first. Not once the publisher ended or the subscription was ended
+        # by it: a restarted publisher numbers from 0 again.
         rotation = rotating(slot)
         # Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected
         # subscription does not.
         continues = not target_ended(slot) and active.ended != "publisher-done"
-        if rotation and continues and _at_or_before(obj, active.latest):
+        if rotation and continues and _at_or_before(obj, _later(active.latest, active.skip_through)):
+            cutover(slot, obj, repeated=True)
             return
         # With the active subscription gone there is nothing left to compare with: the next object cuts over. A
-        # rotation's replacement continues the same stream, so its first new object does too.
+        # rotation's replacement continues the same stream, so its first object does too.
         passed = True
         if active.ended is None and not rotation:
             try:
@@ -1532,7 +1572,11 @@ async def _follow(
         if slot is pending and not over():
             _hold(slot.held, event)
         elif reaches(slot, event.value.group_id):
-            want.call("on_subgroup_end" if isinstance(event, SubgroupEndEvent) else "on_subgroup_reset", event.value)
+            if isinstance(event, SubgroupResetEvent):
+                want.call("on_subgroup_reset", event.value)
+            elif not slot.repeats_end(event.value):
+                slot.delivered_end(event.value)
+                want.call("on_subgroup_end", event.value)
 
     def on_publisher_done(slot: _Slot, info: PublishDone) -> None:
         if over():

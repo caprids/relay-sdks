@@ -222,9 +222,9 @@ export interface SupervisedSubscriber {
   /**
    * Replace the connection make-before-break, as happens on its own `rotateBeforeMs` before the credential expires: a
    * new connection opens, with a fresh token, and every want moves its subscription to it as a move would, keeping the
-   * old one delivering until the cutover. A want whose target is unchanged cuts over on the first object the old one did
-   * not deliver, with no callback: nothing is lost or repeated. The old connection closes once every want has moved,
-   * after 10 seconds at most. A no-op while no connection is up.
+   * old one delivering until the cutover. A want whose target is unchanged cuts over on the replacement's first object,
+   * with no callback, and an object the old one delivered is not delivered again: nothing is lost or repeated. The old
+   * connection closes once every want has moved, after 10 seconds at most. A no-op while no connection is up.
    */
   rotate(): void;
   /**
@@ -1061,12 +1061,20 @@ interface Slot {
   firstGroup?: number;
   largestGroup?: number;
   /** The latest object it delivered, by location: a rotation's replacement skips what is at or before it. */
-  latest?: { groupId: number; objectId: number };
+  latest?: Location;
   /**
-   * After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object arriving late on
-   * another stream was delivered already, and is skipped.
+   * After a rotation's silent cutover, the latest object its predecessors delivered: the replacement repeats the
+   * latest group from its start, and an earlier object arriving late on another stream was delivered already. Both
+   * are skipped.
    */
-  skipThrough?: { groupId: number; objectId: number } | undefined;
+  skipThrough?: Location | undefined;
+  /** The subgroup ends it delivered, of the latest group it delivered one in. */
+  ends?: SubgroupEnds;
+  /**
+   * After a rotation's silent cutover, the subgroup ends its predecessors delivered, which it does not repeat. Nor
+   * those of earlier groups, which were the predecessors' to deliver.
+   */
+  skipEnds?: SubgroupEnds | undefined;
   /** Whether it delivered an object from a later group than its first. */
   progressed: boolean;
   /** While draining after a cutover: the largest group it had delivered, through which its events still reach the handlers. */
@@ -1086,12 +1094,14 @@ function isProgress(object: MoqtObject, firstGroup: number | undefined): boolean
 }
 
 /** Whether `object` is at or before `latest`, by group and then object ID. */
-function atOrBefore(object: MoqtObject, latest: { groupId: number; objectId: number } | undefined): boolean {
+function atOrBefore(object: MoqtObject, latest: Location | undefined): boolean {
   if (latest === undefined) return false;
   return object.groupId < latest.groupId || (object.groupId === latest.groupId && object.objectId <= latest.objectId);
 }
 
 type Location = { groupId: number; objectId: number };
+/** The subgroups of one group whose end was delivered. */
+type SubgroupEnds = { groupId: number; subgroupIds: Set<number> };
 
 /** The later of two locations, either of which may be unknown. */
 function later(a: Location | undefined, b: Location | undefined): Location | undefined {
@@ -1105,6 +1115,20 @@ function delivered(slot: Slot, object: MoqtObject): void {
   if (!atOrBefore(object, slot.latest)) slot.latest = { groupId: object.groupId, objectId: object.objectId };
 }
 
+/** Record a subgroup end `slot` delivered. Only the latest group's are kept: a replacement starts there. */
+function deliveredEnd(slot: Slot, info: { groupId: number; subgroupId: number }): void {
+  if (slot.ends === undefined || info.groupId > slot.ends.groupId) {
+    slot.ends = { groupId: info.groupId, subgroupIds: new Set([info.subgroupId]) };
+  } else if (info.groupId === slot.ends.groupId) slot.ends.subgroupIds.add(info.subgroupId);
+}
+
+/** The subgroup ends of the later group, or of both when they are of the same group. */
+function laterEnds(a: SubgroupEnds | undefined, b: SubgroupEnds | undefined): SubgroupEnds | undefined {
+  if (a === undefined || b === undefined) return a ?? b;
+  if (a.groupId !== b.groupId) return a.groupId > b.groupId ? a : b;
+  return { groupId: a.groupId, subgroupIds: new Set([...a.subgroupIds, ...b.subgroupIds]) };
+}
+
 /** What a subscription is made with, as a comparable key. */
 function targetKey(namespace: readonly string[], track: string, parameters: MessageParameters | undefined): string {
   return JSON.stringify([namespace, track, parameters ?? null], (_, value) =>
@@ -1116,8 +1140,8 @@ function targetKey(namespace: readonly string[], track: string, parameters: Mess
  * The want's subscriptions from the first SUBSCRIBE on `connection` to whatever ends the attempt. A move (a newer
  * generation, or a re-want with another track or parameters) is made before the break: the replacement opens pending
  * while the active subscription keeps delivering, and takes over once one of its objects passes `until`. A rotation is
- * a move to the next connection: with the target unchanged, the replacement takes over at the first object the active
- * one had not delivered, and no callback marks it.
+ * a move to the next connection: with the target unchanged, the replacement takes over at its first object, delivers
+ * only what the active one had not, and no callback marks it.
  */
 async function follow(
   want: Want,
@@ -1281,13 +1305,15 @@ async function follow(
     if (on.signal.aborted) closed();
   };
 
-  const cutover = (slot: Slot, object: MoqtObject) => {
+  /** `slot` takes over at `object`, which is delivered unless the old subscription delivered it (`repeated`). */
+  const cutover = (slot: Slot, object: MoqtObject, repeated = false) => {
     const from = active;
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
     // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
     if (silent && !endedTargets.has(slot.key) && from.ended !== 'publisher-done') {
       slot.skipThrough = later(from.latest, from.skipThrough);
+      slot.skipEnds = laterEnds(from.ends, from.skipEnds);
     }
     endedTargets.clear();
     pending = undefined;
@@ -1345,8 +1371,10 @@ async function follow(
       }
     };
     // A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-    delivered(slot, object);
-    if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
+    if (!repeated) {
+      delivered(slot, object);
+      if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
+    }
     for (const event of replay) {
       if (over() || active !== slot) break;
       if (event.type === 'object') {
@@ -1354,9 +1382,21 @@ async function follow(
         if (isProgress(event.value, slot.firstGroup)) slot.progressed = true;
         if (event.value.groupId > (slot.largestGroup as number)) slot.largestGroup = event.value.groupId;
         deliver(() => handlers().onObject?.(event.value));
-      } else if (event.type === 'subgroupEnd') deliver(() => handlers().onSubgroupEnd?.(event.value));
+      } else if (event.type === 'subgroupEnd') deliver(() => onSubgroupEnd(slot, event.value));
       else deliver(() => handlers().onSubgroupReset?.(event.value));
     }
+  };
+
+  /** A subgroup end of the active subscription, or of one draining: once, across a rotation's cutover. */
+  const onSubgroupEnd = (slot: Slot, info: { groupId: number; subgroupId: number; endOfGroup: boolean }) => {
+    const skip = slot.skipEnds;
+    if (
+      skip &&
+      (info.groupId < skip.groupId || (info.groupId === skip.groupId && skip.subgroupIds.has(info.subgroupId)))
+    )
+      return;
+    deliveredEnd(slot, info);
+    handlers().onSubgroupEnd?.(info);
   };
 
   const onObject = (slot: Slot | undefined, object: MoqtObject) => {
@@ -1384,15 +1424,21 @@ async function follow(
       onEnded(active, activeEnd);
       if (over() || pending !== slot) return;
     }
-    // A rotation's replacement starts at the latest group, which the active subscription may have delivered: skip it.
-    // Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from 0 again.
+    // A rotation's replacement starts at the latest group, which the active subscription may have delivered. Its first
+    // object shows the same stream flowing on the new connection, so it cuts over there, and a repeated object is not
+    // delivered again. Waiting for a new object instead would hold the old connection for as long as it delivers each
+    // one first. Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from
+    // 0 again.
     const rotation = rotating(slot);
     // Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected subscription
     // does not.
     const continues = !endedTargets.has(slot.key) && active.ended !== 'publisher-done';
-    if (rotation && continues && atOrBefore(object, active.latest)) return;
+    if (rotation && continues && atOrBefore(object, later(active.latest, active.skipThrough))) {
+      cutover(slot, object, true);
+      return;
+    }
     // With the active subscription gone there is nothing left to compare with: the next object cuts over. A rotation's
-    // replacement continues the same stream, so its first new object does too.
+    // replacement continues the same stream, so its first object does too.
     let passed = true;
     if (!active.ended && !rotation) {
       try {
@@ -1451,7 +1497,7 @@ async function follow(
         onObject: (object) => onObject(slot, object),
         onSubgroupEnd: (info) => {
           if (slot && slot === pending && !over()) holdEvent(slot.held, { type: 'subgroupEnd', value: info });
-          else if (reaches(slot, info.groupId)) handlers().onSubgroupEnd?.(info);
+          else if (slot && reaches(slot, info.groupId)) onSubgroupEnd(slot, info);
         },
         onSubgroupReset: (info) => {
           if (slot && slot === pending && !over()) holdEvent(slot.held, { type: 'subgroupReset', value: info });

@@ -2002,12 +2002,12 @@ async def test_rotation_moves_a_want_to_the_new_connection_with_no_callback_and_
     old.send_object(2)
     assert not old.cancelled
     assert len(s.first.subscriptions) == 1
-    # The replacement starts at the latest group, which the old subscription already delivered: not repeated.
+    # The replacement starts at the latest group, which the old subscription already delivered: it takes over
+    # there, and the group is not repeated.
     replacement.send_object(2)
-    assert not old.cancelled
+    assert old.cancelled
     replacement.send_object(3)
     old.send_object(4)
-    await until(lambda: old.cancelled, "old subscription cancelled")
     assert seen == ["subscribed", "object 1", "object 2", "object 3"]
     assert s.statuses == ["live"]
     # The old connection closes once every want moved; nothing reconnects after it.
@@ -2098,6 +2098,16 @@ async def test_rotation_closes_the_old_connection_well_before_the_overlap_when_i
     assert seen == ["subscribed", *(event for g in range(1, 6) for event in (f"object {g}.0", f"end {g}"))]
     assert s.statuses == ["live"]
     assert len(s.connections) == 2
+
+
+async def test_rotation_closes_the_old_connection_at_the_cached_group_of_a_track_that_sends_nothing_new(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    s, seen, _old, replacement = await _rotated_want(cleanup)
+    _send_group(replacement, 1)
+    await until(lambda: s.first.closed.done(), "old connection closed at the cached group", timeout=1)
+    _send_group(replacement, 2)
+    assert seen == ["subscribed", "object 1.0", "end 1", "object 2.0", "end 2"]
 
 
 async def test_rotation_skips_what_the_old_connection_delivered_when_the_replacement_is_groups_behind_it(

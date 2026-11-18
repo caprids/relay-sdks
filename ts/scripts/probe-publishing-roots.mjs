@@ -744,7 +744,9 @@ async function runProbe() {
   if (flags['subscriber-after']) await startSubscriber();
   await awaitJoined(initial);
 
-  const want = { objects: 0, subscribed: 0, switched: 0, restarted: 0, errors: 0 };
+  const want = { objects: 0, repeated: 0, missing: 0, subscribed: 0, switched: 0, restarted: 0, errors: 0 };
+  /** The largest group the want delivered on its current subscription: `beat` is one object per group, in order. */
+  let lastGroup;
   let wantSubscriber;
   if (flags['want-generations']) {
     wantSubscriber = main.supervised ?? (await connectSupervisedSubscriber({ url: subUrl, getToken, ...trust }));
@@ -752,18 +754,24 @@ async function runProbe() {
       'beat',
       { namespace: [...prefix, 'p0'], track: 'beat', generations: true },
       {
-        onObject: () => {
+        onObject: ({ groupId }) => {
           want.objects += 1;
+          if (lastGroup !== undefined && groupId <= lastGroup) want.repeated += 1;
+          else if (lastGroup !== undefined) want.missing += groupId - lastGroup - 1;
+          lastGroup = Math.max(lastGroup ?? groupId, groupId);
         },
         onSubscribed: (_info, { namespace }) => {
+          lastGroup = undefined;
           want.subscribed += 1;
           emit('want-subscribed', { generation: namespace.at(-1), objects: want.objects });
         },
         onSwitched: ({ from, to }) => {
+          lastGroup = undefined;
           want.switched += 1;
           emit('want-switched', { from: from.namespace.at(-1), to: to.namespace.at(-1), objects: want.objects });
         },
         onRestarted: ({ reason, namespace }) => {
+          lastGroup = undefined;
           want.restarted += 1;
           emit('want-restarted', { reason, generation: namespace.at(-1), objects: want.objects });
         },
