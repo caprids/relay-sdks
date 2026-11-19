@@ -992,6 +992,26 @@ class TestPublishDriverTeardown:
             with pytest.raises(StreamClosedError):
                 await asyncio.wait_for(read_to_end(stream.readable), 1)
 
+    async def test_leaves_an_announce_carrier_unreset_when_it_ends(self) -> None:
+        # Under a transport whose close drains, the carrier's NAMESPACE_DONE may still be unacknowledged, and a reset
+        # would discard it (TA-16).
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            _,
+        ):
+            solicitation = await solicit_namespace(pair.server, ["live"])
+            await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
+
+            session.close()
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert solicitation.kinds() == ["request-ok", "namespace", "namespace-done"]
+            assert solicitation.failure() is None
+
     async def test_drops_a_request_whose_message_arrives_after_it_ends(self) -> None:
         closed: list[object] = []
 

@@ -484,8 +484,10 @@ class MoqtPublishSession:
         self._destroyed = False
         self._end_acknowledgements: set[asyncio.Task[None]] = set()
         """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet."""
-        self._request_readers: set[StreamReader] = set()
-        """The reader of every incoming request stream still being served: the end of the session stops them all."""
+        self._incoming_streams: dict[StreamReader, SendStream | None] = {}
+        """Every incoming stream still being read but the control stream, from its first read on, with the response
+        direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it over,
+        None for a unidirectional stream."""
 
         spawn(self._start())
 
@@ -561,8 +563,11 @@ class MoqtPublishSession:
             for subscriber in track.subscribers:
                 subscriber.cancel()
 
-        for reader in list(self._request_readers):
+        for reader, response in list(self._incoming_streams.items()):
             reader.cancel()
+            if response is not None:
+                response.abort()
+        self._incoming_streams.clear()
 
         self._tracks.clear()
         self._namespace_streams.clear()
@@ -955,7 +960,16 @@ class MoqtPublishSession:
 
     async def _handle_unidirectional_stream(self, stream: ReceiveStream) -> None:
         reader = StreamReader(stream)
-        stream_type = await reader.read_varint()
+        if self._destroyed:
+            reader.cancel()
+            return
+
+        self._incoming_streams[reader] = None
+
+        try:
+            stream_type = await reader.read_varint()
+        finally:
+            self._incoming_streams.pop(reader, None)
 
         if stream_type == STREAM_TYPE.SETUP:
             await self._run_control_stream(reader)
@@ -1023,12 +1037,17 @@ class MoqtPublishSession:
 
     async def _handle_incoming_request(self, stream: BidirectionalStream) -> None:
         reader = StreamReader(stream.readable)
-        self._request_readers.add(reader)
+        if self._destroyed:
+            reader.cancel()
+            stream.writable.abort()
+            return
+
+        self._incoming_streams[reader] = stream.writable
 
         try:
             await self._serve_request(stream, reader)
         finally:
-            self._request_readers.discard(reader)
+            self._incoming_streams.pop(reader, None)
 
     async def _serve_request(self, stream: BidirectionalStream, reader: StreamReader) -> None:
         message = await read_request(
@@ -1147,6 +1166,8 @@ class MoqtPublishSession:
             reader.cancel()
             return
 
+        # The carrier's NAMESPACE_DONE retractions are written by the drain, and an abort would discard them.
+        self._incoming_streams[reader] = None
         record = _NamespaceStream(prefix=prefix, writer=writer)
         self._received_namespace_solicitation = True
         self._namespace_streams.append(record)
@@ -1301,6 +1322,8 @@ class MoqtPublishSession:
         )
 
         track.subscribers.append(subscriber)
+        # Ending the session cancels the subscriber, which spares a request stream whose FIN was handed over.
+        self._incoming_streams[reader] = None
 
         try:
             await writer.write(subscribe_ok)
@@ -1316,7 +1339,7 @@ class MoqtPublishSession:
         # was still in flight. A stale completion must not steal the binding back onto an alias whose
         # stream is already ending, and a subscription that was never live is never reported
         # (`on_subscribe_end` pairs on the same flag, keeping subscriber counts balanced).
-        if not subscriber.finished:
+        if not subscriber.finished and self._serving():
             subscriber.reported = True
             _call(self._callbacks.on_subscribe, subscribe)
 

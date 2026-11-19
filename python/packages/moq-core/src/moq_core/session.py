@@ -80,7 +80,7 @@ from .object_stream import (
     read_subgroup_objects,
 )
 from .request_stream import RequestStream, RequestStreamHandlers, open_request_stream, read_request
-from .transport import BidirectionalStream, MoqtTransport, ReceiveStream
+from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 
 # ============================================================================
 # Public session surface
@@ -592,10 +592,9 @@ class MoqtSession:
         # Every request stream with a direction still open, answered or not: teardown cancels them all, whatever the
         # maps hold. One leaves once both directions are over, so a completed fetch is still forgotten (#419).
         self._request_streams: set[RequestStream] = set()
-        # Every incoming data stream still being read; the control stream is not one.
-        self._data_readers: set[StreamReader] = set()
-        # Drops each incoming request whose response has not been written yet.
-        self._incoming_requests: set[Callable[[], None]] = set()
+        # Every incoming stream still being read but the control stream, from its first read on, with the response
+        # direction teardown aborts: an incoming request's until its response has been written, None for a data stream.
+        self._incoming_streams: dict[StreamReader, SendStream | None] = {}
 
         loop = asyncio.get_running_loop()
         self.ready: asyncio.Future[None] = loop.create_future()
@@ -725,12 +724,11 @@ class MoqtSession:
         for stream in list(self._request_streams):
             stream.cancel(error)
 
-        for reader in list(self._data_readers):
+        for reader, response in list(self._incoming_streams.items()):
             reader.cancel(error)
-
-        for drop in list(self._incoming_requests):
-            drop()
-        self._incoming_requests.clear()
+            if response is not None:
+                response.abort()
+        self._incoming_streams.clear()
 
         for record in list(self._subscriptions.values()):
             self._remove_subscription(record)
@@ -1351,15 +1349,20 @@ class MoqtSession:
 
     async def _handle_unidirectional_stream(self, stream: ReceiveStream) -> None:
         reader = StreamReader(stream)
-        stream_type = await reader.read_varint()
-
-        if stream_type == STREAM_TYPE.SETUP:
-            await self._run_control_stream(reader)
+        if self._destroyed:
+            reader.cancel()
             return
 
-        self._data_readers.add(reader)
+        self._incoming_streams[reader] = None
 
         try:
+            stream_type = await reader.read_varint()
+
+            if stream_type == STREAM_TYPE.SETUP:
+                self._incoming_streams.pop(reader, None)
+                await self._run_control_stream(reader)
+                return
+
             if is_subgroup_header_type(stream_type):
                 header = await read_subgroup_header(reader, stream_type)
                 await self._run_subgroup_stream(reader, header)
@@ -1377,7 +1380,7 @@ class MoqtSession:
             reader.cancel()
             raise MoqtProtocolError(f"unknown unidirectional stream type 0x{stream_type:x}")
         finally:
-            self._data_readers.discard(reader)
+            self._incoming_streams.pop(reader, None)
 
     async def _read_control_frame(self, reader: StreamReader, message_type: int) -> ControlMessage:
         """Read one control-message frame using the pull-based stream reader."""
@@ -1538,25 +1541,30 @@ class MoqtSession:
 
     async def _handle_incoming_request(self, stream: BidirectionalStream) -> None:
         reader = StreamReader(stream.readable)
-        message = await read_request(
-            stream, reader, lambda message_type: self._read_control_frame(reader, message_type)
-        )
-
-        # A request still arriving when the session ended is dropped: nothing reaches a callback after `on_closed`.
         if self._destroyed:
             reader.cancel()
             stream.writable.abort()
             return
 
+        # Until its response has been written, the request is teardown's to drop: nothing is answered after
+        # `on_closed`.
+        self._incoming_streams[reader] = stream.writable
+
+        try:
+            message = await read_request(
+                stream, reader, lambda message_type: self._read_control_frame(reader, message_type)
+            )
+        except BaseException:
+            self._incoming_streams.pop(reader, None)
+            raise
+
+        # Teardown dropped the request while its message was arriving.
+        if self._destroyed:
+            return
+
         # Before answering: a request this client rejects still consumes its id.
         if isinstance(message, Subscribe | SubscribeNamespace | Publish | PublishNamespace | TrackStatus | Fetch):
             self._claim_peer_request_id(message.request_id)
-
-        # Until its response has been written, the request is teardown's to drop: nothing is answered after
-        # `on_closed`.
-        def drop() -> None:
-            reader.cancel()
-            stream.writable.abort()
 
         async def respond(data: bytes) -> None:
             try:
@@ -1565,10 +1573,8 @@ class MoqtSession:
             except Exception:  # peer cancelled, or teardown dropped the request
                 pass
 
-            self._incoming_requests.discard(drop)
+            self._incoming_streams.pop(reader, None)
             reader.cancel()
-
-        self._incoming_requests.add(drop)
 
         if isinstance(message, Publish):
             if self._callbacks.on_incoming_publish is not None:
