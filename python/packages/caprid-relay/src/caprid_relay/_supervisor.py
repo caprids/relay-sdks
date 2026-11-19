@@ -3,8 +3,8 @@ backoff whenever it ends, and replaced make-before-break before its credential e
 
 Each connection is a generation. What it carries moves with it: every publication's tracks
 (registered once, rebound to each generation's namespace) and, on a connection that subscribes,
-every want and publishing-roots view. The supervised publisher and subscriber are views over this
-loop that differ only in the connection they open. See ``spec/behavior.md``, "Supervised
+every want and publishing-roots view. The supervised publisher, subscriber and relay are views over
+this loop that differ only in the connection they open. See ``spec/behavior.md``, "Supervised
 connections". The counterpart of ``ts/src/supervisor.ts``.
 """
 
@@ -37,7 +37,7 @@ from ._supervision import (
 from ._validation import track_name, track_property_pairs
 from ._write_slot import RelayTrackWriter, _observe
 from .cancellation import CancellationToken
-from .connect import RelaySubscriber
+from .connect import _Subscribing
 from .connect_session import validate_timeout
 from .errors import RelayError
 from .publish import DEFAULT_WRITE_TIMEOUT
@@ -54,7 +54,7 @@ class SupervisedConnection:
     expires_at: datetime | None
     close: Callable[[], Awaitable[None] | None]
     """Close the connection: an awaitable when it drains its publications first."""
-    subscriber: RelaySubscriber | None = None
+    subscriber: _Subscribing | None = None
     """The subscribing side; ``None`` on a connection that only publishes."""
     publish: Callable[[tuple[str, ...]], TrackPublisher] | None = None
     """Announce a namespace on this connection; ``None`` on a connection that only subscribes."""
@@ -71,7 +71,7 @@ class _NotSubscribing:
         raise RuntimeError(f"This supervised connection does not subscribe ({name})")
 
 
-_NO_SUBSCRIBER = cast(RelaySubscriber, _NotSubscribing())
+_NO_SUBSCRIBER = cast(_Subscribing, _NotSubscribing())
 
 
 @dataclass(slots=True, eq=False)
@@ -98,7 +98,7 @@ class _Connection:
 
     session: SupervisedConnection
     generation: str
-    subscriber: RelaySubscriber
+    subscriber: _Subscribing
     """The subscribing side; on a connection that only publishes, a stand-in that refuses every use."""
     discovery: DiscoveryIndex
     up_at: float
@@ -897,8 +897,9 @@ class SupervisedPublication:
     ) -> RelayTrackWriter:
         """Register a track every generation serves under this root, and return the writer that outlives them.
 
-        The same rules as :meth:`RelayPublisher.register_track`, checked at once; names are unique per
-        publication, also after their writer closes.
+        The same rules as :meth:`SupervisedPublisher.register_track`, checked at once: names are unique per
+        publication, also after their writer closes; writes wait for demand on the live connection, and
+        raise ``RECONNECTING`` while none is up.
         """
         name = track_name(track)
         properties = track_property_pairs(track_properties)

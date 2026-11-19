@@ -29,6 +29,7 @@ from moq_core import (
 from ._awaitable import RelayAwaitable
 from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKind
 from ._supervision import SupervisedStatus, SupervisionBackoff
+from ._supervisor import SupervisedPublication
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayCredential, RelayTransportFactory
@@ -55,6 +56,7 @@ from .subscription_events import (
     UpdateOkEvent,
 )
 from .supervised_publisher import PublisherGeneration, SupervisedPublisher, connect_supervised_publisher
+from .supervised_relay import SupervisedRelay, connect_supervised_relay
 from .supervised_subscriber import (
     RestartReason,
     SupervisedSubscriber,
@@ -120,7 +122,9 @@ __all__ = [
     "SubscriptionHandlers",
     "SubscriptionOverflowError",
     "SubscriptionRequestError",
+    "SupervisedPublication",
     "SupervisedPublisher",
+    "SupervisedRelay",
     "SupervisedStatus",
     "SupervisedSubscriber",
     "SupervisionBackoff",
@@ -134,6 +138,7 @@ __all__ = [
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",
+    "connect_supervised_relay",
     "connect_supervised_subscriber",
     "read_json",
     "read_text",
