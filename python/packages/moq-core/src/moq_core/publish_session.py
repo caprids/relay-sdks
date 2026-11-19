@@ -511,10 +511,10 @@ class MoqtPublishSession:
         self._closing = False
         self._close_error: BaseException | None = None
         self._destroyed = False
-        self._end_acknowledgements: dict[asyncio.Task[None], _SubscriberStream] = {}
-        """One task per subscription end still in flight, with its subscription, which the end of the session cancels
-        even after it has left its track: PUBLISH_DONE and FIN until the peer acknowledges them, or a cancelled
-        subscription's FIN until the transport takes it."""
+        self._end_acknowledgements: dict[asyncio.Task[None], tuple[_NamespaceKey, _SubscriberStream]] = {}
+        """One task per subscription end still in flight, with its track's namespace and its subscription, which the
+        end of the session cancels even after it has left its track: PUBLISH_DONE and FIN until the peer acknowledges
+        them, or a cancelled subscription's FIN until the transport takes it."""
         self._incoming_streams: dict[StreamReader, SendStream | None] = {}
         """Every incoming stream still being read but the control stream, from its first read on, with the response
         direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it
@@ -603,7 +603,7 @@ class MoqtPublishSession:
             for subscriber in track.subscribers:
                 subscriber.cancel()
 
-        for subscriber in self._end_acknowledgements.values():
+        for _, subscriber in self._end_acknowledgements.values():
             subscriber.cancel()
 
         for reader in list(self._incoming_streams):
@@ -1012,22 +1012,29 @@ class MoqtPublishSession:
             if subscriber.writer_closed:
                 await wait_acknowledged(subscriber.writer)
 
-        self._hold_end(spawn(_swallow(acknowledged())), subscriber)
+        self._hold_end(spawn(_swallow(acknowledged())), track, subscriber)
 
-    def _hold_end(self, ending: asyncio.Task[None], subscriber: _SubscriberStream) -> None:
+    def _hold_end(self, ending: asyncio.Task[None], track: _TrackRecord, subscriber: _SubscriberStream) -> None:
         """Keep ``subscriber`` within reach of the end of the session until ``ending`` settles."""
-        self._end_acknowledgements[ending] = subscriber
+        self._end_acknowledgements[ending] = (track.namespace, subscriber)
         ending.add_done_callback(lambda done: self._end_acknowledgements.pop(done, None))
 
-    async def wait_ends_acknowledged(self) -> None:
+    async def wait_ends_acknowledged(self, track_namespace: Sequence[str] | None = None) -> None:
         """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
 
-        An end that failed, or whose stream was reset, counts as done. On a transport that does not
-        report acknowledgement, an end counts once its FIN was written. Never raises; the caller bounds
-        the wait.
+        With ``track_namespace``, only the ends of that namespace's tracks. An end that failed, or whose
+        stream was reset, counts as done. On a transport that does not report acknowledgement, an end
+        counts once its FIN was written. Never raises; the caller bounds the wait.
         """
-        if self._end_acknowledgements:
-            await asyncio.wait(set(self._end_acknowledgements))
+        namespace = None if track_namespace is None else tuple(track_namespace)
+        ends = {
+            ending
+            for ending, (ended_namespace, _) in self._end_acknowledgements.items()
+            if namespace is None or ended_namespace == namespace
+        }
+
+        if ends:
+            await asyncio.wait(ends)
 
     def _live_subscription(self, track_alias: int) -> _SubscriberStream | None:
         for track in self._tracks.values():
@@ -1607,7 +1614,7 @@ class MoqtPublishSession:
                 # unclosed response direction would leak a half-open stream per cancelled request
                 # until the transport closes. An already-aborted writer fails harmlessly. A
                 # subscription this side ended closes its writer after PUBLISH_DONE instead.
-                self._hold_end(spawn(_swallow(writer.close())), subscriber)
+                self._hold_end(spawn(_swallow(writer.close())), track, subscriber)
 
             if not self._destroyed and subscriber.reported:
                 _call(self._callbacks.on_subscribe_end, subscribe.request_id)

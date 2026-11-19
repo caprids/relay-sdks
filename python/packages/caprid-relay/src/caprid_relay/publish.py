@@ -231,14 +231,17 @@ class RelayPublication:
             writer.close()
 
     async def _drain(self, seconds: float) -> None:
-        """Wait for this publication's settling groups and the session's subscription ends, bounded.
+        """Wait for this publication's settling groups and its tracks' subscription ends, bounded.
 
         Closing the session sends the close capsule and then the transport close, and the relay aborts a
         track whose data or PUBLISH_DONE it has not received by then (viewers see status 0). So the last
-        groups and the ends get up to one write deadline to be acknowledged first.
+        groups and the ends get up to one write deadline to be acknowledged first. Every track belongs to
+        a publication, so draining them all, as ``end_all`` does, waits for every end on the connection.
         """
         await self._groups.drain(
-            max(self._drain_timeout, seconds), self._lifetime.closed, self._session.wait_ends_acknowledged()
+            max(self._drain_timeout, seconds),
+            self._lifetime.closed,
+            self._session.wait_ends_acknowledged(self._namespace),
         )
 
     def _on_announced(self) -> None:

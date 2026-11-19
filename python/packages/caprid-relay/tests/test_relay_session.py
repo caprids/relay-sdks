@@ -12,6 +12,7 @@ from core_helpers.fake_transport import encode_subgroup
 from core_helpers.raw_peer import raw_subscribe, solicit_namespace
 from core_helpers.transport_pair import PairTransport, create_transport_pair
 from core_helpers.waiting import settle, wait_for
+from relay_helpers.acked_transport import AckedTransport, AckGate
 
 from caprid_relay import (
     ConnectingTransport,
@@ -131,13 +132,14 @@ async def connections() -> AsyncIterator[list[Connected]]:
         await connected.session.close()
 
 
-async def connect(connections: list[Connected]) -> Connected:
+async def connect(connections: list[Connected], acknowledgements: AckGate | None = None) -> Connected:
     pair = create_transport_pair()
     seen = scripted_relay(pair.server)
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
+    client = pair.client if acknowledgements is None else AckedTransport(pair.client, acknowledgements)
     session = await connect_relay(
-        URL, create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready)
+        URL, create_transport=lambda url, protocols: ConnectingTransport(transport=client, ready=ready)
     )
     connected = Connected(session, pair.server, seen)
     connections.append(connected)
@@ -188,6 +190,33 @@ async def test_announces_several_namespaces_and_closes_one_publication_without_t
     with pytest.raises(ValueError):
         c.session.publish(HOST)
     own.register_track("audio")
+
+
+async def test_closing_one_publication_does_not_wait_for_another_publications_unacknowledged_end(
+    connections: list[Connected],
+) -> None:
+    acknowledgements = AckGate()
+    c = await connect(connections, acknowledgements)
+    own = c.session.publish(OWN)
+    host = c.session.publish(HOST)
+    video = own.register_track("video")
+    host.register_track("control", write_timeout=5)
+    solicitation = await solicit_namespace(c.server, ["room"], 1)
+    await asyncio.gather(own.announced, host.announced)
+    upstream = await raw_subscribe(c.server, OWN, "video", 3)
+    await wait_for(lambda: upstream.kinds() == ["subscribe-ok"])
+
+    video.close()
+    await wait_for(lambda: upstream.kinds() == ["subscribe-ok", "publish-done"])
+
+    await asyncio.wait_for(host.close(), 1)
+    await wait_for(lambda: solicitation.received[-1] == NamespaceDone(track_namespace_suffix=["host"]))
+
+    closing = asyncio.ensure_future(own.close())
+    await settle(0.1)
+    assert not closing.done(), "a publication's close still waits for its own end"
+    acknowledgements.release()
+    await asyncio.wait_for(closing, 1)
 
 
 async def test_ends_only_the_publication_whose_namespace_the_relay_stops_soliciting(
