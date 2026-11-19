@@ -755,11 +755,7 @@ class MoqtSessionImpl implements MoqtSession {
     ];
     const pending = expected ? [] : records.filter((r) => !r.settled && !r.cancelled);
 
-    // A record's stream may have left `#requestStreams` with its sending direction still open: the peer FINed first.
-    for (const record of records) {
-      this.#settleRequest(record);
-      record.stream?.cancel(error);
-    }
+    for (const record of records) this.#settleRequest(record);
     for (const stream of this.#requestStreams) stream.deref()?.cancel(error);
     for (const drop of this.#incomingRequests) drop();
     this.#incomingRequests.clear();
@@ -920,6 +916,11 @@ class MoqtSessionImpl implements MoqtSession {
       (error) => {
         this.#fetches.delete(requestId);
         handlers.onError?.(error);
+      },
+      () => {
+        // §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request. Left open, the stream would
+        // outlive a fetch the session has already forgotten.
+        record.stream?.finWrite().catch(() => {});
       }
     );
 
@@ -1069,6 +1070,8 @@ class MoqtSessionImpl implements MoqtSession {
       if (record.settled || record.cancelled || this.#destroyed) return;
 
       this.#settleRequest(record);
+      // A request that died unanswered keeps no stream: its sending direction would otherwise stay open.
+      record.stream?.cancel(error);
       onFailure(error);
     };
 
@@ -1262,6 +1265,7 @@ class MoqtSessionImpl implements MoqtSession {
         this.#settleRequest(record);
         this.#fetches.delete(record.requestId);
         record.handlers.onError?.(message);
+        record.stream?.finWrite().catch(() => {});
         break;
       case 'goaway':
         record.handlers.onGoaway?.(message);

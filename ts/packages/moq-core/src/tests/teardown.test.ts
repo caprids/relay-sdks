@@ -9,11 +9,13 @@ import {
   encodeGoaway,
   encodeNamespace,
   encodePublish,
+  encodeRequestError,
   encodeRequestOk,
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
   encodeSubscribeNamespace,
+  encodeSubscribeOk,
   encodeTrackStatus,
   type KeyValuePair,
   REQUEST_ERROR_CODE,
@@ -184,21 +186,56 @@ describe('subscribe driver teardown', () => {
     await vi.waitFor(() => expect(stopped()).toBe(true));
   });
 
-  it('resets a request the peer has finished answering but whose data is outstanding', async () => {
+  it('resets a subscription whose request stream the peer finished without PUBLISH_DONE', async () => {
     const { session, requests } = await harness();
 
-    session.fetch(TRACK);
+    session.subscribe(TRACK);
     const stream = await requests.next();
     let reset = false;
     void stream.readable.pipeTo(new WritableStream()).catch(() => {
       reset = true;
     });
     const writer = stream.writable.getWriter();
-    await writer.write(encodeRequestOk());
+    await writer.write(encodeSubscribeOk(7, {}, []));
     await writer.close();
     await settle();
 
     session.destroy();
+    await vi.waitFor(() => expect(reset).toBe(true));
+  });
+
+  it.each([
+    ['answered', encodeRequestOk()],
+    ['refused', encodeRequestError(REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track')],
+  ])('finishes its side of a fetch request the peer has %s and finished', async (_name, response) => {
+    const { session, requests } = await harness();
+
+    session.fetch(TRACK);
+    const stream = await requests.next();
+    let finished = false;
+    void stream.readable.pipeTo(new WritableStream()).then(() => {
+      finished = true;
+    });
+    const writer = stream.writable.getWriter();
+    await writer.write(response);
+    await writer.close();
+
+    await vi.waitFor(() => expect(finished).toBe(true));
+  });
+
+  it('resets a request the peer finished without answering', async () => {
+    const onError = vi.fn();
+    const { session, requests } = await harness();
+
+    session.trackStatus(TRACK, { onError });
+    const stream = await requests.next();
+    let reset = false;
+    void stream.readable.pipeTo(new WritableStream()).catch(() => {
+      reset = true;
+    });
+    await stream.writable.getWriter().close();
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
     await vi.waitFor(() => expect(reset).toBe(true));
   });
 
