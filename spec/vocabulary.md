@@ -65,6 +65,8 @@ without a row here is a bug.
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
 | Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` (`ConnectSupervisedPublisherOptions`) returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` |
 | Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` (`ConnectSupervisedSubscriberOptions`) returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` |
+| Open one connection that publishes, subscribes and reconnects, one generation per connection | `connectSupervisedRelay(options)` (`ConnectSupervisedRelayOptions`) returns `SupervisedRelay`: the supervised subscriber's wants and views, `publish()`, `generation`, `onGeneration({ generation })` | Not built yet |
+| Publish a root on every connection of a supervised relay | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `registerTrack()`, `close()`) | Not built yet |
 | One supervised publisher connection and the namespace it serves | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `onGeneration(info)` | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `on_generation(info)` |
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
@@ -420,7 +422,13 @@ They live in `@caprid/relay` and `caprid_relay` themselves, not in a separate pa
 
 **Generation** names one supervised publisher connection and the namespace field it serves. Each
 reconnect is a new publisher to the relay, and the word says so: it is not a session, an epoch, or a
-reconnect count.
+reconnect count. On a supervised relay a generation is still one connection, and every root it
+publishes carries the same field.
+
+`connectSupervisedRelay` is `connectRelay` supervised, as the other two are their primitives
+supervised; its result is a `SupervisedRelay`, not a `SupervisedSession`, because "session" is the
+core's word for the MOQT session underneath. Each root it serves is a `SupervisedPublication`, the
+supervised counterpart of `RelayPublication`.
 
 `want(key, ...)` is declarative: it states which track the application wants, keyed by a name the
 application chooses, and the supervisor owns how that stays true. `unwant` undoes it. Not adopted:

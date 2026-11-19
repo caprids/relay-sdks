@@ -29,6 +29,7 @@ describe('public vocabulary', () => {
       'connectRelayPublisher',
       'connectRelaySubscriber',
       'connectSupervisedPublisher',
+      'connectSupervisedRelay',
       'connectSupervisedSubscriber',
       'readJSON',
       'readText',

@@ -456,6 +456,12 @@ export interface PublishingRootsDependencies {
   /** Keep `connection` open through a rotation until the returned release runs. */
   hold(connection: PublishingRootsConnection): () => void;
   onClosed(): void;
+  /**
+   * Whether a namespace is the supervisor's own publishing: its announcement is never reported. The relay hides a
+   * connection's own announcements from it, but not those of the connection a rotation is replacing or bringing up.
+   * Withdrawals still count, so a root seen before the supervisor published it leaves when it is withdrawn.
+   */
+  hides?(namespace: readonly string[]): boolean;
 }
 
 const NOBODY: ReadonlyMap<string, PublishingRoot> = new Map();
@@ -514,7 +520,9 @@ export function openPublishingRoots(
     let held: DiscoveryWatch;
     try {
       held = connection.discovery.watch(prefix, {
-        onAnnounced: (namespace) => feed({ kind: 'namespace', source, type: 'announced', namespace }),
+        onAnnounced: (namespace) => {
+          if (!deps.hides?.(namespace)) feed({ kind: 'namespace', source, type: 'announced', namespace });
+        },
         onUnannounced: (namespace) => feed({ kind: 'namespace', source, type: 'unannounced', namespace }),
         onLoaded: () => feed({ kind: 'loaded', source }),
         onEnded: (error) => feed({ kind: 'ended', source, error }),
@@ -538,7 +546,9 @@ export function openPublishingRoots(
         release();
       },
     });
-    for (const namespace of held.namespaces()) feed({ kind: 'namespace', source, type: 'announced', namespace });
+    for (const namespace of held.namespaces()) {
+      if (!deps.hides?.(namespace)) feed({ kind: 'namespace', source, type: 'announced', namespace });
+    }
     if (held.loaded) feed({ kind: 'loaded', source });
     if (connection.retiring.aborted) retiring();
   };

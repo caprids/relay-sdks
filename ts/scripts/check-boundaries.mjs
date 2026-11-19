@@ -139,6 +139,7 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
   'connectRelayPublisher',
   'connectRelaySubscriber',
   'connectSupervisedPublisher',
+  'connectSupervisedRelay',
   'connectSupervisedSubscriber',
   'readJSON',
   'readText',

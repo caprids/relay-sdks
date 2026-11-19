@@ -65,6 +65,12 @@ export type {
 } from './supervised-publisher.js';
 export { connectSupervisedPublisher } from './supervised-publisher.js';
 export type {
+  ConnectSupervisedRelayOptions,
+  SupervisedPublication,
+  SupervisedRelay,
+} from './supervised-relay.js';
+export { connectSupervisedRelay } from './supervised-relay.js';
+export type {
   ConnectSupervisedSubscriberOptions,
   RestartReason,
   SupervisedSubscriber,

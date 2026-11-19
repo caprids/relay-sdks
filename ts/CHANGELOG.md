@@ -7,6 +7,14 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay`: `connectSupervisedRelay(options)` supervises one connection that publishes and
+  subscribes. It returns a `SupervisedRelay`: the supervised subscriber's `want`, `unwant`, `catchUp`
+  and `publishingRoots`, plus `publish(root)`, which returns a `SupervisedPublication` whose track
+  writers outlive the connections. Each connection is one generation, and every root is served as the
+  root followed by its field, so a reconnect or rotation moves every root, track and want together.
+  A root the relay stops soliciting replaces the whole connection. `@caprid/relay/node` exports it over
+  native QUIC. The supervised publisher and subscriber now run on the same supervision loop, with no
+  change in behaviour.
 - `@caprid/relay`: `connectRelay(options)` opens one connection that publishes and subscribes. It returns a
   `RelaySession`: everything a `RelaySubscriber` does, plus `publish(namespace)`, which announces a namespace and returns
   a `RelayPublication` (`registerTrack`, `announced`, `closed`, `close`). A connection announces any number of
