@@ -19,16 +19,8 @@ import {
   type SubscribeOk,
 } from '@caprid/moq-core';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
-import { assertTimeoutMs, type RelaySessionHooks, reportEndpoint } from './connect-session.js';
-import {
-  createDiscoveryIndex,
-  DISCOVERY_CAPACITY,
-  DISCOVERY_LINGER_MS,
-  type DiscoveryIndex,
-  discoveryEnding,
-  refusedForGood,
-} from './discovery.js';
-import { RelayError } from './errors.js';
+import { assertTimeoutMs, type RelaySessionHooks } from './connect-session.js';
+import { DISCOVERY_LINGER_MS, type DiscoveryIndex, discoveryEnding, refusedForGood } from './discovery.js';
 import {
   openPublishingRoots,
   type PublishingRoots,
@@ -42,18 +34,15 @@ import {
   backoffOptions,
   isFreshNamespaceRejection,
   isPermanentRequestError,
-  isSetupFailure,
   RECONNECT_BACKOFF,
   RESUBSCRIBE_BACKOFF,
-  ROTATION_OVERLAP_MS,
   rotateBeforeOption,
-  rotationDeadline,
-  rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
   sleep,
   whenAborted,
 } from './supervision.js';
+import { createSupervisor, type Supervisor } from './supervisor.js';
 import {
   assertDrainMs,
   type HeldEvent,
@@ -259,7 +248,7 @@ export type ConnectSubscriber = (
   options: ConnectRelaySubscriberOptions & RelaySessionHooks,
 ) => Promise<RelaySubscriber>;
 
-interface Connection {
+export interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
@@ -351,322 +340,56 @@ export async function superviseRelaySubscriber(
   const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
+  const supervisor = createSupervisor<ConnectRelaySubscriberOptions>(
+    async (attempt) => {
+      const subscriber = await connect(attempt);
+      return {
+        subscriber,
+        closed: subscriber.closed,
+        get expiresAt() {
+          return subscriber.expiresAt;
+        },
+        close: () => subscriber.close(),
+      };
+    },
+    { what: 'Supervised subscriber', connection, signal, backoff, rotateBeforeMs, onStatus },
+  );
+  const wants = createWantSurface(supervisor);
+  await supervisor.start();
+
+  return {
+    get status() {
+      return supervisor.status;
+    },
+    closed: supervisor.closed,
+    ...wants,
+    rotate() {
+      supervisor.rotate();
+    },
+    close() {
+      void supervisor.stop({});
+    },
+  };
+}
+
+/** The wants and publishing-roots views a supervisor's connections carry. */
+export type WantSurface = Pick<SupervisedSubscriber, 'want' | 'unwant' | 'catchUp' | 'publishingRoots'>;
+
+/**
+ * Keep wants and publishing-roots views on `supervisor`'s connections: each moves with a rotation and comes back on
+ * the next connection. Everything is cancelled when the supervisor stops.
+ */
+export function createWantSurface(
+  supervisor: Pick<Supervisor, 'liveConnection' | 'current' | 'stopped' | 'closedError' | 'onStop'>,
+): WantSurface {
   const wants = new Map<string, Want>();
   const views = new Set<PublishingRoots>();
-  let status: SupervisedStatus = 'connecting';
-  let stopped = false;
-  let current: Connection | undefined;
-  const connectionWaiters: (() => void)[] = [];
-  let resolveClosed: (value: { error?: unknown }) => void = () => {};
-  const closed = new Promise<{ error?: unknown }>((resolve) => {
-    resolveClosed = resolve;
-  });
-  const lifetime = new AbortController();
-  /** Aborts the connection attempt in progress only: a live connection is closed cleanly on `close()`. */
-  let attemptInProgress: AbortController | undefined;
-  /** The connection a rotation is replacing, while its wants move off it. */
-  let retiring: Connection | undefined;
-  /**
-   * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
-   * one whose replacement is still connecting or being discarded.
-   */
-  let rotateRequested = false;
-  /** Wakes a serve loop waiting for its rotation; replaced for each wait. */
-  let wakeRotation: () => void = () => {};
-  const requestRotation = () => {
-    if (stopped || !current) return;
-    rotateRequested = true;
-    wakeRotation();
-  };
-
-  const setStatus = (next: SupervisedStatus, error?: unknown) => {
-    if (status === next && error === undefined) return;
-    status = next;
-    onStatus?.(next, error);
-  };
-  let first: { resolve(): void; reject(error: unknown): void } | undefined;
-  const started = new Promise<void>((resolve, reject) => {
-    first = { resolve, reject };
-  });
-
-  const stop = (result: { error?: unknown }) => {
-    if (stopped) return;
-    stopped = true;
-    const reason = result.error ?? new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
-    lifetime.abort(reason);
-    attemptInProgress?.abort(reason);
-    // An abort while the first connection is still being made rejects the call that is waiting for it.
-    first?.reject(reason);
-    first = undefined;
+  const liveConnection = (scope: AbortSignal) => supervisor.liveConnection(scope);
+  supervisor.onStop(() => {
     for (const want of wants.values()) want.controller.abort();
     wants.clear();
     for (const view of [...views]) view.close();
-    current?.subscriber.close();
-    current = undefined;
-    retiring?.subscriber.close();
-    retiring = undefined;
-    for (const wake of connectionWaiters.splice(0)) wake();
-    try {
-      setStatus('closed');
-    } finally {
-      resolveClosed(result);
-    }
-  };
-  const onAbort = () => {
-    try {
-      stop({ error: signal?.reason });
-    } catch {
-      // A throwing onStatus while reporting `closed`: `closed` is settled, and an abort listener has no caller to tell.
-    }
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-
-  /** The live connection, waiting for one while reconnecting; `undefined` once `scope` aborts. */
-  const liveConnection = async (scope: AbortSignal): Promise<Connection | undefined> => {
-    while (!scope.aborted && !stopped) {
-      if (current && !current.signal.aborted) return current;
-      const woken = new Promise<void>((resolve) => connectionWaiters.push(resolve));
-      await Promise.race([woken, whenAborted(scope)]);
-    }
-    return undefined;
-  };
-
-  /** Open one connection, or `undefined` if the supervisor stopped first. Throws the attempt's failure. */
-  const connectOnce = async (): Promise<
-    { live: Connection; ended: AbortController; retire: AbortController } | undefined
-  > => {
-    let subscriber: RelaySubscriber;
-    try {
-      attemptInProgress = new AbortController();
-      subscriber = await connect({
-        ...connection,
-        signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        [reportEndpoint]: (endpoint) => {
-          connection.url ??= endpoint;
-        },
-      });
-    } finally {
-      attemptInProgress = undefined;
-    }
-    if (stopped) {
-      subscriber.close();
-      return undefined;
-    }
-    const ended = new AbortController();
-    // Aborted the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
-    void subscriber.closed.then(() => ended.abort());
-    const retire = new AbortController();
-    const live: Connection = {
-      subscriber,
-      signal: ended.signal,
-      retiring: retire.signal,
-      discovery: createDiscoveryIndex((prefix) => subscriber.namespaceEvents({ prefix, capacity: DISCOVERY_CAPACITY })),
-      wakes: new Map(),
-      holds: 0,
-      rotateAt: rotationDeadline(subscriber.expiresAt, rotateBeforeMs),
-    };
-    return { live, ended, retire };
-  };
-
-  type Opened = NonNullable<Awaited<ReturnType<typeof connectOnce>>>;
-
-  /** The connection ended: release what it ran and stop anything still waiting on it. */
-  const settleEnded = (opened: Opened) => {
-    opened.ended.abort();
-    opened.live.discovery.close();
-  };
-
-  /**
-   * Open the connection that replaces `opened`, move every want to it, and close the old one once they have moved.
-   * Returns the new connection, or `undefined` when the old one ended or the supervisor stopped before a replacement
-   * was up, or when an automatic rotation found no fresher credential.
-   */
-  const rotateFrom = async (opened: Opened, manual: () => boolean): Promise<Opened | undefined> => {
-    const old = opened.live;
-    let failures = 0;
-    let next: Opened | undefined;
-    // The live connection ending while its replacement is still connecting is a reconnect: report it at once.
-    void old.subscriber.closed.then(({ error }) => {
-      if (stopped || current !== old) return;
-      current = undefined;
-      try {
-        setStatus('reconnecting', error);
-      } catch (thrown) {
-        try {
-          stop({ error: thrown });
-        } catch {
-          // A throwing onStatus while reporting `closed`: `closed` is settled either way.
-        }
-      }
-    });
-    while (!stopped && !old.signal.aborted) {
-      try {
-        next = await connectOnce();
-        break;
-      } catch {
-        if (stopped) return undefined;
-        // The live connection keeps serving; try again after the backoff unless it ends first.
-        await Promise.race([
-          sleep(backoffDelay(failures++, backoff), lifetime.signal).catch(() => {}),
-          whenAborted(old.signal),
-        ]);
-      }
-    }
-    if (!next) return undefined;
-    // `close()` may have run while the helper's result was on its way here: it could not see this connection.
-    if (stopped) {
-      next.live.subscriber.close();
-      return undefined;
-    }
-    // Consulted whatever happened to the old connection: a queued `rotate()` is answered by this replacement.
-    const asked = manual();
-    if (!old.signal.aborted && !asked) {
-      // A credential that expires no later than the live one replaces nothing: the relay would end both together.
-      const was = old.subscriber.expiresAt?.getTime();
-      const now = next.live.subscriber.expiresAt?.getTime();
-      if (was !== undefined && (now === undefined || now <= was)) {
-        next.live.subscriber.close();
-        return undefined;
-      }
-    }
-    current = next.live;
-    retiring = old;
-    setStatus('live');
-    for (const wake of connectionWaiters.splice(0)) wake();
-    const idle = new Promise<void>((resolve) => {
-      old.onIdle = resolve;
-    });
-    // Every want on the old connection ends its attempt there and subscribes on the new one.
-    opened.retire.abort();
-    if (old.holds === 0) old.onIdle?.();
-    // The replacement ending cuts the overlap short too: the wants on it need the next connection now. So does its own
-    // rotation falling due, for a credential shorter than the overlap.
-    const overlap = new AbortController();
-    await Promise.race([
-      idle,
-      sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
-      whenAborted(old.signal),
-      whenAborted(next.live.signal),
-      rotationDue(next.live.rotateAt, new Promise<void>(() => {}), AbortSignal.any([lifetime.signal, overlap.signal])),
-    ]);
-    overlap.abort();
-    old.onIdle = undefined;
-    if (retiring === old) retiring = undefined;
-    old.subscriber.close();
-    settleEnded(opened);
-    return next;
-  };
-
-  /** Serve `opened` until it ends, or until a rotation replaced it with the connection returned. */
-  const serve = async (opened: Opened): Promise<{ error?: unknown } | { next: Opened }> => {
-    const { subscriber } = opened.live;
-    const scope = new AbortController();
-    /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
-    let automatic = true;
-    try {
-      for (;;) {
-        const asked = new Promise<void>((resolve) => {
-          wakeRotation = resolve;
-        });
-        if (rotateRequested) wakeRotation();
-        const due = rotationDue(
-          automatic ? opened.live.rotateAt : undefined,
-          asked,
-          AbortSignal.any([lifetime.signal, scope.signal]),
-        ).then(() => undefined);
-        const outcome = await Promise.race([subscriber.closed, due]);
-        if (outcome !== undefined || stopped) return outcome ?? {};
-        // A `rotate()` before the replacement is current makes this rotation a manual one: it takes the replacement.
-        let manual = false;
-        const isManual = () => {
-          if (rotateRequested) {
-            rotateRequested = false;
-            manual = true;
-          }
-          return manual;
-        };
-        isManual();
-        const next = await rotateFrom(opened, isManual);
-        if (next) return { next };
-        if (opened.live.signal.aborted || stopped) return await subscriber.closed;
-        if (!manual) automatic = false;
-      }
-    } finally {
-      scope.abort();
-      wakeRotation = () => {};
-    }
-  };
-
-  const run = async () => {
-    let attempt = 0;
-    /** A connection a rotation already opened and moved the wants to. */
-    let next: Opened | undefined;
-    while (!stopped) {
-      let opened = next;
-      next = undefined;
-      if (!opened) {
-        try {
-          opened = await connectOnce();
-        } catch (error) {
-          if (stopped) return;
-          if (first && isSetupFailure(error)) {
-            first.reject(error);
-            first = undefined;
-            stop({ error });
-            return;
-          }
-          setStatus('reconnecting', error);
-          await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
-          continue;
-        }
-        if (!opened) return;
-        // `close()` may have run while the helper's result was on its way here: it could not see this connection.
-        if (stopped) {
-          opened.live.subscriber.close();
-          return;
-        }
-        current = opened.live;
-        setStatus('live');
-        first?.resolve();
-        first = undefined;
-        for (const wake of connectionWaiters.splice(0)) wake();
-      }
-      const upAt = performance.now();
-
-      const outcome = await serve(opened);
-      if ('next' in outcome) {
-        if (stopped) return;
-        next = outcome.next;
-        attempt = 0;
-        continue;
-      }
-      settleEnded(opened);
-      if (stopped) return;
-      current = undefined;
-      // Already reported if the connection ended while a rotation's replacement was connecting.
-      if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
-      if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
-      await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
-    }
-  };
-  const supervise = async () => {
-    try {
-      await run();
-    } catch (error) {
-      // An application callback (onStatus) threw: stop rather than leave the supervisor neither reconnecting nor
-      // closed, and fail a caller still waiting to connect.
-      stop({ error });
-    }
-  };
-  // A second throw, from onStatus reporting `closed`, has nowhere to go: `closed` is settled either way.
-  void supervise().catch(() => {});
-  try {
-    await started;
-  } catch (error) {
-    signal?.removeEventListener('abort', onAbort);
-    throw error;
-  }
-  if (stopped) throw signal?.reason ?? new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+  });
 
   const forget = (key: string, want: Want) => {
     want.controller.abort();
@@ -684,10 +407,6 @@ export async function superviseRelaySubscriber(
   };
 
   return {
-    get status() {
-      return status;
-    },
-    closed,
     want(key, wantOptions, handlers = {}) {
       if (typeof key !== 'string') throw new TypeError('want key must be a string');
       if (typeof wantOptions !== 'object' || wantOptions === null) {
@@ -702,7 +421,7 @@ export async function superviseRelaySubscriber(
       const retryBackoff = backoffOptions('retry', retry, RESUBSCRIBE_BACKOFF);
       const predicate = untilPredicate(until);
       assertDrainMs(drainMs);
-      if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+      if (supervisor.stopped) throw supervisor.closedError();
 
       const source = JSON.stringify([namespace, generations]);
       const target = targetKey([], track, parameters);
@@ -732,12 +451,7 @@ export async function superviseRelaySubscriber(
         controller: new AbortController(),
       };
       wants.set(key, want);
-      void runWant(
-        want,
-        liveConnection,
-        () => current,
-        () => forget(key, want),
-      );
+      void runWant(want, liveConnection, supervisor.current, () => forget(key, want));
     },
     unwant(key) {
       const want = wants.get(key);
@@ -754,21 +468,14 @@ export async function superviseRelaySubscriber(
       const safeHandlers = guard(handlers, 'publishingRoots');
       const prefix = namespaceFields(rootsOptions.prefix);
       namespaceFields([...prefix, 'x', 'x']);
-      if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+      if (supervisor.stopped) throw supervisor.closedError();
       const view: PublishingRoots = openPublishingRoots(
-        { liveConnection, current: () => current, hold, onClosed: () => views.delete(view) },
+        { liveConnection, current: supervisor.current, hold, onClosed: () => views.delete(view) },
         prefix,
         safeHandlers,
       );
       views.add(view);
       return view;
-    },
-    rotate() {
-      requestRotation();
-    },
-    close() {
-      signal?.removeEventListener('abort', onAbort);
-      stop({});
     },
   };
 }
