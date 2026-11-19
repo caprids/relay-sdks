@@ -1250,6 +1250,25 @@ class TestPublishDriverTeardown:
             assert solicitation.ended()
             assert isinstance(solicitation.failure(), StreamClosedError)
 
+    async def test_resets_a_carrier_whose_update_was_still_arriving_when_it_ends(self) -> None:
+        closed: list[object] = []
+        held: list[HeldFin] = []
+
+        async with publish_session(
+            MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True, held_fins=held
+        ) as (pair, _, control):
+            solicitation = await solicit_namespace(pair.server, ["live"])
+            await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
+
+            await solicitation.send(encode_request_update(3)[:-1])
+            await settle()
+            await control.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert solicitation.ended()
+            assert isinstance(solicitation.failure(), StreamClosedError)
+
     async def test_stops_reading_a_solicitation_whose_update_it_refused(self) -> None:
         closed: list[object] = []
 
