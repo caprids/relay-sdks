@@ -1242,6 +1242,10 @@ class MoqtPublishSession:
 
         # No longer a carrier, the stream is the end of the session's to reset until the transport takes its FIN.
         reader.cancel()
+        if self._destroyed:
+            writer.abort()
+            return
+
         self._incoming_streams[reader] = writer
         if failed_update:
             await _swallow(
