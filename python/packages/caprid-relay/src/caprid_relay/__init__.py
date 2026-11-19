@@ -35,8 +35,9 @@ from .connect_session import ConnectingTransport, RelayCredential, RelayTranspor
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .namespace_events import SNAPSHOT_LIMIT, SNAPSHOT_QUIET, NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
-from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
+from .publish import RelayGroupWriter, RelayPublication, RelayPublisher, RelayTrackWriter, connect_relay_publisher
 from .publishing_roots import PublishingRoot, PublishingRoots, PublishingRootsChange, PublishingRootsHandlers
+from .relay_session import RelaySession, connect_relay
 from .room_endpoint import DEFAULT_ENDPOINT, room_endpoint
 from .subscription_events import (
     GoawayEvent,
@@ -95,7 +96,9 @@ __all__ = [
     "RelayErrorCode",
     "RelayErrorPhase",
     "RelayGroupWriter",
+    "RelayPublication",
     "RelayPublisher",
+    "RelaySession",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
@@ -127,6 +130,7 @@ __all__ = [
     "UpdateOkEvent",
     "WantHandlers",
     "WantSwitchedInfo",
+    "connect_relay",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",

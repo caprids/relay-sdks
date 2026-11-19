@@ -64,6 +64,20 @@ from .switchable import SwitchableHandlers, SwitchableSubscription, snapshot_swi
 
 IMPLEMENTATION_NAME = "caprid-relay (Python)"
 
+SUBSCRIBER_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1), KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1))
+"""The setup options a connection that subscribes adds to the endpoint's.
+
+Namespaces arrive only on a namespace_events request, never pushed unasked, and a relay with MoQ Active
+Count marks where each request's snapshot ends (spec/behavior.md, "Discovery").
+"""
+
+SESSION_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1),)
+"""The setup options of a connection that publishes and subscribes: SOLICIT alone.
+
+ACTIVE_COUNT would oblige its publishing side to count the NAMESPACE entries it answers the relay's
+solicitations with, which the publish session does not do.
+"""
+
 
 @dataclass(slots=True, kw_only=True)
 class RelaySubscriptionHandlers:
@@ -216,10 +230,10 @@ class _BorrowedTrackSource:
         self._lifetime.session.track_status(options, handlers)
 
 
-class RelaySubscriber:
-    """A connection that can only subscribe. Create one with :func:`connect_relay_subscriber`.
+class _Subscribing:
+    """What every connection that subscribes offers, over its subscribe driver ``lifetime.session``.
 
-    Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
+    :class:`RelaySubscriber` and :class:`RelaySession` share it, and each adds its own ``close()``.
     """
 
     __slots__ = ("_closed", "_lifetime", "_prefixes", "_track_source")
@@ -403,12 +417,22 @@ class RelaySubscriber:
             cancellation=cancellation,
         )
 
+    async def __aenter__(self) -> Self:
+        return self
+
+
+class RelaySubscriber(_Subscribing):
+    """A connection that can only subscribe. Create one with :func:`connect_relay_subscriber`.
+
+    Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
+    :func:`connect_relay` opens one connection that does both.
+    """
+
+    __slots__ = ()
+
     def close(self) -> None:
         """Close this connection and all requests on it. Idempotent."""
         self._lifetime.close()
-
-    async def __aenter__(self) -> Self:
-        return self
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
@@ -432,7 +456,7 @@ async def connect_relay_subscriber(
     precedence over ``get_token``, matching the Relay authentication convention; an empty one is a
     ``ValueError``. With no ``url``, the connection dials ``DEFAULT_ENDPOINT`` rooted at the token's
     ``root`` claim, which ``get_token`` must then supply. Publishing uses a separate connection; see
-    :func:`connect_relay_publisher`.
+    :func:`connect_relay_publisher`, or :func:`connect_relay` for one connection that does both.
     """
     # The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
     # the rest before anything connects.
@@ -452,13 +476,7 @@ async def connect_relay_subscriber(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
-                # Namespaces arrive only on a namespace_events request, never pushed unasked, and a relay
-                # with MoQ Active Count marks where each request's snapshot ends (spec/behavior.md, "Discovery").
-                setup_options=[
-                    *setup_options,
-                    KeyValuePair(SETUP_OPTION.SOLICIT, 1),
-                    KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1),
-                ],
+                setup_options=[*setup_options, *SUBSCRIBER_SETUP_OPTIONS],
                 request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),

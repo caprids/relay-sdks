@@ -14,8 +14,8 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
-| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | Not built yet (TypeScript first) |
-| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | Not built yet |
+| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | `connect_relay(url, ...)` returns `RelaySession`: the `RelaySubscriber` methods with `publish()` and an awaitable `close()` |
+| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `register_track()`, `announced`, `closed`, `close()`) |
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
@@ -110,7 +110,10 @@ always seemed to. The role-named entry points stay: `connectRelaySubscriber` and
 
 `RelaySession` is the result type: one MOQT session, both directions. It extends `RelaySubscriber`,
 so anything that takes a subscriber (a supervised subscriber's connection, a player's track source)
-takes it unchanged. `RelayPublication` is one namespace the connection announces, with the tracks it
+takes it unchanged. In Python the two share every subscriber method and property but neither
+subclasses the other: a session's `close()` is a coroutine, because it waits for its publications'
+groups as `RelayPublisher.close()` does, while `RelaySubscriber.close()` returns at once, and a type
+checker refuses that override. `RelayPublication` is one namespace the connection announces, with the tracks it
 serves. It is not a "publisher", which in this vocabulary is a connection, nor an "announcement",
 because it also serves the tracks and owns their writers. Its options type is
 `ConnectRelaySessionOptions`, because `ConnectRelayOptions` already names what every connection
