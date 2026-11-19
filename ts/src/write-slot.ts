@@ -82,6 +82,11 @@ export interface WriteSlot {
   bind(trackAlias: number | undefined): void;
   /** The publisher connection ended; `error` is its failure, absent after a clean shutdown. */
   disconnect(error?: unknown): void;
+  /**
+   * The track ends while the connection lives, as `writer.close()` ends it, except that an operation in flight fails
+   * with `error`. Groups already handed to the transport keep their delivery timeouts.
+   */
+  end(error: unknown): void;
 }
 
 /** The reason a stream reset hands the transport (TA-17): see `streamResetReason`. */
@@ -620,6 +625,9 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       alias = nextAlias;
       if (alias !== undefined) active?.wake();
       if (changed && !ended) notify(alias !== undefined);
+    },
+    end(error) {
+      close(error, RESET_CODE.CANCELLED);
     },
     disconnect(error) {
       close(error, connectionResetCode(error));

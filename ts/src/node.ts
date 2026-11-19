@@ -26,6 +26,7 @@ import {
   connectRelayPublisher as connectPublisher,
   type RelayPublisher,
 } from './publish.js';
+import { type ConnectRelaySessionOptions, connectRelay as connectSession, type RelaySession } from './relay-session.js';
 
 import {
   type ConnectSupervisedPublisherOptions,
@@ -179,6 +180,15 @@ export async function connectRelayPublisher(
   options: RelayNodeOptions<ConnectRelayPublisherOptions>,
 ): Promise<RelayPublisher> {
   return connectPublisher(withTransport(options));
+}
+
+/**
+ * Open one Relay connection that publishes and subscribes, as `@caprid/relay`'s `connectRelay` does, over native QUIC
+ * through `@caprid/relay-quic` unless `createTransport` is given. An open connection keeps the process alive until it
+ * closes.
+ */
+export async function connectRelay(options: RelayNodeOptions<ConnectRelaySessionOptions>): Promise<RelaySession> {
+  return connectSession(withTransport(options));
 }
 
 /**

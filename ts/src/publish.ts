@@ -1,6 +1,8 @@
 import {
   createMoqtPublishSession,
   createSubgroupWriter,
+  type MoqtPublishSession,
+  type MoqtPublishSessionCallbacks,
   type ObjectStatus,
   type RegisteredTrack,
   type SubgroupWriter,
@@ -14,7 +16,7 @@ import {
 } from './delivery-timeouts.js';
 import { RelayError } from './errors.js';
 import { trackSendOptions } from './send-order.js';
-import { createSettlingGroups } from './settling-groups.js';
+import { createSettlingGroups, type SettlingGroups } from './settling-groups.js';
 import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
@@ -235,123 +237,305 @@ export interface RelayPublisher {
 }
 
 /**
- * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; this
- * initial publishing API does not share their physical transport. A relay must solicit the
- * namespace and subscribe upstream before data can flow.
+ * One namespace a connection announces, with the tracks it serves: what `connectRelay` returns from `publish()`. A
+ * dedicated publisher connection is one of these. Its tracks behave as on {@link RelayPublisher}.
+ */
+export interface RelayPublication {
+  /** The announced namespace. */
+  readonly namespace: readonly string[];
+  /**
+   * Settles once the namespace announce has reached the wire on a solicitation that covers it, no earlier than the
+   * first registered track; see {@link RelayPublisher.announced}. Terminated by the publication or connection ending
+   * first. Pre-handled, so nobody has to await it.
+   */
+  readonly announced: Promise<void>;
+  /** Register a track in this namespace and return its writer, as {@link RelayPublisher.registerTrack} does. */
+  registerTrack(options: RegisterTrackOptions): RelayTrackWriter;
+  /**
+   * Resolves once the publication has ended: after `close()`, when the relay withdrew its interest in the namespace
+   * (`NAMESPACE_ENDED`; the connection stays open), or with the connection. Never rejects.
+   */
+  readonly closed: Promise<{
+    /** What ended it; absent after `close()` or a clean connection shutdown. */
+    error?: unknown;
+  }>;
+  /**
+   * End this namespace's tracks, wait for their completed groups the relay has not acknowledged (as
+   * {@link RelayPublisher.close} does), then withdraw the namespace. The connection stays open. Idempotent.
+   */
+  close(): Promise<void>;
+}
+
+/** What one connection's publications share, and how the connection tells them it has ended. */
+interface PublishHost {
+  /** The session callbacks that reach the publications; the session is created with them. */
+  callbacks: Pick<
+    MoqtPublishSessionCallbacks,
+    'onAnnounced' | 'onAnnounceEnded' | 'onSubscribe' | 'onRequestUpdate' | 'onSubscribeEnd' | 'onTrackBinding'
+  >;
+  /** Bind the session once it is up. Before this, `publish()` throws. */
+  bind(session: MoqtPublishSession, lifetime: { assertOpen(): void; closed: Promise<{ error?: unknown }> }): void;
+  /** Announce `namespace` and serve tracks in it. A namespace published once on a connection stays taken. */
+  publish(namespace: string[]): RelayPublication;
+  /** End every publication's tracks and wait for their groups to settle, for a connection about to close. */
+  endAll(): Promise<void>;
+  /** End one publication while the connection lives: its tracks fail with `error`, and the namespace is withdrawn. */
+  disconnect(namespace: readonly string[], error: unknown): void;
+}
+
+/**
+ * Create the publishing state of one connection. `onNamespaceEnded` is told when the relay withdraws its interest in
+ * a namespace while the connection lives (no solicitation covers it anymore).
+ */
+function createPublishHost(onNamespaceEnded: (namespace: readonly string[], error: unknown) => void): PublishHost {
+  type Publication = {
+    api: RelayPublication;
+    /** One write slot per registered track; the session's binding callback reaches them through here. */
+    tracks: Map<string, WriteSlot>;
+    announce(): void;
+    /** The connection ended, or (`live`) the namespace was lost while it lives: its tracks end at the core too. */
+    disconnect(error: unknown, live?: boolean): void;
+    /** End the tracks and drain their groups for at least `drainMs`, or the tracks' own largest deadline. */
+    end(drainMs?: number): Promise<void>;
+    /** The largest write deadline among the tracks. */
+    readonly drainMs: number;
+  };
+  const publications = new Map<string, Publication>();
+  // Each relay subscription's delivery timeouts (§5.2), by its request ID, which the core also uses as its track alias:
+  // SUBSCRIBE's parameters, as REQUEST_UPDATE changes them.
+  const subscriptionTimeouts = new Map<number, DeliveryTimeouts>();
+  // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track on the connection.
+  const settlingGroups = createSettlingGroups();
+  /** Set once the connection starts closing: no publication may start after `endAll()` took its snapshot. */
+  let shuttingDown = false;
+  let bound: { session: MoqtPublishSession; assertOpen(): void; closed: Promise<{ error?: unknown }> } | undefined;
+  let ended = false;
+  const key = (namespace: readonly string[]) => JSON.stringify(namespace);
+
+  const create = (
+    namespace: string[],
+    { session, assertOpen, closed: connectionClosed }: NonNullable<typeof bound>,
+  ): Publication => {
+    const tracks = new Map<string, WriteSlot>();
+    // The connection's limit applies to every publication's groups, but closing one waits only for its own.
+    const ownGroups = createSettlingGroups(Number.POSITIVE_INFINITY);
+    const groups: SettlingGroups = {
+      hasRoom: () => settlingGroups.hasRoom(),
+      waitForRoom: (interrupted) => settlingGroups.waitForRoom(interrupted),
+      add(settled) {
+        settlingGroups.add(settled);
+        ownGroups.add(settled);
+      },
+      drain: (timeoutMs, stop) => ownGroups.drain(timeoutMs, stop),
+      get size() {
+        return ownGroups.size;
+      },
+    };
+    /** Set once the application's close() starts. */
+    let closingByApplication = false;
+    /** Set when the namespace was lost while the connection lives: every later operation fails with it. */
+    let lost: { error: unknown } | undefined;
+    const assertPublished = () => {
+      assertOpen();
+      if (lost) throw lost.error;
+    };
+    // What closing waits for: the largest write deadline among the tracks.
+    let drainMs = 0;
+    let closing = false;
+    let shutdown: Promise<void> | undefined;
+    let resolveClosed: (info: { error?: unknown }) => void = () => {};
+    const closed = new Promise<{ error?: unknown }>((resolve) => {
+      resolveClosed = resolve;
+    });
+    let announce: () => void = () => {};
+    let abandonAnnounce: (reason: unknown) => void = () => {};
+    const announced = new Promise<void>((resolve, reject) => {
+      announce = resolve;
+      abandonAnnounce = reject;
+    });
+    // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
+    void announced.catch(() => {});
+
+    const endTracks = async (atLeastMs = 0) => {
+      closing = true;
+      for (const slot of tracks.values()) slot.writer.close();
+      // Chromium resets every stream still awaiting its acknowledgment when the session closes, so give the last
+      // groups up to one write deadline to settle; after that they may be lost.
+      await groups.drain(Math.max(drainMs, atLeastMs), connectionClosed);
+    };
+
+    session.announce(namespace);
+    return {
+      tracks,
+      announce: () => announce(),
+      disconnect(error, live = false) {
+        closing = true;
+        if (live) lost = { error };
+        // Only a clean shutdown (no error at all) becomes CLOSED; a closure reason of `null` is preserved.
+        abandonAnnounce(
+          error === undefined
+            ? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection')
+            : error,
+        );
+        // A namespace lost while the connection lives ends its tracks as `close()` would, failing what is in flight with
+        // `error` before the core ends the track; the transport goes on, and so do the delivery timeouts it still needs.
+        for (const slot of tracks.values()) {
+          if (live) slot.end(error);
+          else slot.disconnect(error);
+        }
+        // The relay withdrawing the namespace while the application's own close() drains it does not make that close a
+        // withdrawal: `closed` reports the close the application asked for.
+        resolveClosed(error === undefined || (live && closingByApplication) ? {} : { error });
+      },
+      end: endTracks,
+      get drainMs() {
+        return drainMs;
+      },
+      api: {
+        namespace,
+        announced,
+        closed,
+        registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
+          // Arguments first, then connection state, then the registry.
+          const name = trackName(track);
+          const properties = trackPropertyPairs(trackProperties);
+          assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
+          assertPublished();
+          if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
+          if (tracks.has(name)) throw new RangeError('Track name is already registered on this publisher connection');
+
+          const registered = session.registerTrack({
+            trackNamespace: namespace,
+            trackName: name,
+            trackProperties: properties,
+          });
+          const sendOptions = trackSendOptions(properties);
+          const slot = createWriteSlot({
+            openSubgroup: async (trackAlias, groupId) =>
+              reportingObjects(
+                createSubgroupWriter(await session.openUniStream(trackAlias, sendOptions), {
+                  trackAlias,
+                  groupId,
+                  hasProperties: true,
+                }),
+                registered,
+              ),
+            settlingGroups: groups,
+            namespaceSolicited: () => session.isSolicited(namespace),
+            assertOpen: assertPublished,
+            endTrack: () => registered.end(),
+            writeTimeoutMs,
+            trackTimeouts: publisherTimeouts(properties),
+            subscriberTimeouts: (trackAlias) => subscriptionTimeouts.get(trackAlias) ?? NO_DELIVERY_TIMEOUTS,
+          });
+          tracks.set(name, slot);
+          drainMs = Math.max(drainMs, writeTimeoutMs);
+          return slot.writer;
+        },
+        close() {
+          shutdown ??= (async () => {
+            if (ended) return;
+            closingByApplication = true;
+            await endTracks();
+            abandonAnnounce(
+              new RelayError('CLOSED', 'Relay publication closed before its namespace was announced', 'connection'),
+            );
+            session.withdraw(namespace);
+            resolveClosed({});
+          })();
+          return shutdown;
+        },
+      },
+    };
+  };
+
+  return {
+    callbacks: {
+      onAnnounced: ({ namespace }) => publications.get(key(namespace))?.announce(),
+      onAnnounceEnded: ({ namespace, error }) => onNamespaceEnded(namespace, error),
+      onSubscribe: ({ requestId, parameters }) => subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters)),
+      onRequestUpdate: ({ requestId, parameters }) => {
+        const previous = subscriptionTimeouts.get(requestId);
+        if (previous) subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters, previous));
+      },
+      onSubscribeEnd: ({ requestId }) => subscriptionTimeouts.delete(requestId),
+      onTrackBinding: ({ trackNamespace, trackName, trackAlias }) =>
+        publications.get(key(trackNamespace))?.tracks.get(trackName)?.bind(trackAlias),
+    },
+    bind(session, lifetime) {
+      bound = { session, assertOpen: lifetime.assertOpen, closed: lifetime.closed };
+      void lifetime.closed.then(({ error }) => {
+        ended = true;
+        for (const publication of publications.values()) publication.disconnect(error);
+      });
+    },
+    publish(namespace) {
+      if (!bound) throw new Error('publish before the connection is up');
+      bound.assertOpen();
+      if (ended || shuttingDown) throw new RelayError('CLOSED', 'Relay connection is closed', 'connection');
+      if (publications.has(key(namespace)))
+        throw new RangeError(
+          'Namespace is already published on this connection, including after its publication closed',
+        );
+      const publication = create(namespace, bound);
+      publications.set(key(namespace), publication);
+      return publication.api;
+    },
+    disconnect(namespace, error) {
+      const publication = publications.get(key(namespace));
+      if (!publication || ended) return;
+      bound?.session.withdraw([...namespace]);
+      publication.disconnect(error, true);
+    },
+    async endAll() {
+      shuttingDown = true;
+      // The connection's groups get the largest deadline among all its tracks, as a publisher connection's do.
+      const all = [...publications.values()];
+      const drainMs = Math.max(0, ...all.map((publication) => publication.drainMs));
+      await Promise.all(all.map((publication) => publication.end(drainMs)));
+    },
+  };
+}
+
+/**
+ * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; `connectRelay` opens one
+ * connection that does both. A relay must solicit the namespace and subscribe upstream before data can flow.
  */
 export async function connectRelayPublisher(options: ConnectRelayPublisherOptions): Promise<RelayPublisher> {
   // Arguments before anything else: an invalid namespace never reaches the token provider or the
   // transport factory.
   const namespace = namespaceFields(options.namespace);
 
-  // One write slot per registered track; the session's binding callback and the connection's end
-  // reach the slots through here.
-  const tracks = new Map<string, WriteSlot>();
-  // Each relay subscription's delivery timeouts (§5.2), by its request ID, which the core also uses as
-  // its track alias: SUBSCRIBE's parameters, as REQUEST_UPDATE changes them.
-  const subscriptionTimeouts = new Map<number, DeliveryTimeouts>();
-  // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track.
-  const settlingGroups = createSettlingGroups();
-  // What closing waits for them: the largest write deadline among the tracks.
-  let drainMs = 0;
-  // Settled by the session's onAnnounced callback; a closure that comes first terminates it.
-  let announce: () => void = () => {};
-  let abandonAnnounce: (reason: unknown) => void = () => {};
-  const announced = new Promise<void>((resolve, reject) => {
-    announce = resolve;
-    abandonAnnounce = reject;
-  });
-  // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
-  void announced.catch(() => {});
-  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
-    createMoqtPublishSession(transport, {
+  let endConnection: (error: unknown) => void = () => {};
+  const host = createPublishHost((_namespace, error) => endConnection(error));
+  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) => {
+    endConnection = (error) =>
+      callbacks.onClosed?.({
+        error: new RelayError('NAMESPACE_ENDED', 'Relay withdrew the namespace', 'connection', { cause: error }),
+      });
+    return createMoqtPublishSession(transport, {
       implementationName: '@caprid/relay publisher',
       setupOptions,
-      callbacks: {
-        ...callbacks,
-        onAnnounced: () => announce(),
-        onSubscribe: ({ requestId, parameters }) => subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters)),
-        onRequestUpdate: ({ requestId, parameters }) => {
-          const previous = subscriptionTimeouts.get(requestId);
-          if (previous) subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters, previous));
-        },
-        onSubscribeEnd: ({ requestId }) => subscriptionTimeouts.delete(requestId),
-        onTrackBinding: ({ trackName, trackAlias }) => tracks.get(trackName)?.bind(trackAlias),
-        onAnnounceEnded: ({ error }) =>
-          callbacks.onClosed?.({
-            error: new RelayError('NAMESPACE_ENDED', 'Relay withdrew the namespace', 'connection', { cause: error }),
-          }),
-      },
-    }),
-  );
-  const { session } = lifetime;
-  let closing = false;
+      callbacks: { ...callbacks, ...host.callbacks },
+    });
+  });
+  host.bind(lifetime.session, lifetime);
+  const publication = host.publish(namespace);
   let shutdown: Promise<void> | undefined;
 
-  session.announce(namespace);
-  void lifetime.closed.then(({ error }) => {
-    closing = true;
-    // Only a clean shutdown (no error at all) becomes CLOSED; a closure reason of `null` is preserved.
-    abandonAnnounce(
-      error === undefined
-        ? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection')
-        : error,
-    );
-    for (const slot of tracks.values()) slot.disconnect(error);
-  });
   const closed = lifetime.transportClosed.then(
     () => lifetime.closed,
     () => lifetime.closed,
   );
 
   return {
-    announced,
+    announced: publication.announced,
     closed,
     expiresAt: lifetime.expiresAt === undefined ? undefined : new Date(lifetime.expiresAt.getTime()),
-    registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
-      // Arguments first, then connection state, then the registry.
-      const name = trackName(track);
-      const properties = trackPropertyPairs(trackProperties);
-      assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
-      lifetime.assertOpen();
-      if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
-      if (tracks.has(name)) throw new RangeError('Track name is already registered on this publisher connection');
-
-      const registered = session.registerTrack({
-        trackNamespace: namespace,
-        trackName: name,
-        trackProperties: properties,
-      });
-      const sendOptions = trackSendOptions(properties);
-      const slot = createWriteSlot({
-        openSubgroup: async (trackAlias, groupId) =>
-          reportingObjects(
-            createSubgroupWriter(await session.openUniStream(trackAlias, sendOptions), {
-              trackAlias,
-              groupId,
-              hasProperties: true,
-            }),
-            registered,
-          ),
-        settlingGroups,
-        namespaceSolicited: () => session.namespaceSolicited,
-        assertOpen: lifetime.assertOpen,
-        endTrack: () => registered.end(),
-        writeTimeoutMs,
-        trackTimeouts: publisherTimeouts(properties),
-        subscriberTimeouts: (trackAlias) => subscriptionTimeouts.get(trackAlias) ?? NO_DELIVERY_TIMEOUTS,
-      });
-      tracks.set(track, slot);
-      drainMs = Math.max(drainMs, writeTimeoutMs);
-      return slot.writer;
-    },
+    registerTrack: (options) => publication.registerTrack(options),
     close() {
       shutdown ??= (async () => {
-        closing = true;
-        for (const slot of tracks.values()) slot.writer.close();
-        // Chromium resets every stream still awaiting its acknowledgment when the session closes,
-        // so give the last groups up to one write deadline to settle; after that they may be lost.
-        await settlingGroups.drain(drainMs, lifetime.closed);
+        await host.endAll();
         lifetime.close();
         await closed;
       })();
@@ -359,3 +543,5 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
     },
   };
 }
+
+export { createPublishHost, type PublishHost };

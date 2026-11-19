@@ -1034,7 +1034,9 @@ empty, because every generation is three fields below it.
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
-transport from subscriber connections. It needs no camera, microphone, catalog, or timestamps.
+transport from subscriber connections. It needs no camera, microphone, catalog, or timestamps. To
+publish and subscribe on one connection, use [`connectRelay`](#publish-and-subscribe-on-one-connection):
+its publications behave as described here.
 
 Publishing follows Relay's announce-and-serve ingest flow. `registerTrack()` registers the track and
 sends nothing. `write()` waits for the relay to subscribe upstream (demand) before it sends bytes.
@@ -1109,6 +1111,39 @@ guidance.
 `track.close()` cancels an outstanding write and ends that track, and other tracks keep running.
 `publisher.close()` ends all tracks, retracts the namespace, and waits for the transport to shut
 down. You cannot reuse a track name within a publisher connection, even after its writer closes.
+
+### Publish and subscribe on one connection
+
+`connectRelay` opens one connection that subscribes as `connectRelaySubscriber` does and publishes any
+number of namespaces. A participant in a room needs one connection and one token for both directions:
+
+```ts
+import { connectRelay } from '@caprid/relay';
+
+const session = await connectRelay({ getToken });
+const me = session.publish(['room', 'p', myId]);
+const video = me.registerTrack({ track: 'video' });
+
+session.subscribe({ namespace: ['room', 'p', theirId], track: 'video' }, { onObject: render });
+for await (const event of session.namespaceEvents({ prefix: ['room', 'p'] })) {
+  // Everyone else under the prefix: the relay never reports this connection's own namespaces.
+}
+```
+
+`publish()` returns a `RelayPublication`. Its tracks work as on a publisher connection, and
+`announced` settles the same way. Publish another namespace with another `publish()` call. The token
+must grant every namespace the connection publishes and every one it subscribes to.
+
+- `publication.close()` ends that namespace's tracks, waits for their last groups, and withdraws the
+  namespace. The connection stays open. The namespace stays taken on this connection.
+- If the relay stops soliciting a namespace, only its publication ends: `publication.closed` resolves
+  with a `NAMESPACE_ENDED` error, and its writes fail with it. A publisher connection would end
+  instead.
+- The relay does not route the connection's own announcements back to it. Its discovery leaves them
+  out, and subscribing to one of its own tracks is refused with request error 16.
+- `session.close()` closes every publication, then the connection.
+
+Supervised connections still use one connection per role.
 
 ### Text and JSON
 

@@ -53,6 +53,7 @@ import {
   type SubgroupHeader,
 } from './object-stream.js';
 import { type BidirectionalStreamLike, openRequestStream, type RequestStream } from './request-stream.js';
+import { isSessionError } from './transport-error.js';
 
 // ============================================================================
 // Transport seam
@@ -372,6 +373,11 @@ export interface MoqtSessionCallbacks {
 
 /** Options for {@link createMoqtSession}. */
 export interface MoqtSessionConfig {
+  /**
+   * The peer's consumed Request IDs (§6.4.2.1). Sessions sharing one transport pass the same set, so an ID one of them
+   * consumed is a reuse to the other; `createMoqtDuplexSession` does. Default: the session's own.
+   */
+  peerRequestIds?: Set<number>;
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§9.1.5). */
@@ -531,6 +537,17 @@ function declares(options: readonly KeyValuePair[], type: number): boolean {
 
 type RequestKind = 'subscribe' | 'fetch' | 'track-status' | 'subscribe-namespace';
 
+const PENDING = Symbol('pending');
+
+/** Whether `promise` had already settled when this was called: one microtask turn, whichever handler runs first. */
+async function settled(promise: Promise<unknown>): Promise<boolean> {
+  try {
+    return (await Promise.race([promise, Promise.resolve(PENDING)])) !== PENDING;
+  } catch {
+    return true;
+  }
+}
+
 function activeCountViolation(
   answers: RequestKind,
   negotiated: boolean,
@@ -587,7 +604,7 @@ class MoqtSessionImpl implements MoqtSession {
   /** Client request IDs are even, starting at 0; a server's are odd, starting at 1 (§6.4.2.1). */
   #nextRequestId: number;
   /** Every inbound request ID ever seen. Reuse, or this endpoint's own parity, closes the session (§6.4.2.1). */
-  #peerRequestIds = new Set<number>();
+  #peerRequestIds: Set<number>;
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
   #trackStatuses = new Map<number, TrackStatusRecord>();
@@ -609,6 +626,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#transport = transport;
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
+    this.#peerRequestIds = config.peerRequestIds ?? new Set();
     this.#callbacks = config.callbacks ?? {};
     this.#nextRequestId = config.perspective === 'server' ? 1 : 0;
     this.ready = new Promise((resolve, reject) => {
@@ -656,6 +674,14 @@ class MoqtSessionImpl implements MoqtSession {
       const control = await this.#transport.createUnidirectionalStream();
 
       this.#controlWriter = control.getWriter();
+      // A control stream MUST stay open for the session's lifetime (§6.3): a peer stopping it has ended the session, as
+      // the publish driver also treats it. A clean local close resolves the writer instead, and #fatal no-ops once
+      // #handleClosed has run. A session-wide failure (a peer's clean close fails every stream as it settles `closed`)
+      // is the transport's to report: `closed` says whether it was clean.
+      void this.#controlWriter.closed.catch(async (error: unknown) => {
+        if (isSessionError(error) || (await settled(this.#transport.closed))) return;
+        this.#fatal(error);
+      });
       const options: KeyValuePair[] = [
         {
           type: SETUP_OPTION.MOQT_IMPLEMENTATION,
@@ -1546,6 +1572,13 @@ class MoqtSessionImpl implements MoqtSession {
     const reader = new StreamReader(stream.readable);
     const type = await reader.readVarint();
     const message = await this.#readControlFrame(reader, type);
+    // A request still arriving when the session ended is dropped: nothing reaches a callback after `onClosed`. (A duplex
+    // session's transport outlives its subscriber, for the publisher's drain.)
+    if (this.#destroyed) {
+      await reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+      return;
+    }
     const initiatingRequestId =
       message.kind === 'fetch'
         ? message.request.requestId

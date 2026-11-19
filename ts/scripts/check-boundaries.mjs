@@ -135,6 +135,7 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
   'SubscriptionConnectionClosedError',
   'SubscriptionOverflowError',
   'SubscriptionRequestError',
+  'connectRelay',
   'connectRelayPublisher',
   'connectRelaySubscriber',
   'connectSupervisedPublisher',

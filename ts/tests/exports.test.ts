@@ -16,7 +16,7 @@ import type { DocumentService, FrameOutcomeKind, FrameWriter, FrameWriterOptions
  * and nothing else, so a rename in the source fails to compile here until the record is updated.
  */
 describe('public vocabulary', () => {
-  it('exports one entry point per connection role and nothing under the old names', () => {
+  it('exports one entry point per connection kind', () => {
     expect(Object.keys(relay).sort()).toEqual([
       'DEFAULT_ENDPOINT',
       'RelayError',
@@ -25,6 +25,7 @@ describe('public vocabulary', () => {
       'SubscriptionConnectionClosedError',
       'SubscriptionOverflowError',
       'SubscriptionRequestError',
+      'connectRelay',
       'connectRelayPublisher',
       'connectRelaySubscriber',
       'connectSupervisedPublisher',
@@ -34,7 +35,6 @@ describe('public vocabulary', () => {
       'roomEndpoint',
       'webTransport',
     ]);
-    expect(relay).not.toHaveProperty('connectRelay');
   });
 
   it('spells subscription events after what happened, not after the protocol message', () => {
