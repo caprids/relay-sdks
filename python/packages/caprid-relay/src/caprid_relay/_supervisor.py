@@ -236,8 +236,8 @@ class Supervisor:
         # Every root ever published: a closed publication's root stays taken.
         self._roots: set[tuple[str, ...]] = set()
         self._stop_listeners: list[Callable[[], None]] = []
-        # Connections given up and still closing: draining groups the relay has not acknowledged. `stop()` waits
-        # for them, and a publication's `close()` for those that carry it.
+        # Connections ended or given up and still closing: draining groups the relay has not acknowledged. `stop()`
+        # waits for them, and a publication's `close()` for those that carry it.
         self._draining: dict[_Connection, asyncio.Future[None]] = {}
         self._waiters: list[asyncio.Future[None]] = []
         # Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one
@@ -473,16 +473,16 @@ class Supervisor:
         return _close_session(live.session)
 
     def _drain_live(self, live: _Connection, after: Callable[[], None] | None = None) -> None:
-        """Close a connection given up while the loop runs on, draining in the background; ``after`` runs once it
-        closed."""
+        """Close a connection ended or given up while the loop runs on, draining in the background; ``after`` runs
+        once it closed. The connection is closed once: a later call only adds its ``after``."""
         already = self._draining.get(live)
         if already is not None:
-            # Started for a lost publication before a rotation gave the connection up: its clean-up still runs
-            # once it closed.
+            # Started when the connection ended, or for a lost publication, before a rotation gave it up: its
+            # clean-up still runs once it closed.
             if after is not None:
                 already.add_done_callback(lambda _: after())
             return
-        closing = self._close_live(live)
+        closing = None if live.closing else self._close_live(live)
         if closing is None:
             if after is not None:
                 after()
@@ -511,10 +511,15 @@ class Supervisor:
         live.end = cause
         live.over.set_result(closed)
         live.ended.cancel()
-        # Given up for a lost publication while the session is still open: close it. Its wants move to the next
-        # connection once that is up, as on a rotation (`_run`).
-        if cause == "fault" and not self.stopped:
-            self._drain_live(live, lambda: self._settle_ended(live))
+        if not self.stopped:
+            if cause == "fault":
+                # Given up for a lost publication while the session is still open: close it. Its wants move to the
+                # next connection once that is up, as on a rotation (`_run`).
+                self._drain_live(live, lambda: self._settle_ended(live))
+            else:
+                # A session can report its end before it drained: after a GOAWAY a duplex session's publisher still
+                # waits for the relay to read its tracks' ends. Closing it waits for that, and stop() for the close.
+                self._drain_live(live)
         for generation in live.publications.values():
             generation.ended = True
             # The connection's end closed its groups under the application, which may never close them itself.

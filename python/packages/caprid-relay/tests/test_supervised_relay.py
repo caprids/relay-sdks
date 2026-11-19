@@ -11,9 +11,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
-from core_helpers.raw_peer import solicit_namespace
+from core_helpers.raw_peer import raw_subscribe, solicit_namespace
 from core_helpers.transport_pair import PairTransport, create_transport_pair
-from core_helpers.waiting import wait_for
+from core_helpers.waiting import settle, wait_for
 from relay_helpers.supervision_fakes import FakePublisher, FakeSession, FakeSubscriber, until
 from test_relay_session import scripted_relay
 
@@ -32,7 +32,7 @@ from caprid_relay.supervised_publisher import _supervise_relay_publisher
 from caprid_relay.supervised_relay import _supervise_relay
 from caprid_relay.supervised_subscriber import _supervise_relay_subscriber
 from moq_core import Closed
-from moq_core.control_messages import Namespace
+from moq_core.control_messages import Namespace, encode_goaway
 
 FAST = SupervisionBackoff(initial_delay=0, max_delay=0)
 SLOW = SupervisionBackoff(initial_delay=10, max_delay=10)
@@ -523,7 +523,9 @@ async def test_a_close_from_on_status_reporting_closed_keeps_the_cancellation_re
 # ------------------------------------------------------------------ over connect_relay
 
 
-async def test_over_real_connections_a_lost_root_replaces_the_connection_and_every_root_comes_back() -> None:
+def real_connections() -> tuple[list[PairTransport], Callable[[CancellationToken], Awaitable[Any]]]:
+    """``connect_relay`` over in-memory transports, each to a scripted relay: the relay ends of every connection
+    made, and the connect function."""
     servers: list[PairTransport] = []
 
     async def connect(attempt: CancellationToken) -> Any:
@@ -538,6 +540,11 @@ async def test_over_real_connections_a_lost_root_replaces_the_connection_and_eve
             create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready),
         )
 
+    return servers, connect
+
+
+async def test_over_real_connections_a_lost_root_replaces_the_connection_and_every_root_comes_back() -> None:
+    servers, connect = real_connections()
     statuses: list[tuple[str, BaseException | None]] = []
     relay = await _supervise_relay(connect, reconnect=FAST, on_status=lambda status, e: statuses.append((status, e)))
     try:
@@ -567,5 +574,33 @@ async def test_over_real_connections_a_lost_root_replaces_the_connection_and_eve
             "/".join(m.track_namespace_suffix) for m in solicitation.received if isinstance(m, Namespace)
         )
         assert announced == [f"host/{second}", f"p/alice/{second}"]
+    finally:
+        await relay.close()
+
+
+async def test_over_real_connections_a_close_after_a_goaway_waits_for_the_ended_connection_to_drain() -> None:
+    servers, connect = real_connections()
+    relay = await _supervise_relay(connect, reconnect=SLOW)
+    try:
+        publication = relay.publish(["room", "p", "alice"])
+        publication.register_track("video")
+        namespace = publication.namespace
+        assert namespace is not None
+        solicitation = await solicit_namespace(servers[0], ["room"], 1)
+        await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
+        upstream = await raw_subscribe(servers[0], namespace, "video", 3)
+        await wait_for(lambda: upstream.kinds() == ["subscribe-ok"])
+
+        await solicitation.send(encode_goaway(1000))
+        await wait_for(lambda: relay.status == "reconnecting")
+        closing = asyncio.ensure_future(relay.close())
+        await settle()
+        # The session ended at the GOAWAY, but its publisher still waits for the relay to read the track's end.
+        assert not servers[0].ended
+        assert not closing.done()
+
+        await upstream.fin()
+        await asyncio.wait_for(closing, 1)
+        assert servers[0].ended
     finally:
         await relay.close()
