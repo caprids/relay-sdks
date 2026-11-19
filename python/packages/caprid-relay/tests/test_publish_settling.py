@@ -296,8 +296,8 @@ async def test_a_track_subgroup_timeout_resets_a_settling_group_with_delivery_ti
 
     await track.write(b"\x01")
     handed_over = loop.time()
-    assert publisher._settling_groups.size == 1
-    await wait_for(lambda: publisher._settling_groups.size == 0)
+    assert publisher._host._groups.size == 1
+    await wait_for(lambda: publisher._host._groups.size == 0)
 
     assert loop.time() - handed_over >= 0.05
     assert transport.data_streams[0].reset_codes == [STREAM_RESET_CODE.DELIVERY_TIMEOUT]
@@ -325,7 +325,7 @@ async def test_the_relays_subgroup_timeout_applies_and_a_request_update_changes_
     await wait_for(lambda: transport.data_streams[0].reset_codes == [STREAM_RESET_CODE.DELIVERY_TIMEOUT])
     await settle(0.1)
     assert transport.data_streams[1].reset_codes == []  # opened after the update: no timeout
-    assert publisher._settling_groups.size == 1
+    assert publisher._host._groups.size == 1
     assert track.has_demand  # the update was acknowledged, not refused as unsupported
 
 
@@ -339,7 +339,7 @@ async def test_the_timer_still_fires_after_the_track_closes(cleanup: Cleanup) ->
     await wait_for(lambda: len(done) == 1)  # PUBLISH_DONE went out without waiting
 
     await wait_for(lambda: transport.data_streams[0].reset_codes == [STREAM_RESET_CODE.DELIVERY_TIMEOUT])
-    assert publisher._settling_groups.size == 0
+    assert publisher._host._groups.size == 0
 
 
 async def test_publisher_close_ends_sooner_when_delivery_timeouts_end_the_settling_groups(cleanup: Cleanup) -> None:
