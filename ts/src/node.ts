@@ -33,6 +33,7 @@ import {
   type SupervisedPublisher,
   superviseRelayPublisher,
 } from './supervised-publisher.js';
+import { type ConnectSupervisedRelayOptions, type SupervisedRelay, superviseRelay } from './supervised-relay.js';
 import {
   type ConnectSupervisedSubscriberOptions,
   type SupervisedSubscriber,
@@ -209,4 +210,14 @@ export async function connectSupervisedPublisher(
   options: RelayNodeOptions<ConnectSupervisedPublisherOptions>,
 ): Promise<SupervisedPublisher> {
   return superviseRelayPublisher(connectPublisher, withTransport(options));
+}
+
+/**
+ * Open one connection that publishes, subscribes and reconnects, as `@caprid/relay`'s `connectSupervisedRelay` does,
+ * with every connection over native QUIC through `@caprid/relay-quic` unless `createTransport` is given.
+ */
+export async function connectSupervisedRelay(
+  options: RelayNodeOptions<ConnectSupervisedRelayOptions>,
+): Promise<SupervisedRelay> {
+  return superviseRelay(connectSession, withTransport(options));
 }

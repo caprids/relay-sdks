@@ -722,12 +722,14 @@ The iterator owns the request, never the connection.
 
 The primitives above never reconnect or retry. Applications can opt into a supervision layer
 built only on them: `connectSupervisedPublisher` / `connect_supervised_publisher` and
-`connectSupervisedSubscriber` / `connect_supervised_subscriber`. It owns the recovery policy in
+`connectSupervisedSubscriber` / `connect_supervised_subscriber`, and in TypeScript
+`connectSupervisedRelay`, which does both on one connection ([supervised relay](#supervised-relay)).
+It owns the recovery policy in
 [publisher recovery](publisher-recovery.md), so live applications don't each write it again. Neither supervisor changes what
 the primitives do. Python gives the backoff bounds and `stale_after` in seconds, and its want
 handlers take the namespace as a second argument.
 
-Both supervisors:
+Every supervisor:
 
 - Resolve once their first connection is up. A first attempt that fails on its arguments, or
   because the relay refused the credentials (`UNAUTHORIZED`), rejects with that failure. Any other
@@ -960,6 +962,48 @@ taken over.
   after a `PUBLISH_DONE` are discarded when the subscription is cancelled for its replacement.
 - `close()` cancels every want, closes every publishing-roots view without calling its handlers,
   and closes the connection.
+
+### Supervised relay
+
+`connectSupervisedRelay` supervises one [connection that publishes and subscribes](#one-connection-that-publishes-and-subscribes).
+It has the supervised subscriber's wants and publishing-roots views, and `publish(root)` for any
+number of roots. TypeScript only so far.
+
+- **A generation is a connection.** Each connection gets one generation field, chosen as for a
+  supervised publisher, and serves every published root followed by that field. All of a client's
+  namespaces therefore change generation together, and a viewer following one root's generations
+  sees the same field on the others. `generation` exposes the live field, each publication's
+  `namespace` its live namespace, and a callback runs once each connection is up and every
+  publication's tracks are registered on it.
+- **Publications.** `publish(root)` checks the root at once (the root plus one field must satisfy the
+  namespace rules) and returns a publication whose `registerTrack` behaves as the supervised
+  publisher's: writers outlive the connections, track names are unique per publication, and writes
+  are never replayed. A root published once stays taken, also after its publication closes.
+  `close()` on a publication ends its tracks, waits for their groups, and withdraws it from every
+  connection; the connection and the other publications carry on.
+- **Everything moves together.** A reconnect brings every root, track and want back on the next
+  connection. A [rotation](#rotation) registers every track on the replacement and moves each one as
+  the supervised publisher does, moves every want as the supervised subscriber does, and closes the
+  old connection once both have moved, or after the overlap.
+- **A lost root replaces the connection.** When the relay stops soliciting one of the roots while
+  the connection lives, the supervisor reconnects with that `NAMESPACE_ENDED` error: every root
+  moves to the next generation together. The old connection drains in the background. A
+  `connectRelay` connection would end only that publication.
+- **No loopback.** As on `connectRelay`, the relay does not route the connection's own announcements
+  back to it, and a want for one of its own tracks is refused. During a rotation the old and new
+  connections are two sessions, so each would see the roots the other announces; `publishingRoots`
+  leaves out every namespace under a root the supervisor publishes, so its own roots are never
+  reported.
+- `close()` cancels every want and view, ends every publication's tracks, and closes the connection
+  as `RelaySession.close()` does, draining their groups.
+
+Measured on 2026-11-19 against ord.relay.mux.global, TypeScript SDK on Node over native QUIC
+(`ts/scripts/probe-supervised-relay.mjs`), 3 of 3 runs: two peers each published two roots with one
+track each (one object every 200 ms), followed each other's roots, and wanted both of the other's
+tracks with `generations: true`. Halfway through an 8 s run, A rotated. Both of A's roots moved to
+the new generation together; A held 2 connections in all and B 1; B moved to A's new generation by
+a switch, with no restart, and received 39 to 40 objects on each track; and neither roster listed
+its own root. Before the SDK left its own roots out, A's roster listed A during the overlap.
 
 ### Publishing roots
 
@@ -1224,8 +1268,8 @@ whatever the session sends in SETUP, and routes its subscriptions as for any sub
   refused: request error 16 on moq-relay.
 - **Shutdown.** `close()` ends every publication's tracks, waits for their groups, retracts every
   announce, then closes the connection and every request on it.
-- **Supervision.** The supervised connections still open one connection per role; a supervised
-  connection that publishes and subscribes is not built yet.
+- **Supervision.** `connectSupervisedRelay` reconnects and rotates such a connection
+  ([supervised relay](#supervised-relay)).
 
 Measured on 2026-11-18 against ord.relay.mux.global, TypeScript SDK on Node over native QUIC
 (`ts/scripts/probe-relay-session.mjs`), 3 of 3 runs: two peers each opened one connection, announced

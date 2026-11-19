@@ -380,7 +380,7 @@ export type WantSurface = Pick<SupervisedSubscriber, 'want' | 'unwant' | 'catchU
  * the next connection. Everything is cancelled when the supervisor stops.
  */
 export function createWantSurface(
-  supervisor: Pick<Supervisor, 'liveConnection' | 'current' | 'stopped' | 'closedError' | 'onStop'>,
+  supervisor: Pick<Supervisor, 'liveConnection' | 'current' | 'stopped' | 'closedError' | 'onStop' | 'ownsNamespace'>,
 ): WantSurface {
   const wants = new Map<string, Want>();
   const views = new Set<PublishingRoots>();
@@ -470,7 +470,14 @@ export function createWantSurface(
       namespaceFields([...prefix, 'x', 'x']);
       if (supervisor.stopped) throw supervisor.closedError();
       const view: PublishingRoots = openPublishingRoots(
-        { liveConnection, current: supervisor.current, hold, onClosed: () => views.delete(view) },
+        {
+          liveConnection,
+          current: supervisor.current,
+          hold,
+          onClosed: () => views.delete(view),
+          // The connection a rotation replaces sees the next one's announces, and the other way round: hide both.
+          hides: (namespace) => supervisor.ownsNamespace(namespace),
+        },
         prefix,
         safeHandlers,
       );

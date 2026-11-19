@@ -1143,7 +1143,34 @@ must grant every namespace the connection publishes and every one it subscribes 
   out, and subscribing to one of its own tracks is refused with request error 16.
 - `session.close()` closes every publication, then the connection.
 
-Supervised connections still use one connection per role.
+`connectSupervisedRelay` does the same and reconnects. Each connection is one generation, and every
+root you publish is served as the root followed by that generation's field, so all of a client's
+namespaces move to a new connection together:
+
+```ts
+import { connectSupervisedRelay } from '@caprid/relay';
+
+const relay = await connectSupervisedRelay({ getToken, onStatus: (status) => showStatus(status) });
+const me = relay.publish(['room', 'p', myId]); // served as room/p/<myId>/<generation>
+const video = me.registerTrack({ track: 'video' }); // the writer outlives the connections
+
+relay.publishingRoots(
+  { prefix: ['room', 'p'] },
+  {
+    onChanged({ added, removed }) {
+      // Your own root is not reported: the relay never routes a connection's own announcements back to it.
+      for (const root of added) {
+        relay.want(`video/${root.id}`, { namespace: root.namespace, track: 'video', generations: true }, { onObject: render });
+      }
+      for (const root of removed) relay.unwant(`video/${root.id}`);
+    },
+  },
+);
+```
+
+It has every `want()` and `publishingRoots()` feature of the supervised subscriber, and the track
+writers of the supervised publisher. If the relay stops soliciting one of your roots, the whole
+connection is replaced, so every root moves to the next generation together.
 
 ### Text and JSON
 

@@ -85,6 +85,8 @@ export interface Supervisor {
   rotate(): void;
   /** Stop reconnecting and close every connection; settles once their publications drained. */
   stop(result: { error?: unknown }): Promise<void>;
+  /** Whether `namespace` lies under a root this supervisor publishes, or ever did. */
+  ownsNamespace(namespace: readonly string[]): boolean;
   /** Whether the loop has stopped. */
   readonly stopped: boolean;
   /** The error a call after stopping throws. */
@@ -145,8 +147,9 @@ export function createSupervisor<O extends ConnectRelayOptions>(
 ): Supervisor {
   const { what, connection, signal, backoff, rotateBeforeMs, onStatus, onGeneration } = config;
   const publications = new Set<Publication>();
-  /** Every root ever published: a closed publication's root stays taken. */
+  /** Every root ever published, by key and as given: a closed publication's root stays taken. */
   const roots = new Set<string>();
+  const published: string[][] = [];
   const stopListeners: (() => void)[] = [];
   let current: Live | undefined;
   /** The connection a rotation is replacing, while what it carries moves off it. */
@@ -632,6 +635,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     const key = JSON.stringify(root);
     if (roots.has(key)) throw new RangeError('Namespace is already published on this supervised connection');
     roots.add(key);
+    published.push(root);
     const publication: Publication = { root, tracks: new Map(), names: new Set(), closed: false };
     publications.add(publication);
     if (current) attach(current, publication, false);
@@ -716,6 +720,11 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       return stop(result);
     },
     closedError,
+    ownsNamespace(namespace) {
+      return published.some(
+        (root) => root.length < namespace.length && root.every((field, i) => namespace[i] === field),
+      );
+    },
     onStop(listener) {
       stopListeners.push(listener);
     },
