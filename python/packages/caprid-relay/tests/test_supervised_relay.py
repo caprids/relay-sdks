@@ -483,6 +483,46 @@ async def test_a_close_waits_for_a_replacement_discarded_for_an_expiry_no_later(
     assert connections[1].closed.done()
 
 
+async def test_a_close_waits_for_a_replacement_whose_connection_was_on_its_way_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stop_after(turns: int) -> None:
+        old, nxt = FakeSession(), FakeSession()
+        replacement: asyncio.Future[FakeSession] = asyncio.get_running_loop().create_future()
+        drain = asyncio.Event()
+        close = nxt.close
+
+        async def slow() -> None:
+            await drain.wait()
+            await close()
+
+        monkeypatch.setattr(nxt, "close", slow)
+        attempts = 0
+
+        async def connect(_attempt: CancellationToken) -> Any:
+            nonlocal attempts
+            attempts += 1
+            return old if attempts == 1 else await replacement
+
+        relay = await _supervise_relay(connect, reconnect=FAST)
+        relay.rotate()
+        await until(lambda: attempts == 2, "replacement attempted")
+        replacement.set_result(nxt)
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        stopping = relay._supervisor.stop()
+        await asyncio.sleep(0.01)
+        try:
+            assert not stopping.done(), f"stopped after {turns} turns"
+        finally:
+            drain.set()
+            await stopping
+
+    # Stopped at each turn of the hand-back: the attempt settling, the rotation resuming, the replacement taken.
+    for turns in range(4):
+        await stop_after(turns)
+
+
 async def test_wants_leave_a_connection_given_up_for_a_lost_root_without_waiting_for_its_drain(
     monkeypatch: pytest.MonkeyPatch, cleanup: list[Callable[[], object]]
 ) -> None:

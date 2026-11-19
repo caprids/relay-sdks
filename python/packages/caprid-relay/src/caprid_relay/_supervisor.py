@@ -192,6 +192,16 @@ def _close_session(session: SupervisedConnection) -> asyncio.Future[None] | None
     return None if closing is None else asyncio.ensure_future(_quietly(closing))
 
 
+async def _close_arriving(connecting: asyncio.Future[SupervisedConnection]) -> None:
+    """Close the connection an attempt brings back after the loop stopped, if it brings one back."""
+    await asyncio.wait([connecting])
+    if connecting.cancelled():
+        return
+    closing = _close_session(connecting.result())
+    if closing is not None:
+        await closing
+
+
 async def _quietly(operation: Awaitable[object]) -> None:
     with contextlib.suppress(Exception):
         await operation
@@ -235,6 +245,9 @@ class Supervisor:
         self._lifetime = CancellationToken()
         # The connection attempt in progress only. Once connected, a connection is closed, not cancelled.
         self._attempt: CancellationToken | None = None
+        # The attempt in progress, until the connection it brings back is taken (made current, or discarded):
+        # stop() closes a connection that comes back, or was not taken, before it ran.
+        self._connecting: asyncio.Future[SupervisedConnection] | None = None
         self._publications: list[_Publication] = []
         # Every root ever published. A closed publication's root stays taken.
         self._roots: set[tuple[str, ...]] = set()
@@ -427,6 +440,9 @@ class Supervisor:
                     self._draining[live] = closing
             self._settle_ended(live)
         pending = list(self._draining.values())
+        # A connection still on its way back to the loop, or not yet taken: only this stop sees it.
+        if self._connecting is not None:
+            pending.append(asyncio.ensure_future(_close_arriving(self._connecting)))
         self._wake_waiters()
 
         def finish() -> None:
@@ -539,14 +555,18 @@ class Supervisor:
         """Open one connection, or ``None`` if the loop stopped first. Raises the attempt's failure."""
         generation = new_generation()
         self._attempt = attempt = CancellationToken()
+        self._connecting = connecting = asyncio.get_running_loop().create_future()
         try:
             session = await self._connect(attempt, generation)
+        except BaseException:
+            connecting.cancel()
+            self._connecting = None
+            raise
         finally:
             self._attempt = None
+        connecting.set_result(session)
+        # stop() ran while the attempt was in progress: it closes what the attempt brought back.
         if self.stopped:
-            closing = _close_session(session)
-            if closing is not None:
-                await closing
             return None
         loop = asyncio.get_running_loop()
         subscriber = session.subscriber if session.subscriber is not None else _NO_SUBSCRIBER
@@ -646,13 +666,8 @@ class Supervisor:
                     limit=backoff_delay(failures, self._backoff),
                 )
                 failures += 1
-        if nxt is None:
-            return None
-        # stop() may have run while the helper's result was on its way here: it could not see this connection.
-        if self.stopped:
-            closing = self._close_live(nxt)
-            if closing is not None:
-                await closing
+        # stop() may have run while the helper's result was on its way here: it closed this connection.
+        if nxt is None or self.stopped:
             return None
         # Consulted whatever happened to the old connection: a queued rotate() is answered by this replacement.
         asked = manual()
@@ -660,8 +675,15 @@ class Supervisor:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.session.expires_at, nxt.session.expires_at
             if was is not None and (now is None or now <= was):
+                if self.stopped:
+                    return None
+                self._connecting = None
                 self._drain_live(nxt)
                 return None
+        # Checked again just before taking it: an application callback above may have stopped the loop.
+        if self.stopped:
+            return None
+        self._connecting = None
         moved = [
             handed
             for publication in list(self._publications)
@@ -807,14 +829,10 @@ class Supervisor:
                     await wait_any([self._lifetime], limit=backoff_delay(attempt, self._backoff))
                     attempt += 1
                     continue
-                if live is None:
+                # stop() may have run while the helper's result was on its way here: it closed this connection.
+                if live is None or self.stopped:
                     return
-                # stop() may have run while the helper's result was on its way here: it could not see this connection.
-                if self.stopped:
-                    closing = self._close_live(live)
-                    if closing is not None:
-                        await closing
-                    return
+                self._connecting = None
                 for publication in list(self._publications):
                     self._attach(live, publication, hand_over=False)
                 self._enter(_Serving(live))
