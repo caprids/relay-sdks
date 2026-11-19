@@ -12,10 +12,11 @@ Callback-shaped: the session driver binds this to its own bookkeeping.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from ._tasks import spawn
+from .bytes import StreamReader
 from .control_messages import (
     MOQT_PROTOCOL_ID,
     ControlMessage,
@@ -39,6 +40,10 @@ class RequestStreamHandlers:
     """
     on_error: Callable[[BaseException], None] | None = None
     """Read failure, stream reset, or a decode error (:class:`MoqtProtocolError`)."""
+    on_closed: Callable[[], None] | None = None
+    """Both directions are over: the receiving one ended, failed or was cancelled, and the sending one's FIN landed or
+    it was aborted. Runs once, after any other handler. A request whose sending direction is never ended never gets it.
+    """
 
 
 class RequestStream:
@@ -48,7 +53,16 @@ class RequestStream:
     cancellation.
     """
 
-    __slots__ = ("_cancelled", "_finished", "_first_write", "_handlers", "_protocol", "_stream")
+    __slots__ = (
+        "_cancelled",
+        "_finished",
+        "_first_write",
+        "_handlers",
+        "_protocol",
+        "_read_over",
+        "_stream",
+        "_write_over",
+    )
 
     def __init__(
         self,
@@ -62,6 +76,8 @@ class RequestStream:
         self._protocol: MoqtProtocolId = protocol
         self._cancelled = False
         self._finished = False
+        self._read_over = False
+        self._write_over = False
         self._first_write: asyncio.Task[None] = spawn(self._write_first(request_message))
         spawn(self._read_loop())
 
@@ -83,6 +99,10 @@ class RequestStream:
                     break
 
                 for frame in deframer.push(chunk):
+                    # A handler may cancel the request; the rest of the read goes with it.
+                    if self._cancelled:
+                        return
+
                     self._handlers.on_message(decode_control_message(frame, self._protocol))
 
             if not self._cancelled:
@@ -97,6 +117,9 @@ class RequestStream:
         except Exception as error:  # a reset or decode failure ends the request
             if not self._cancelled and self._handlers.on_error is not None:
                 self._handlers.on_error(error)
+        finally:
+            self._read_over = True
+            self._report_closed()
 
     async def send(self, data: bytes) -> None:
         """Send a follow-up message (e.g. REQUEST_UPDATE) on the request stream.
@@ -116,7 +139,11 @@ class RequestStream:
 
         self._finished = True
         await self._first_write
-        await self._stream.writable.close()
+
+        try:
+            await self._stream.writable.close()
+        finally:
+            self._end_write()
 
     def cancel(self, reason: object = None) -> None:
         """Cancel the request (§6.4.2.3): abort the sending direction and stop reading the receiving direction."""
@@ -124,10 +151,12 @@ class RequestStream:
             return
 
         self._cancelled = True
+        # A FIN asked for but not yet landed is aborted too: its write may still be waiting on the peer.
+        self._finished = True
 
-        if not self._finished:
-            self._finished = True
+        if not self._write_over:
             self._stream.writable.abort(reason)
+            self._end_write()
 
         # STOP_SENDING on the receiving direction. The read loop's pending read ends; `_cancelled`
         # suppresses the FIN callback.
@@ -136,6 +165,15 @@ class RequestStream:
     @property
     def cancelled(self) -> bool:
         return self._cancelled
+
+    def _end_write(self) -> None:
+        if not self._write_over:
+            self._write_over = True
+            self._report_closed()
+
+    def _report_closed(self) -> None:
+        if self._read_over and self._write_over and self._handlers.on_closed is not None:
+            self._handlers.on_closed()
 
 
 def open_request_stream(
@@ -153,4 +191,23 @@ def open_request_stream(
     return RequestStream(stream, request_message, handlers, protocol)
 
 
-__all__ = ["RequestStream", "RequestStreamHandlers", "open_request_stream"]
+async def read_request(
+    stream: BidirectionalStream, reader: StreamReader, read_frame: Callable[[int], Awaitable[ControlMessage]]
+) -> ControlMessage:
+    """Read the message that opens an incoming request stream.
+
+    A stream that ends or resets before a whole message has no request to answer, so both directions are dropped:
+    left alone, the response direction would stay open until the session ends. A protocol error is the caller's to
+    close the session on.
+    """
+    try:
+        return await read_frame(await reader.read_varint())
+    except MoqtProtocolError:
+        raise
+    except Exception:
+        reader.cancel()
+        stream.writable.abort()
+        raise
+
+
+__all__ = ["RequestStream", "RequestStreamHandlers", "open_request_stream", "read_request"]

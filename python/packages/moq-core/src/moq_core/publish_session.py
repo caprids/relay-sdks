@@ -78,6 +78,7 @@ from .control_messages import (
 )
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import STREAM_TYPE, is_subgroup_header_type
+from .request_stream import read_request
 from .session import Closed, _call, _describe
 from .transport import (
     BidirectionalStream,
@@ -185,7 +186,12 @@ class MoqtPublishSessionCallbacks:
     on_request_update: Callable[[IncomingRequestUpdate], None] | None = None
     """The peer sent REQUEST_UPDATE on one of its requests; see :class:`IncomingRequestUpdate`."""
     on_closed: Callable[[Closed], None] | None = None
-    """The session ended: transport closed, or a fatal protocol error."""
+    """The session ended: transport closed, or a fatal protocol error.
+
+    It is the last callback. From ``close()`` or ``destroy()`` until it runs, the session takes no new work and reports
+    only ends (``on_subscribe_end``, an ``on_track_binding`` with no alias): requests are refused with GOING_AWAY, and
+    a GOAWAY, an update or an announce is not reported.
+    """
 
 
 DEFAULT_IMPLEMENTATION_NAME = "moq-core (Python) publisher"
@@ -478,6 +484,8 @@ class MoqtPublishSession:
         self._destroyed = False
         self._end_acknowledgements: set[asyncio.Task[None]] = set()
         """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet."""
+        self._request_readers: set[StreamReader] = set()
+        """The reader of every incoming request stream still being served: the end of the session stops them all."""
 
         spawn(self._start())
 
@@ -552,6 +560,9 @@ class MoqtPublishSession:
         for track in self._tracks.values():
             for subscriber in track.subscribers:
                 subscriber.cancel()
+
+        for reader in list(self._request_readers):
+            reader.cancel()
 
         self._tracks.clear()
         self._namespace_streams.clear()
@@ -657,6 +668,23 @@ class MoqtPublishSession:
         """Drain outgoing streams, preserving an optional local closure error."""
         self._close(SESSION_ERROR.NO_ERROR, "", error)
 
+    def _serving(self) -> bool:
+        """Whether the session takes new work. Once closing it takes none and reports only ends."""
+        return not self._destroyed and not self._closing
+
+    def _report_goaway(self, goaway: Goaway) -> None:
+        """The peer is migrating. A session already closing has nothing to move, so its application is not told."""
+        self._received_goaway = True
+        if self._serving():
+            _call(self._callbacks.on_goaway, goaway)
+
+    def _report_binding(self, track: _TrackRecord, subscriber: _SubscriberStream | None) -> None:
+        """Report ``track``'s binding to ``subscriber``. An unbinding is an end, reported until ``on_closed``."""
+        if self._destroyed or (subscriber is not None and not self._serving()):
+            return
+
+        _call(self._callbacks.on_track_binding, _binding_of(track, subscriber))
+
     # ---------------------------------------------------------------------------
     # Announcing and the track registry
     # ---------------------------------------------------------------------------
@@ -717,7 +745,7 @@ class MoqtPublishSession:
                 self._report_announce_loss(error)
                 return
 
-            if self._destroyed or self._announced_fired:
+            if not self._serving() or self._announced_fired:
                 return
 
             self._announced_fired = True
@@ -963,7 +991,8 @@ class MoqtPublishSession:
         self._received_server_setup = True
         if not self.ready.done():
             self.ready.set_result(None)
-        _call(self._callbacks.on_ready, setup.options)
+        if self._serving():
+            _call(self._callbacks.on_ready, setup.options)
 
         while not await reader.at_end():
             message_type = await reader.read_varint()
@@ -975,8 +1004,7 @@ class MoqtPublishSession:
                 raise MoqtProtocolError("received more than one GOAWAY on the control stream")
 
             self._received_control_goaway = True
-            self._received_goaway = True
-            _call(self._callbacks.on_goaway, message)
+            self._report_goaway(message)
 
         # A closed control stream ends the session (§6.3).
         if not self._destroyed:
@@ -995,8 +1023,17 @@ class MoqtPublishSession:
 
     async def _handle_incoming_request(self, stream: BidirectionalStream) -> None:
         reader = StreamReader(stream.readable)
-        message_type = await reader.read_varint()
-        message = await self._read_control_frame(reader, message_type)
+        self._request_readers.add(reader)
+
+        try:
+            await self._serve_request(stream, reader)
+        finally:
+            self._request_readers.discard(reader)
+
+    async def _serve_request(self, stream: BidirectionalStream, reader: StreamReader) -> None:
+        message = await read_request(
+            stream, reader, lambda message_type: self._read_control_frame(reader, message_type)
+        )
 
         # Reserve the request ID for EVERY request-initiating kind: the uniqueness invariant is
         # session-wide, so an ID burned on a rejected PUBLISH or FETCH must not be reusable by a later
@@ -1059,6 +1096,11 @@ class MoqtPublishSession:
         writer = stream.writable
         prefix = subscribe_namespace.track_namespace_prefix
 
+        # A carrier accepted now would miss the drain's NAMESPACE_DONE retractions.
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
+
         # §9.17: a solicitation overlapping an established one (either prefix containing the other)
         # is refused with PREFIX_OVERLAP. Announcing on both would hand the peer duplicate namespace
         # state with inconsistent withdrawals.
@@ -1099,6 +1141,12 @@ class MoqtPublishSession:
             reader.cancel()
             return
 
+        # The close began during the write: the accepted solicitation ends empty, with nothing announced on it.
+        if not self._serving():
+            spawn(_swallow(writer.close()))
+            reader.cancel()
+            return
+
         record = _NamespaceStream(prefix=prefix, writer=writer)
         self._received_namespace_solicitation = True
         self._namespace_streams.append(record)
@@ -1114,22 +1162,22 @@ class MoqtPublishSession:
                 message = await self._read_control_frame(reader, message_type)
 
                 if isinstance(message, Goaway):
-                    self._received_goaway = True
-                    _call(self._callbacks.on_goaway, message)
+                    self._report_goaway(message)
                 elif isinstance(message, RequestUpdate):
                     self._claim_peer_request_id(message.request_id)
                     # Namespace subscriptions may legally be updated (§9.5). v1 applies none of it (a
                     # prefix change would re-base every entry), so per §9.5.1 the update is answered
                     # with an error and the request stream closes below: never session-fatal (only the
                     # reused Request ID above is).
-                    _call(
-                        self._callbacks.on_request_update,
-                        IncomingRequestUpdate(
-                            request_id=subscribe_namespace.request_id,
-                            update_request_id=message.request_id,
-                            parameters=message.parameters,
-                        ),
-                    )
+                    if self._serving():
+                        _call(
+                            self._callbacks.on_request_update,
+                            IncomingRequestUpdate(
+                                request_id=subscribe_namespace.request_id,
+                                update_request_id=message.request_id,
+                                parameters=message.parameters,
+                            ),
+                        )
                     spawn(
                         _swallow(
                             writer.write(
@@ -1181,6 +1229,10 @@ class MoqtPublishSession:
         track = self._tracks.get(_track_key(request.track_namespace, request.track_name))
         writer = stream.writable
 
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
+
         if track is None or track.done:
             await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
             return
@@ -1209,6 +1261,10 @@ class MoqtPublishSession:
         track = self._tracks.get(_track_key(subscribe.track_namespace, subscribe.track_name))
         writer = stream.writable
 
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
+
         if track is None or track.done:
             await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
             return
@@ -1225,7 +1281,7 @@ class MoqtPublishSession:
         except Exception as error:  # the encoder refused the response; the peer did nothing wrong
             await _refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, "could not encode SUBSCRIBE_OK")
 
-            if not self._destroyed:
+            if self._serving():
                 _call(
                     self._callbacks.on_subscribe_failed,
                     SubscribeFailed(request_id=subscribe.request_id, track_name=track.track_name, error=error),
@@ -1281,7 +1337,7 @@ class MoqtPublishSession:
                     track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
                 )
 
-            _call(self._callbacks.on_track_binding, _binding_of(track, subscriber if subscriber.forwarding else None))
+            self._report_binding(track, subscriber if subscriber.forwarding else None)
 
         # Keep serving the request stream: REQUEST_UPDATEs arrive here.
         try:
@@ -1314,19 +1370,17 @@ class MoqtPublishSession:
                         rebind = True
 
                     if rebind and not subscriber.finished and subscriber.accepted:
-                        _call(
-                            self._callbacks.on_track_binding,
-                            _binding_of(track, subscriber if subscriber.forwarding else None),
-                        )
+                        self._report_binding(track, subscriber if subscriber.forwarding else None)
 
-                    _call(
-                        self._callbacks.on_request_update,
-                        IncomingRequestUpdate(
-                            request_id=subscribe.request_id,
-                            update_request_id=message.request_id,
-                            parameters=parameters,
-                        ),
-                    )
+                    if self._serving():
+                        _call(
+                            self._callbacks.on_request_update,
+                            IncomingRequestUpdate(
+                                request_id=subscribe.request_id,
+                                update_request_id=message.request_id,
+                                parameters=parameters,
+                            ),
+                        )
 
                     if not subscriber.finished:
                         if unsupported:
@@ -1357,8 +1411,7 @@ class MoqtPublishSession:
                             # it cancels) never sees a trailing byte.
                             spawn(_swallow(writer.write(encode_request_ok(None, self._protocol))))
                 elif isinstance(message, Goaway):
-                    self._received_goaway = True
-                    _call(self._callbacks.on_goaway, message)
+                    self._report_goaway(message)
                 else:
                     raise MoqtProtocolError(f"unexpected {message.kind} on an incoming subscribe stream")
             # The peer FINed its direction while the subscription was still ours to end. moq-relay
@@ -1399,7 +1452,7 @@ class MoqtPublishSession:
 
     def _emit_binding(self, track: _TrackRecord) -> None:
         live = [s for s in track.subscribers if not s.finished and s.accepted and s.forwarding]
-        _call(self._callbacks.on_track_binding, _binding_of(track, live[-1] if live else None))
+        self._report_binding(track, live[-1] if live else None)
 
 
 def _binding_of(track: _TrackRecord, subscriber: _SubscriberStream | None) -> TrackBinding:
