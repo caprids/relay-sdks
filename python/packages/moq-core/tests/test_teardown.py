@@ -23,6 +23,8 @@ from moq_core.bytes import ByteWriter
 from moq_core.control_messages import (
     REQUEST_ERROR_CODE,
     SETUP_OPTION,
+    ControlMessage,
+    ControlMessageDeframer,
     KeyValuePair,
     Location,
     MessageParameters,
@@ -31,10 +33,12 @@ from moq_core.control_messages import (
     Subscribe,
     SubscribeNamespace,
     TrackStatus,
+    decode_control_message,
     encode_fetch_ok,
     encode_goaway,
     encode_namespace,
     encode_publish,
+    encode_request_error,
     encode_request_ok,
     encode_request_update,
     encode_setup,
@@ -44,10 +48,12 @@ from moq_core.control_messages import (
 )
 from moq_core.object_stream import STREAM_TYPE
 from moq_core.publish_session import (
+    MAX_TRACK_PROPERTIES_LENGTH,
     MoqtPublishSession,
     MoqtPublishSessionCallbacks,
     MoqtPublishSessionConfig,
     RegisterTrackOptions,
+    SubscribeFailed,
     TrackBinding,
     create_moqt_publish_session,
 )
@@ -60,6 +66,7 @@ from moq_core.session import (
     MoqtSubscribeNamespaceOptions,
     MoqtSubscribeOptions,
     NamespaceSubscriptionHandlers,
+    PublishResponder,
     TrackStatusHandlers,
     create_moqt_session,
 )
@@ -89,6 +96,10 @@ async def read_to_end(readable: ReceiveStream) -> bytes:
     return bytes(data)
 
 
+def decode_frames(data: bytes) -> list[ControlMessage]:
+    return [decode_control_message(frame) for frame in ControlMessageDeframer().push(data)]
+
+
 def fetch_header(request_id: int) -> bytes:
     writer = ByteWriter()
     writer.write_varint(STREAM_TYPE.FETCH_HEADER)
@@ -113,6 +124,25 @@ def fetch_entry(group: int, object_id: int) -> bytes:
 # ============================================================================
 
 
+class StuckSendStream:
+    """A sending direction whose writes never land, as when the peer stops reading. Records whether it was aborted."""
+
+    def __init__(self) -> None:
+        self.aborted = False
+        self._blocked: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def write(self, data: bytes) -> None:
+        await self._blocked
+
+    async def close(self) -> None:
+        await self._blocked
+
+    def abort(self, reason: object = None) -> None:
+        self.aborted = True
+        if not self._blocked.done():
+            self._blocked.set_exception(StreamClosedError("stream was aborted", reason))
+
+
 class DrainingTransport(FakeTransport):
     """A fake whose ``close()`` keeps every stream open, as the QUIC adapter's does while it drains."""
 
@@ -121,6 +151,8 @@ class DrainingTransport(FakeTransport):
         self.requests_opened = 0
         self.opening: asyncio.Event | None = None
         """When set, opening a request stream waits for it."""
+        self.stuck_writes: list[StuckSendStream] | None = None
+        """When set, each request stream opened sends through a :class:`StuckSendStream`, collected here."""
 
     def close(self, close_code: int = 0, reason: str = "") -> None:
         self.close_calls += 1
@@ -130,7 +162,14 @@ class DrainingTransport(FakeTransport):
             await self.opening.wait()
 
         self.requests_opened += 1
-        return await super().create_bidirectional_stream()
+        stream = await super().create_bidirectional_stream()
+
+        if self.stuck_writes is None:
+            return stream
+
+        stuck = StuckSendStream()
+        self.stuck_writes.append(stuck)
+        return BidirectionalStream(readable=stream.readable, writable=stuck)
 
 
 @asynccontextmanager
@@ -225,6 +264,98 @@ class TestSubscribeDriverTeardown:
 
             assert order == ["ok", "end", "closed"]
 
+    @pytest.mark.parametrize(
+        ("response", "peer_fins"),
+        [
+            pytest.param(encode_request_ok(), True, id="answered and finished"),
+            # REQUEST_ERROR alone completes the request.
+            pytest.param(encode_request_error(REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track"), False, id="refused"),
+        ],
+    )
+    async def test_finishes_its_side_of_a_completed_fetch_request(self, response: bytes, peer_fins: bool) -> None:
+        async with subscribe_session() as (fake, session, _):
+            session.fetch(TRACK)
+            stream = await fake.next_request_stream()
+            await stream.send(response)
+            if peer_fins:
+                await stream.fin()
+
+            await wait_for(stream.client_end.done)
+            assert stream.client_end.result() == "fin"
+
+    async def test_resets_a_fetch_request_whose_answered_response_the_peer_reset(self) -> None:
+        async with subscribe_session() as (fake, session, _):
+            session.fetch(TRACK)
+            stream = await fake.next_request_stream()
+            await stream.send(encode_request_ok())
+            await settle()
+            stream.reset(RuntimeError("reset"))
+
+            await wait_for(stream.client_end.done)
+            assert stream.client_end.result() == "reset"
+
+    async def test_resets_a_request_the_peer_finished_without_answering(self) -> None:
+        errors: list[object] = []
+
+        async with subscribe_session() as (fake, session, _):
+            session.track_status(TRACK, TrackStatusHandlers(on_error=errors.append))
+            stream = await fake.next_request_stream()
+            await stream.fin()
+
+            await wait_for(lambda: errors)
+            await wait_for(stream.client_end.done)
+            assert stream.client_end.result() == "reset"
+
+    async def test_resets_a_completed_request_whose_own_message_is_still_being_written(self) -> None:
+        async with subscribe_session() as (fake, session, _):
+            stuck: list[StuckSendStream] = []
+            fake.stuck_writes = stuck
+            session.track_status(TRACK)
+            # The request's write never lands; the peer answers and finishes anyway.
+            stream = await fake.next_request_stream()
+            await stream.send(encode_request_ok())
+            await stream.fin()
+            await settle()
+
+            session.destroy()
+
+            assert stuck[0].aborted
+
+    async def test_answers_no_incoming_request_from_a_responder_kept_past_teardown(self) -> None:
+        responders: list[PublishResponder] = []
+        callbacks = MoqtSessionCallbacks(on_incoming_publish=lambda _, responder: responders.append(responder))
+
+        async with subscribe_session(callbacks) as (fake, session, _):
+            response = fake.open_incoming_request(
+                encode_publish(Publish(request_id=1, track_namespace=NAMESPACE, track_name="video", track_alias=9))
+            )
+            await wait_for(lambda: responders)
+
+            session.destroy()
+            responders[0].accept()
+
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(response), 1)
+
+    async def test_drops_an_incoming_request_whose_accepted_response_is_still_being_written(self) -> None:
+        accepted: list[object] = []
+
+        def accept(publish: Publish, responder: PublishResponder) -> None:
+            responder.accept()
+            accepted.append(publish)
+
+        async with subscribe_session(MoqtSessionCallbacks(on_incoming_publish=accept)) as (fake, session, _):
+            # Nothing reads the response yet, so the REQUEST_OK write waits.
+            response = fake.open_incoming_request(
+                encode_publish(Publish(request_id=1, track_namespace=NAMESPACE, track_name="video", track_alias=9))
+            )
+            await wait_for(lambda: accepted)
+
+            session.destroy()
+
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(response), 1)
+
     async def test_starts_no_request_once_it_has_ended(self) -> None:
         async with subscribe_session() as (fake, session, _):
             session.destroy()
@@ -256,14 +387,10 @@ class TestSubscribeDriverTeardown:
             await wait_for(lambda: order == ["entry"])
 
             session.destroy()
-            try:
-                await data.write(fetch_entry(0, 1))
-            except StreamClosedError:
-                pass
-            await settle()
 
-            assert order == ["entry", "closed"]
             assert await stopped(data.write)
+            await settle()
+            assert order == ["entry", "closed"]
 
     @pytest.mark.parametrize(
         "rest",
@@ -633,6 +760,36 @@ class TestPublishDriverTeardown:
 
             assert goaways == []
             assert updates == []
+
+    async def test_reports_no_subscribe_failure_that_lands_during_the_drain(self) -> None:
+        failures: list[SubscribeFailed] = []
+        callbacks = MoqtPublishSessionCallbacks(on_subscribe_failed=failures.append)
+
+        async with publish_session(callbacks) as (pair, session, _):
+            # The largest alias overflows SUBSCRIBE_OK's frame once the properties fill the limit.
+            session.register_track(
+                RegisterTrackOptions(
+                    track_namespace=NAMESPACE,
+                    track_name="large",
+                    track_properties=[KeyValuePair(1, bytes(MAX_TRACK_PROPERTIES_LENGTH - 3))],
+                )
+            )
+            held = await raw_subscribe(pair.server, NAMESPACE, "video", 3)
+            await wait_for(lambda: len(held.received) == 1)
+            # Nothing reads the response yet, so the REQUEST_ERROR write waits across the start of the drain.
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(
+                encode_subscribe(Subscribe(request_id=2**64 - 1, track_namespace=NAMESPACE, track_name="large"))
+            )
+            await settle()
+
+            session.close()
+            await wait_for(lambda: "publish-done" in held.kinds())
+            refusal = await read_to_end(stream.readable)
+            await settle()
+
+            assert [message.kind for message in decode_frames(refusal)] == ["request-error"]
+            assert failures == []
 
     async def test_reports_no_readiness_from_a_setup_that_lands_during_the_drain(self) -> None:
         ready: list[object] = []
