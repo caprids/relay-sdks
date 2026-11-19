@@ -516,7 +516,7 @@ interface FetchRecord extends RequestRecordBase {
   handlers: FetchHandlers;
   groupOrder: 'ascending' | 'descending';
   /** The data stream being read, so a cancel stops it at once rather than at the next entry. */
-  reader?: StreamReader;
+  reader?: StreamReader | undefined;
   /** The data stream ended or reset. The session forgets the fetch once its request is answered too (#419). */
   dataEnded?: boolean;
 }
@@ -1618,6 +1618,7 @@ class MoqtSessionImpl implements MoqtSession {
       // then (#419): kept, the record's handlers held everything they had collected for the session's life. Data can
       // beat the response; until the response, or the request timeout, the record stays for teardown to fail.
       record.dataEnded = true;
+      record.reader = undefined;
       if (record.settled) this.#fetches.delete(requestId);
     }
   }

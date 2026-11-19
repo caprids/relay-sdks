@@ -1550,6 +1550,7 @@ class MoqtSession:
             # collected for the session's life. Data can beat the response; until the response, or the
             # request timeout, the record stays for teardown to fail.
             record.data_ended = True
+            record.reader = None
             if record.settled:
                 self._fetches.pop(request_id, None)
 
