@@ -155,8 +155,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   /** The connection a rotation is replacing, while what it carries moves off it. */
   let retiring: Live | undefined;
   /**
-   * Connections given up and still closing: draining groups the relay has not acknowledged. `stop()` waits for them, and
-   * a publication's `close()` for those that carry it.
+   * Connections ended or given up and still closing: draining groups the relay has not acknowledged. `stop()` waits for
+   * them, and a publication's `close()` for those that carry it.
    */
   const draining = new Map<Live, Promise<void>>();
   const connectionWaiters: (() => void)[] = [];
@@ -171,6 +171,11 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const lifetime = new AbortController();
   /** Aborts the connection attempt in progress only: once connected, a connection is closed, not aborted. */
   let attemptInProgress: AbortController | undefined;
+  /**
+   * The attempt in progress, until the connection it brings back is taken (made current, or discarded): `stop()` closes
+   * a connection that comes back, or was not taken, before it ran.
+   */
+  let connecting: Promise<SupervisedConnection> | undefined;
   /**
    * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
    * one whose replacement is still connecting or being discarded.
@@ -211,26 +216,39 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     return closing ? closing.catch(() => {}) : undefined;
   };
 
-  /** Close a connection given up while the loop runs on, draining in the background; `after` runs once it closed. */
+  /**
+   * Close a connection ended or given up while the loop runs on, draining in the background; `after` runs once it
+   * closed. The connection is closed once: a later call only adds its `after`.
+   */
   const drainLive = (live: Live, after?: () => void) => {
     const already = draining.get(live);
     if (already) {
-      // Started for a lost root before a rotation gave the connection up: its clean-up still runs once it closed.
+      // Started when the connection ended, or for a lost root, before a rotation gave it up: its clean-up still runs
+      // once it closed.
       if (after) void already.then(after);
       return;
     }
-    const closing = closeLive(live);
+    let drained!: { resolve(): void; reject(error: unknown): void };
+    // Registered before the close runs: a close that stops the supervisor finds it among the drains to wait for.
+    draining.set(
+      live,
+      new Promise<void>((resolve, reject) => {
+        drained = { resolve, reject };
+      }),
+    );
+    const closing = live.closing ? undefined : closeLive(live);
     if (!closing) {
+      draining.delete(live);
+      drained.resolve();
       after?.();
       return;
     }
-    draining.set(
-      live,
-      closing.then(() => {
+    closing
+      .then(() => {
         draining.delete(live);
         after?.();
-      }),
-    );
+      })
+      .then(drained.resolve, drained.reject);
   };
 
   /** The connection ended or was given up: release what it ran and stop anything still waiting on it. */
@@ -242,6 +260,14 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const stop = (result: { error?: unknown }): Promise<void> => {
     if (shutdown) return shutdown;
     stopped = true;
+    // Set first: a `close()` made while this one runs (from a session's close, or onStatus) is the same stop, keeps
+    // this one's result, and waits for what this one waits for.
+    let settle!: { resolve(): void; reject(error: unknown): void };
+    shutdown = new Promise<void>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    // A throwing onStatus fails `close()` for the caller that made it; a stop nobody awaits leaves it observed.
+    shutdown.catch(() => {});
     const reason = result.error ?? closedError();
     lifetime.abort(reason);
     attemptInProgress?.abort(reason);
@@ -255,13 +281,30 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     for (const track of allTracks()) track.retire();
     for (const live of open) {
       // Registered as drains, so a publication's `close()` after this one waits for its groups too.
-      if (!draining.has(live)) {
+      // One the loop already closed, and that closed at once, needs no second close.
+      if (!draining.has(live) && !live.closing) {
         const closing = closeLive(live);
         if (closing) draining.set(live, closing);
       }
       settleEnded(live);
     }
     const pending: Promise<void>[] = [...draining.values()];
+    // A connection still on its way back to the loop, or not yet taken: only this stop sees it.
+    if (connecting) {
+      pending.push(
+        connecting.then(
+          (session) => {
+            try {
+              return Promise.resolve(session.close()).catch(() => {});
+            } catch {
+              // A close that throws at once has nothing left to wait for.
+              return undefined;
+            }
+          },
+          () => {},
+        ),
+      );
+    }
     wakeWaiters();
     const finish = () => {
       try {
@@ -272,21 +315,17 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     };
     if (pending.length === 0) {
       // Nothing drains: report `closed` now, so a throwing onStatus reaches the caller of `close()` as it runs.
-      // Set first: a `close()` from inside onStatus is then the same stop, and keeps this one's result.
-      shutdown = Promise.resolve();
       try {
         finish();
       } catch (error) {
         // Every later `close()` reports the same failure.
-        shutdown = Promise.reject(error);
-        shutdown.catch(() => {});
+        settle.reject(error);
         throw error;
       }
+      settle.resolve();
       return shutdown;
     }
-    shutdown = Promise.all(pending).then(finish);
-    // A throwing onStatus fails `close()` for the caller that made it; a stop nobody awaits leaves it observed.
-    shutdown.catch(() => {});
+    Promise.all(pending).then(finish).then(settle.resolve, settle.reject);
     return shutdown;
   };
   /** Stop from a place with no caller to tell: a throwing onStatus reporting `closed` settles `closed` regardless. */
@@ -319,6 +358,12 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const connectOnce = async (): Promise<Live | undefined> => {
     const generation = newGeneration();
     let session: SupervisedConnection;
+    // Registered before the connector runs: a `close()` it makes before returning is a `stop()` that must see it.
+    let arrived!: { resolve(session: SupervisedConnection): void; reject(error: unknown): void };
+    connecting = new Promise<SupervisedConnection>((resolve, reject) => {
+      arrived = { resolve, reject };
+    });
+    connecting.catch(() => {});
     try {
       attemptInProgress = new AbortController();
       session = await connect(
@@ -331,13 +376,16 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         },
         generation,
       );
+    } catch (error) {
+      arrived.reject(error);
+      connecting = undefined;
+      throw error;
     } finally {
       attemptInProgress = undefined;
     }
-    if (stopped) {
-      await Promise.resolve(session.close()).catch(() => {});
-      return undefined;
-    }
+    arrived.resolve(session);
+    // `stop()` ran while the attempt was in progress: it closes what the attempt brought back.
+    if (stopped) return undefined;
     const ended = new AbortController();
     const retire = new AbortController();
     let fault: (error: unknown) => void = () => {};
@@ -375,9 +423,14 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     // progress sees it and falls back to reconnecting.
     void live.over.then(() => {
       ended.abort();
-      // Given up for a lost publication while the session is still open, whichever path was serving it: close it. Its
-      // wants move to the next connection once that is up, as on a rotation (`run`).
-      if (live.faulted && !stopped) drainLive(live, () => settleEnded(live));
+      if (!stopped) {
+        // Given up for a lost publication while the session is still open, whichever path was serving it: close it.
+        // Its wants move to the next connection once that is up, as on a rotation (`run`).
+        if (live.faulted) drainLive(live, () => settleEnded(live));
+        // A session can report its end before it drained: after a GOAWAY a duplex session's publisher still waits for
+        // the relay to read its tracks' ends. Closing it waits for that, and `stop()` for the close.
+        else drainLive(live);
+      }
       for (const publication of live.publications.values()) {
         publication.ended = true;
         // The connection's end closed its groups under the application, which may never close them itself.
@@ -463,12 +516,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         await Promise.race([sleep(backoffDelay(failures++, backoff), lifetime.signal).catch(() => {}), live.over]);
       }
     }
-    if (!next) return undefined;
-    // `stop()` may have run while the helper's result was on its way here: it could not see this connection.
-    if (stopped) {
-      await closeLive(next);
-      return undefined;
-    }
+    // `stop()` may have run while the helper's result was on its way here: it closed this connection.
+    if (!next || stopped) return undefined;
     // Consulted whatever happened to the old connection: a queued `rotate()` is answered by this replacement.
     const asked = manual();
     if (!live.signal.aborted && !asked) {
@@ -476,10 +525,15 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       const was = live.session.expiresAt?.getTime();
       const now = next.session.expiresAt?.getTime();
       if (was !== undefined && (now === undefined || now <= was)) {
-        await closeLive(next);
+        if (stopped) return undefined;
+        connecting = undefined;
+        drainLive(next);
         return undefined;
       }
     }
+    // Checked again just before taking it: an application callback above may have stopped the loop.
+    if (stopped) return undefined;
+    connecting = undefined;
     current = next;
     retiring = live;
     const moved = [...publications].flatMap((publication) => attach(next, publication, true));
@@ -603,12 +657,9 @@ export function createSupervisor<O extends ConnectRelayOptions>(
           await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
           continue;
         }
-        if (!live) return;
-        // `stop()` may have run while the helper's result was on its way here: it could not see this connection.
-        if (stopped) {
-          await closeLive(live);
-          return;
-        }
+        // `stop()` may have run while the helper's result was on its way here: it closed this connection.
+        if (!live || stopped) return;
+        connecting = undefined;
         current = live;
         for (const publication of publications) attach(live, publication, false);
         setStatus('live');
