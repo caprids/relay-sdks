@@ -240,6 +240,47 @@ describe('subscribe driver teardown', () => {
     await vi.waitFor(() => expect(reset).toBe(true));
   });
 
+  it('resets a completed request whose own message is still being written', async () => {
+    let held!: WritableStreamDefaultWriter<Uint8Array>;
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const aborted = vi.fn();
+    const { session } = await harness(
+      {},
+      {
+        // The request's write never lands; the peer answers and finishes anyway.
+        wrap: (transport) => ({
+          ...transport,
+          createBidirectionalStream: async () => {
+            const response = new TransformStream<Uint8Array, Uint8Array>();
+
+            held = response.writable.getWriter();
+            release();
+            return {
+              readable: response.readable,
+              writable: new WritableStream<Uint8Array>({
+                // The signal fires as abort() is called, ahead of the write that never settles.
+                start: (controller) => controller.signal.addEventListener('abort', aborted),
+                write: () => new Promise(() => {}),
+              }),
+            };
+          },
+        }),
+      }
+    );
+
+    session.fetch(TRACK);
+    await opened;
+    await held.write(encodeRequestOk());
+    await held.close();
+    await settle();
+
+    session.destroy();
+    await vi.waitFor(() => expect(aborted).toHaveBeenCalled());
+  });
+
   it('resets a request the peer finished without answering', async () => {
     const onError = vi.fn();
     const { session, requests } = await harness();

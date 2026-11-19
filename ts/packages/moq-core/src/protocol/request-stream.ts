@@ -39,8 +39,11 @@ export interface RequestStreamHandlers {
   onFin?(): void;
   /** Read failure, stream reset, or a decode error (`MoqtProtocolError`). */
   onError?(error: unknown): void;
-  /** Nothing more is read from the stream: it ended, failed or was cancelled. Runs once, after any other handler. */
-  onReadEnd?(): void;
+  /**
+   * Both directions are over: the receiving one ended, failed or was cancelled, and the sending one's FIN landed or it
+   * was aborted. Runs once, after any other handler. A request whose sending direction is never ended never gets it.
+   */
+  onClosed?(): void;
 }
 
 export interface RequestStream {
@@ -74,6 +77,11 @@ export function openRequestStream(
   const reader = stream.readable.getReader();
   let cancelled = false;
   let finished = false;
+  let readOver = false;
+  let writeOver = false;
+  const directionOver = () => {
+    if (readOver && writeOver) handlers.onClosed?.();
+  };
 
   const readLoop = async () => {
     const deframer = new ControlMessageDeframer();
@@ -102,7 +110,8 @@ export function openRequestStream(
       if (!cancelled) handlers.onError?.(error);
     } finally {
       reader.releaseLock();
-      handlers.onReadEnd?.();
+      readOver = true;
+      directionOver();
     }
   };
 
@@ -124,7 +133,15 @@ export function openRequestStream(
 
       finished = true;
       await firstWrite;
-      await writer.close();
+
+      try {
+        await writer.close();
+      } finally {
+        if (!writeOver) {
+          writeOver = true;
+          directionOver();
+        }
+      }
     },
 
     cancel(reason?: unknown): void {
@@ -132,9 +149,13 @@ export function openRequestStream(
 
       cancelled = true;
 
-      if (!finished) {
-        finished = true;
+      // A FIN asked for but not yet landed is aborted too: its write may still be waiting on the peer.
+      finished = true;
+
+      if (!writeOver) {
+        writeOver = true;
         writer.abort(reason).catch(() => {});
+        directionOver();
       }
 
       // STOP_SENDING on the receiving direction. The read loop's pending

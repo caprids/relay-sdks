@@ -615,7 +615,8 @@ class MoqtSessionImpl implements MoqtSession {
   #aliasRoutes = new Map<number, SubscriptionRecord>();
   #aliasWaiters = new Map<number, AliasWaiter[]>();
   /**
-   * Every request stream still being read, answered or not: teardown cancels them all, whatever the maps still hold.
+   * Every request stream with a direction still open, answered or not: teardown cancels them all, whatever the maps
+   * still hold.
    * Held weakly, so a request the session has forgotten (#419) keeps nothing alive here; one the transport still
    * holds is still reached.
    */
@@ -1149,7 +1150,7 @@ class MoqtSessionImpl implements MoqtSession {
 
           fail(streamFailure(error instanceof Error ? error.message : 'request stream failed'));
         },
-        onReadEnd: () => this.#requestStreams.delete(tracked),
+        onClosed: () => this.#requestStreams.delete(tracked),
       },
       this.#protocol
     );
