@@ -10,6 +10,8 @@
  * Callback-shaped, no signals — the session driver binds this to its own bookkeeping; SPF actors bind signals at the
  * `playback/` layer.
  */
+
+import type { StreamReader } from './bytes.js';
 import {
   type ControlMessage,
   ControlMessageDeframer,
@@ -17,7 +19,7 @@ import {
   MOQT_PROTOCOL_ID,
   type MoqtProtocolId,
 } from './control-messages.js';
-import { MoqtProtocolError } from './errors.js';
+import { isMoqtProtocolError, MoqtProtocolError } from './errors.js';
 
 /** Structural subset of `WebTransportBidirectionalStream`. */
 export interface BidirectionalStreamLike {
@@ -37,6 +39,8 @@ export interface RequestStreamHandlers {
   onFin?(): void;
   /** Read failure, stream reset, or a decode error (`MoqtProtocolError`). */
   onError?(error: unknown): void;
+  /** Nothing more is read from the stream: it ended, failed or was cancelled. Runs once, after any other handler. */
+  onReadEnd?(): void;
 }
 
 export interface RequestStream {
@@ -98,6 +102,7 @@ export function openRequestStream(
       if (!cancelled) handlers.onError?.(error);
     } finally {
       reader.releaseLock();
+      handlers.onReadEnd?.();
     }
   };
 
@@ -141,4 +146,26 @@ export function openRequestStream(
       return cancelled;
     },
   };
+}
+
+/**
+ * Read the message that opens an incoming request stream. A stream that ends or resets before a whole message has no
+ * request to answer, so both directions are dropped: left alone, the response direction would hold bidirectional
+ * stream credit until the session ends. A protocol error is the caller's to close the session on.
+ */
+export async function readRequest(
+  stream: BidirectionalStreamLike,
+  reader: StreamReader,
+  readFrame: (type: number) => Promise<ControlMessage>
+): Promise<ControlMessage> {
+  try {
+    return await readFrame(await reader.readVarint());
+  } catch (error) {
+    if (!isMoqtProtocolError(error)) {
+      void reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+    }
+
+    throw error;
+  }
 }

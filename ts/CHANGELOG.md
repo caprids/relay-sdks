@@ -7,6 +7,13 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/moq-core`: after a session's `onClosed`, none of its callbacks run (#527). A subscribe session that has ended
+  starts no request, and at its end it stops every request stream and data stream it was reading, so a fetch reports
+  no entry and a namespace subscription no end after `onClosed`. A publish session that is closing refuses SUBSCRIBE,
+  TRACK_STATUS and SUBSCRIBE_NAMESPACE with `GOING_AWAY`, and from `close()` to `onClosed` reports only ends
+  (`onSubscribeEnd`, an `onTrackBinding` with no alias); a track ended with `end({ after })` is served until that end.
+  On a duplex session, `subscriber.close()` and `subscriber.destroy()` now end the session in order, as `destroy()`
+  does: the publisher drains before the transport closes, with the code and reason `close()` was given.
 - `@caprid/relay`: `connectSupervisedRelay(options)` supervises one connection that publishes and
   subscribes. It returns a `SupervisedRelay`: the supervised subscriber's `want`, `unwant`, `catchUp`
   and `publishingRoots`, plus `publish(root)`, which returns a `SupervisedPublication` whose track

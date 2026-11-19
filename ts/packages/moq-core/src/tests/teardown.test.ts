@@ -343,7 +343,7 @@ describe('publish driver teardown', () => {
     await control.write(encodeSetup());
     await session.ready;
     session.announce(NAMESPACE);
-    session.registerTrack({ ...TRACK, getLargestObject });
+    session.registerTrack(getLargestObject ? { ...TRACK, getLargestObject } : TRACK);
     return { pair, session, control };
   }
 
@@ -517,6 +517,26 @@ describe('publish driver teardown', () => {
       await subscribe.send(encodeRequestUpdate(5, {}));
       await vi.waitFor(() => expect(subscribe.received.map((m) => m.kind)).toContain('publish-done'));
       expect(getLargestObject).not.toHaveBeenCalled();
+    });
+
+    it('reports no GOAWAY and no solicitation update during the drain', async () => {
+      const onGoaway = vi.fn();
+      const onRequestUpdate = vi.fn();
+      const { pair, session, control } = await harness({ onGoaway, onRequestUpdate });
+      const solicitation = await solicitNamespace(pair.server, ['live'], 1);
+      await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+      // An unanswered subscription keeps the drain waiting for the peer.
+      const subscribe = await rawSubscribe(pair.server, NAMESPACE, 'video', 3);
+      await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+
+      session.close();
+      await settle(50);
+      await control.write(encodeGoaway(0, 'https://relay.example.com/next'));
+      await subscribe.send(encodeGoaway());
+      await solicitation.send(encodeRequestUpdate(5, {}));
+      await vi.waitFor(() => expect(solicitation.received.map((m) => m.kind)).toContain('request-error'));
+      expect(onGoaway).not.toHaveBeenCalled();
+      expect(onRequestUpdate).not.toHaveBeenCalled();
     });
 
     it('refuses a namespace solicitation that arrives during the drain', async () => {
