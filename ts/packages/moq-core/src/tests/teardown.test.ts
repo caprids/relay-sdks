@@ -184,6 +184,41 @@ describe('subscribe driver teardown', () => {
     await vi.waitFor(() => expect(stopped()).toBe(true));
   });
 
+  it('resets a request the peer has finished answering but whose data is outstanding', async () => {
+    const { session, requests } = await harness();
+
+    session.fetch(TRACK);
+    const stream = await requests.next();
+    let reset = false;
+    void stream.readable.pipeTo(new WritableStream()).catch(() => {
+      reset = true;
+    });
+    const writer = stream.writable.getWriter();
+    await writer.write(encodeRequestOk());
+    await writer.close();
+    await settle();
+
+    session.destroy();
+    await vi.waitFor(() => expect(reset).toBe(true));
+  });
+
+  it('answers no incoming request from a responder kept past teardown', async () => {
+    let responder!: { accept(): void };
+    const { pair, session } = await harness({
+      onIncomingPublish: (_publish, respond) => {
+        responder = respond;
+      },
+    });
+    const publish = await openRawRequest(pair.server, encodePublish({ requestId: 1, ...TRACK, trackAlias: 9 }));
+    await vi.waitFor(() => expect(responder).toBeDefined());
+
+    session.destroy();
+    responder.accept();
+    await vi.waitFor(() => expect(publish.ended()).toBe(true));
+    expect(publish.received).toEqual([]);
+    expect(publish.failure()).toBeDefined();
+  });
+
   it('starts no request once it has ended', async () => {
     const { session, requests } = await harness();
 
@@ -537,6 +572,43 @@ describe('publish driver teardown', () => {
       await vi.waitFor(() => expect(solicitation.received.map((m) => m.kind)).toContain('request-error'));
       expect(onGoaway).not.toHaveBeenCalled();
       expect(onRequestUpdate).not.toHaveBeenCalled();
+    });
+
+    it('reports no announce whose NAMESPACE lands during the drain', async () => {
+      const onAnnounced = vi.fn();
+      const { pair, session } = await harness({ onAnnounced }, { bufferBytes: 0 });
+      const subscribe = await rawSubscribe(pair.server, NAMESPACE, 'video', 3);
+      await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+
+      // The peer reads REQUEST_OK and then stops, so the NAMESPACE write waits across the start of the drain.
+      const stream = await pair.server.createBidirectionalStream();
+      await stream.writable
+        .getWriter()
+        .write(encodeSubscribeNamespace({ requestId: 5, trackNamespacePrefix: ['live'] }));
+      const reader = stream.readable.getReader();
+      await reader.read();
+      await settle();
+      session.close();
+      await settle(50);
+      reader.releaseLock();
+      void stream.readable.pipeTo(new WritableStream()).catch(() => {});
+      await settle(50);
+      expect(onAnnounced).not.toHaveBeenCalled();
+    });
+
+    it('reports no readiness from a SETUP that lands during the drain', async () => {
+      const onReady = vi.fn();
+      const pair = createTransportPair();
+      const session = createMoqtPublishSession(pair.client, { callbacks: { onReady } });
+      session.registerTrack(TRACK);
+      const subscribe = await rawSubscribe(pair.server, NAMESPACE, 'video', 3);
+      await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+
+      session.close();
+      await settle(50);
+      await (await pair.server.createUnidirectionalStream()).getWriter().write(encodeSetup());
+      await settle();
+      expect(onReady).not.toHaveBeenCalled();
     });
 
     it('refuses a namespace solicitation that arrives during the drain', async () => {

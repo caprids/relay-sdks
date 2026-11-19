@@ -830,7 +830,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     stream.writer
       .write(encodeNamespace(suffix))
       .then(() => {
-        if (this.#destroyed || record.fired || this.#announces.get(namespaceKey(namespace)) !== record) return;
+        if (this.#destroyed || this.#closing || record.fired) return;
+        if (this.#announces.get(namespaceKey(namespace)) !== record) return;
 
         record.fired = true;
         this.#callbacks.onAnnounced?.({ namespace });
@@ -1238,7 +1239,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     this.#receivedServerSetup = true;
     this.#resolveReady();
-    this.#callbacks.onReady?.(setup.options);
+    if (!this.#closing) this.#callbacks.onReady?.(setup.options);
 
     while (!(await reader.atEnd())) {
       const type = await reader.readVarint();
@@ -1372,13 +1373,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#peerRequestIds.add(requestId);
   }
 
-  /** The next message on a request stream being served: none once the peer has ended it, or the session has ended. */
+  /** The next message on a request stream being served: none once the peer has ended it. */
   async #nextMessage(reader: StreamReader): Promise<ControlMessage | undefined> {
     if (await reader.atEnd()) return undefined;
 
-    const message = await this.#readControlFrame(reader, await reader.readVarint());
-
-    return this.#destroyed ? undefined : message;
+    return this.#readControlFrame(reader, await reader.readVarint());
   }
 
   /**
@@ -1469,7 +1468,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     try {
       for (;;) {
         const message = await this.#nextMessage(reader);
-        if (message === undefined) break;
+        // Checked here, in the turn that dispatches: the session can end between the read and this resumption.
+        if (message === undefined || this.#destroyed) break;
 
         if (message.kind === 'goaway') {
           this.#reportGoaway(message);
@@ -1623,7 +1623,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // The encoder refused the response; the peer did nothing wrong.
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
 
-      if (!this.#destroyed) {
+      if (!this.#destroyed && !this.#closing) {
         this.#callbacks.onSubscribeFailed?.({
           requestId: subscribe.requestId,
           trackNamespace: track.namespace,
@@ -1718,7 +1718,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     try {
       for (;;) {
         const message = await this.#nextMessage(reader);
-        if (message === undefined) break;
+        // Checked here, in the turn that dispatches: the session can end between the read and this resumption.
+        if (message === undefined || this.#destroyed) break;
 
         if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);

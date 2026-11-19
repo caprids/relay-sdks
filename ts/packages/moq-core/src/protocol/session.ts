@@ -622,6 +622,8 @@ class MoqtSessionImpl implements MoqtSession {
   #requestStreams = new Set<WeakRef<RequestStream>>();
   /** Every incoming data stream still being read. The peer's control stream is not one: stopping it ends the session. */
   #dataReaders = new Set<StreamReader>();
+  /** Drops each incoming request the application has yet to answer. */
+  #incomingRequests = new Set<() => void>();
 
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
@@ -753,8 +755,14 @@ class MoqtSessionImpl implements MoqtSession {
     ];
     const pending = expected ? [] : records.filter((r) => !r.settled && !r.cancelled);
 
-    for (const record of records) this.#settleRequest(record);
+    // A record's stream may have left `#requestStreams` with its sending direction still open: the peer FINed first.
+    for (const record of records) {
+      this.#settleRequest(record);
+      record.stream?.cancel(error);
+    }
     for (const stream of this.#requestStreams) stream.deref()?.cancel(error);
+    for (const drop of this.#incomingRequests) drop();
+    this.#incomingRequests.clear();
     for (const reader of this.#dataReaders) void reader.cancel(error).catch(() => {});
     this.#requestStreams.clear();
     this.#dataReaders.clear();
@@ -1664,18 +1672,28 @@ class MoqtSessionImpl implements MoqtSession {
 
       if (callbacks.onIncomingPublish) {
         let responded = false;
+        // Teardown answers for the application: a responder it kept does nothing after `onClosed`.
+        const drop = (): void => {
+          responded = true;
+          void reader.cancel().catch(() => {});
+          void stream.writable.abort().catch(() => {});
+        };
+
+        this.#incomingRequests.add(drop);
 
         callbacks.onIncomingPublish(message, {
           accept: () => {
             if (responded) return;
 
             responded = true;
+            this.#incomingRequests.delete(drop);
             void respond(encodeRequestOk({}, this.#protocol));
           },
           reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') => {
             if (responded) return;
 
             responded = true;
+            this.#incomingRequests.delete(drop);
             void respond(encodeRequestError(errorCode, reason));
           },
         });
