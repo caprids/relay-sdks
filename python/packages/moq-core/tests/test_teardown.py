@@ -75,6 +75,10 @@ from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
 NAMESPACE = ["live", "abc123"]
 TRACK = MoqtSubscribeOptions(track_namespace=NAMESPACE, track_name="video")
 ACTIVE_COUNT = KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1)
+UNKNOWN_MESSAGE = b"\x3f\x00\x00"
+"""A control message of a type no draft defines: session-fatal wherever it arrives."""
+INVALID_FETCH_FLAGS = b"\x40\x80"
+"""Serialization flags 0x80, which name neither an object nor an end of range: session-fatal."""
 
 
 async def stopped(write: Callable[[bytes], Awaitable[None]]) -> bool:
@@ -570,6 +574,30 @@ class TestSubscribeDriverTeardown:
 
             assert await stopped(data.write)
 
+    async def test_drops_an_incoming_request_whose_malformed_message_ends_it(self) -> None:
+        closed: list[object] = []
+
+        async with subscribe_session(MoqtSessionCallbacks(on_closed=closed.append)) as (fake, _, _):
+            request, response = fake.open_controlled_incoming_request()
+            await request.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+
+            assert await stopped(request.write)
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(response), 1)
+
+    async def test_stops_reading_a_fetch_data_stream_whose_malformed_entry_ends_it(self) -> None:
+        closed: list[object] = []
+
+        async with subscribe_session(MoqtSessionCallbacks(on_closed=closed.append)) as (fake, session, _):
+            fetch = session.fetch(TRACK, FetchHandlers())
+            await fake.next_request_stream()
+            data = fake.open_controlled_data_stream()
+            await data.write(fetch_header(fetch.request_id) + INVALID_FETCH_FLAGS)
+            await wait_for(lambda: closed)
+
+            assert await stopped(data.write)
+
     async def test_reports_nothing_from_the_rest_of_a_read_after_a_cancel_from_on_ok(self) -> None:
         order: list[str] = []
         fetch: FetchHandle | None = None
@@ -1058,3 +1086,58 @@ class TestPublishDriverTeardown:
             await wait_for(lambda: closed)
 
             assert await stopped(stream.write)
+
+    async def test_drops_an_incoming_request_whose_malformed_message_ends_it(self) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            _,
+            _,
+        ):
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+
+            assert await stopped(stream.writable.write)
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(stream.readable), 1)
+
+    async def test_stops_reading_a_subscription_whose_malformed_follow_up_ends_it(self) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            _,
+            _,
+        ):
+            subscribe = await raw_subscribe(pair.server, NAMESPACE, "video", 3)
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok"])
+
+            await subscribe.send(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+
+            assert await subscribe.stopped()
+
+    async def test_resets_a_publish_done_still_unwritten_when_it_ends_after_the_requester_finished(self) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            _,
+        ):
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(
+                encode_subscribe(Subscribe(request_id=3, track_namespace=NAMESPACE, track_name="video"))
+            )
+            assert [message.kind for message in decode_frames(await stream.readable.read() or b"")] == ["subscribe-ok"]
+            # The FIN ends the subscription, and with nothing reading the response its PUBLISH_DONE write waits.
+            await stream.writable.close()
+            await settle()
+
+            session.close()
+            await wait_for(lambda: closed)
+
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(stream.readable), 1)
