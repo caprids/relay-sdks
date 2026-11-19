@@ -4,7 +4,7 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.5.0
 
 - `caprid-relay`: `connect_supervised_relay(url, ...)` supervises one connection that publishes and subscribes, as in
   the TypeScript SDK (#529). It takes `connect_relay`'s options plus `reconnect`, `rotate_before`, `on_generation` and

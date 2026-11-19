@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.5.0
 
 - `@caprid/moq-core`: after a session's `onClosed`, none of its callbacks run (#527). A subscribe session that has ended
   starts no request, and at its end it stops every request stream and data stream it was reading, so a fetch reports
