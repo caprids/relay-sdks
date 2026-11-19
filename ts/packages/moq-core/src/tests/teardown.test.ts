@@ -219,6 +219,28 @@ describe('subscribe driver teardown', () => {
     expect(publish.failure()).toBeDefined();
   });
 
+  it('drops an incoming request whose accepted response is still being written', async () => {
+    const pair = createTransportPair({ bufferBytes: 0 });
+    const session = createMoqtSession(heldOpen(pair.client), {
+      callbacks: { onIncomingPublish: (_publish, respond) => respond.accept() },
+    });
+    void pair.server.incomingUnidirectionalStreams
+      .getReader()
+      .read()
+      .then(({ value }) => value?.pipeTo(new WritableStream()))
+      .catch(() => {});
+    await (await pair.server.createUnidirectionalStream()).getWriter().write(encodeSetup());
+    await session.ready;
+
+    // The peer reads nothing yet, so the REQUEST_OK write waits.
+    const stream = await pair.server.createBidirectionalStream();
+    await stream.writable.getWriter().write(encodePublish({ requestId: 1, ...TRACK, trackAlias: 9 }));
+    await settle();
+    session.destroy();
+
+    await expect(stream.readable.getReader().read()).rejects.toBeDefined();
+  });
+
   it('starts no request once it has ended', async () => {
     const { session, requests } = await harness();
 
@@ -362,7 +384,7 @@ describe('publish driver teardown', () => {
     }: {
       bufferBytes?: number;
       wrap?: (transport: MoqtTransport) => MoqtTransport;
-      getLargestObject?: () => undefined;
+      getLargestObject?: () => { group: number; object: number } | undefined;
     } = {}
   ) {
     const pair = createTransportPair(bufferBytes === undefined ? {} : { bufferBytes });
@@ -465,6 +487,30 @@ describe('publish driver teardown', () => {
       const subscribe = await rawSubscribe(h.pair.server, NAMESPACE, 'video', 3);
       await vi.waitFor(() => expect(subscribe.received.map((m) => m.kind)).toContain('publish-done'));
       expect(bindings.filter((alias) => alias !== undefined)).toEqual([]);
+    });
+
+    it('opens no fill stream after a destroy from onSubscribe', async () => {
+      let session!: MoqtPublishSession;
+      let opened = 0;
+      const h = await harness(
+        { onSubscribe: () => session.destroy() },
+        {
+          getLargestObject: () => ({ group: 1, object: 0 }),
+          wrap: (transport) => ({
+            ...transport,
+            createUnidirectionalStream: (options) => {
+              opened += 1;
+              return transport.createUnidirectionalStream(options);
+            },
+          }),
+        }
+      );
+      session = h.session;
+
+      const subscribe = await rawSubscribe(h.pair.server, NAMESPACE, 'video', 3);
+      await vi.waitFor(() => expect(subscribe.received.map((m) => m.kind)).toContain('publish-done'));
+      // Only the control stream.
+      expect(opened).toBe(1);
     });
 
     it('reports no update after a destroy from onTrackBinding', async () => {

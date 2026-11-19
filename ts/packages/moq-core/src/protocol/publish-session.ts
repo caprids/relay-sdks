@@ -1710,7 +1710,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#reportBinding(track, subscriber.forwarding ? trackAlias : undefined);
     }
 
-    if (this.#fillRequested(subscriber, subscribe.parameters.fillParameters, largestObject)) {
+    if (this.#serving(track) && this.#fillRequested(subscriber, subscribe.parameters.fillParameters, largestObject)) {
       this.#failFill(subscriber, subscribe.requestId);
     }
 
@@ -1792,7 +1792,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
                 .write(encodeRequestOk(largestObject ? { largestObject } : {}, this.#protocol))
                 .catch(() => {});
 
-              if (this.#fillRequested(subscriber, fillParameters, largestObject)) {
+              if (this.#serving(track) && this.#fillRequested(subscriber, fillParameters, largestObject)) {
                 this.#failFill(subscriber, message.requestId);
               }
             }

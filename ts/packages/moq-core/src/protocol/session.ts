@@ -1654,48 +1654,40 @@ class MoqtSessionImpl implements MoqtSession {
     // Before answering: a request this client rejects still consumes its id.
     if (initiatingRequestId !== undefined) this.#claimPeerRequestId(initiatingRequestId);
 
+    const writer = stream.writable.getWriter();
+    let responded = false;
+    // Until its response has been written, the request is teardown's to drop: nothing is answered after `onClosed`.
+    const drop = (): void => {
+      responded = true;
+      void reader.cancel().catch(() => {});
+      void writer.abort().catch(() => {});
+    };
     const respond = async (bytes: Uint8Array) => {
-      const writer = stream.writable.getWriter();
+      if (responded) return;
+
+      responded = true;
 
       try {
         await writer.write(bytes);
         await writer.close();
       } catch {
-        // Peer cancelled; nothing to clean up.
+        // Peer cancelled, or teardown dropped the request.
       }
 
-      await reader.cancel();
+      this.#incomingRequests.delete(drop);
+      await reader.cancel().catch(() => {});
     };
+
+    this.#incomingRequests.add(drop);
 
     if (message.kind === 'publish') {
       const callbacks = this.#callbacks;
 
       if (callbacks.onIncomingPublish) {
-        let responded = false;
-        // Teardown answers for the application: a responder it kept does nothing after `onClosed`.
-        const drop = (): void => {
-          responded = true;
-          void reader.cancel().catch(() => {});
-          void stream.writable.abort().catch(() => {});
-        };
-
-        this.#incomingRequests.add(drop);
-
         callbacks.onIncomingPublish(message, {
-          accept: () => {
-            if (responded) return;
-
-            responded = true;
-            this.#incomingRequests.delete(drop);
-            void respond(encodeRequestOk({}, this.#protocol));
-          },
-          reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') => {
-            if (responded) return;
-
-            responded = true;
-            this.#incomingRequests.delete(drop);
-            void respond(encodeRequestError(errorCode, reason));
-          },
+          accept: () => void respond(encodeRequestOk({}, this.#protocol)),
+          reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') =>
+            void respond(encodeRequestError(errorCode, reason)),
         });
         return;
       }
