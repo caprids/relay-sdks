@@ -1,11 +1,11 @@
-"""The one supervision loop every supervised connection runs: one connection at a time, replaced with
-backoff whenever it ends, and replaced make-before-break before its credential expires.
+"""The one supervision loop every supervised connection runs.
 
-Each connection is a generation. What it carries moves with it: every publication's tracks
-(registered once, rebound to each generation's namespace) and, on a connection that subscribes,
-every want and publishing-roots view. The supervised publisher, subscriber and relay are views over
-this loop that differ only in the connection they open. See ``spec/behavior.md``, "Supervised
-connections". The counterpart of ``ts/src/supervisor.ts``.
+It holds one connection at a time, replaces it with backoff whenever it ends, and replaces it
+make-before-break before its credential expires. Each connection is a generation. What it carries
+moves with it: every publication's tracks (registered once, rebound to each generation's namespace)
+and, on a connection that subscribes, every want and publishing-roots view. The supervised publisher,
+subscriber and relay are views over this loop that differ only in the connection they open. See
+``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervisor.ts``.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class SupervisedConnection:
     closed: RelayAwaitable[Closed]
     expires_at: datetime | None
     close: Callable[[], Awaitable[None] | None]
-    """Close the connection: an awaitable when it drains its publications first."""
+    """Close the connection. It returns an awaitable when it drains its publications first."""
     subscriber: _Subscribing | None = None
     """The subscribing side; ``None`` on a connection that only publishes."""
     publish: Callable[[tuple[str, ...]], TrackPublisher] | None = None
@@ -61,11 +61,11 @@ class SupervisedConnection:
 
 
 ConnectSupervised: TypeAlias = Callable[[CancellationToken, str], Awaitable[SupervisedConnection]]
-"""How a supervisor opens the connection for a generation: the attempt's cancellation, and the generation field."""
+"""How a supervisor opens the connection for a generation, given the attempt's cancellation and the generation field."""
 
 
 class _NotSubscribing:
-    """The subscribing side of a connection that only publishes: nothing subscribes on it."""
+    """The subscribing side of a connection that only publishes. Every use raises."""
 
     def __getattr__(self, name: str) -> NoReturn:
         raise RuntimeError(f"This supervised connection does not subscribe ({name})")
@@ -110,7 +110,7 @@ class _Connection:
     end: Literal["session", "fault"] | None = None
     """What ended it: the session reporting its end, or a publication lost while the session stayed open."""
     closing: bool = False
-    """Set once the loop closes it on purpose: a publication ending then is no fault."""
+    """Set once the loop closes it on purpose, so a publication ending then is no fault."""
     ended: CancellationToken = field(default_factory=CancellationToken)
     """Cancelled when this connection ends, or once the loop has given it up."""
     retiring: CancellationToken = field(default_factory=CancellationToken)
@@ -163,15 +163,18 @@ class _Serving:
 
 @dataclass(frozen=True, slots=True)
 class _Reconnecting:
-    """No connection serves: the last one ended, or every attempt so far failed."""
+    """No connection serves, because the last one ended or every attempt so far failed."""
 
     status: ClassVar[SupervisedStatus] = "reconnecting"
 
 
 @dataclass(frozen=True, slots=True)
 class _Stopped:
-    """Nothing connects or serves any more. ``status`` reads what it read before until the connections that
-    were open have drained, then ``closed``; ``shutdown`` settles then."""
+    """Nothing connects or serves any more.
+
+    ``status`` keeps its earlier value until the connections that were open have drained. Then it reads
+    ``closed``, and ``shutdown`` settles.
+    """
 
     status: SupervisedStatus
     shutdown: asyncio.Future[None]
@@ -181,7 +184,7 @@ _Phase: TypeAlias = _Connecting | _Serving | _Reconnecting | _Stopped
 
 
 def _close_session(session: SupervisedConnection) -> asyncio.Future[None] | None:
-    """Close ``session``: the drain to wait for, or ``None`` when it closed at once. Never raises."""
+    """Close ``session`` and return the drain to wait for, or ``None`` when it closed at once. Never raises."""
     try:
         closing = session.close()
     except Exception:
@@ -198,7 +201,7 @@ class Supervisor:
     """The loop's handle, which the public views wrap.
 
     Nothing connects until :meth:`start`; publications made before it are served from the first
-    generation on. ``name`` names the supervisor in its errors: ``Supervised publisher is closed``.
+    generation on. ``name`` names the supervisor in its errors, as in ``Supervised publisher is closed``.
     """
 
     def __init__(
@@ -222,22 +225,22 @@ class Supervisor:
         self._on_generation = on_generation
         self._phase: _Phase = _Connecting()
         self._closed: asyncio.Future[Closed] = loop.create_future()
-        # Settles once the first generation is up, or fails as `start()` does. Observed here: a stop before
-        # `start()` hands it to its caller must not go unretrieved.
+        # Settles once the first generation is up, or fails as `start()` does. Observed here, because a stop
+        # before `start()` hands it to its caller must not leave it unretrieved.
         self._first: asyncio.Future[None] | None = loop.create_future()
         _observe(self._first)
         self._started = False
-        # Cancelled when the loop stops: ends the attempt in progress and the waits between attempts. A live
-        # connection is closed cleanly instead.
+        # Cancelled when the loop stops. It ends the attempt in progress and the waits between attempts. The
+        # loop closes a live connection cleanly instead.
         self._lifetime = CancellationToken()
-        # The connection attempt in progress only: once connected, a connection is closed, not cancelled.
+        # The connection attempt in progress only. Once connected, a connection is closed, not cancelled.
         self._attempt: CancellationToken | None = None
         self._publications: list[_Publication] = []
-        # Every root ever published: a closed publication's root stays taken.
+        # Every root ever published. A closed publication's root stays taken.
         self._roots: set[tuple[str, ...]] = set()
         self._stop_listeners: list[Callable[[], None]] = []
-        # Connections ended or given up and still closing: draining groups the relay has not acknowledged. `stop()`
-        # waits for them, and a publication's `close()` for those that carry it.
+        # Connections ended or given up and still closing, while they drain groups the relay has not acknowledged.
+        # `stop()` waits for them, and a publication's `close()` for those that carry it.
         self._draining: dict[_Connection, asyncio.Future[None]] = {}
         self._waiters: list[asyncio.Future[None]] = []
         # Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one
@@ -286,7 +289,7 @@ class Supervisor:
         return any(len(root) < len(namespace) and tuple(namespace[: len(root)]) == root for root in self._roots)
 
     def on_stop(self, listener: Callable[[], None]) -> None:
-        """Stop everything subscribing on a connection: called first when the loop stops."""
+        """Add a listener that stops everything subscribing on a connection. The loop calls it first when it stops."""
         self._stop_listeners.append(listener)
 
     async def live_connection(self, scope: CancellationToken) -> _Connection | None:
@@ -351,7 +354,7 @@ class Supervisor:
             wake.set_result(None)
 
     def stop(self, error: BaseException | None = None) -> asyncio.Future[None]:
-        """Stop reconnecting and close every connection; the result settles once their publications drained.
+        """Stop reconnecting and close every connection. The result settles once their publications drained.
 
         Raises what ``on_status`` raises reporting ``closed`` when nothing drains; otherwise the result
         carries it. Idempotent.
@@ -460,24 +463,26 @@ class Supervisor:
         return shutdown
 
     def _stop_quietly(self, error: BaseException | None) -> None:
-        """Stop from a place with no caller to tell: a raising on_status reporting ``closed`` settles ``closed``
-        regardless."""
+        """Stop from a place with no caller to tell. If on_status raises while reporting ``closed``,
+        ``closed`` settles anyway."""
         with contextlib.suppress(Exception):
             self._stop(error)
 
     def _close_live(self, live: _Connection) -> asyncio.Future[None] | None:
-        """Close ``live`` on purpose: the drain to wait for, if its close drains."""
+        """Close ``live`` on purpose and return the drain to wait for, if its close drains."""
         live.closing = True
         for generation in live.publications.values():
             generation.ended = True
         return _close_session(live.session)
 
     def _drain_live(self, live: _Connection, after: Callable[[], None] | None = None) -> None:
-        """Close a connection ended or given up while the loop runs on, draining in the background; ``after`` runs
-        once it closed. The connection is closed once: a later call only adds its ``after``."""
+        """Close a connection ended or given up while the loop runs on, and drain it in the background.
+
+        ``after`` runs once it closed. The connection is closed once, and a later call only adds its ``after``.
+        """
         already = self._draining.get(live)
         if already is not None:
-            # Started when the connection ended, or for a lost publication, before a rotation gave it up: its
+            # Started when the connection ended, or for a lost publication, before a rotation gave it up. Its
             # clean-up still runs once it closed.
             if after is not None:
                 already.add_done_callback(lambda _: after())
@@ -499,13 +504,16 @@ class Supervisor:
         self._draining[live] = drained
 
     def _settle_ended(self, live: _Connection) -> None:
-        """The connection ended or was given up: release what it ran and stop anything still waiting on it."""
+        """Release what an ended or given-up connection ran, and stop anything still waiting on it."""
         live.ended.cancel()
         live.discovery.close()
 
     def _end(self, live: _Connection, cause: Literal["session", "fault"], closed: Closed) -> None:
-        """``live`` ended, or a lost publication ended it. Marked in the turn it happened, before anything waiting
-        on the connection resumes: a rotation in progress sees it and falls back to reconnecting."""
+        """Mark ``live`` ended, by its session or by a lost publication.
+
+        The mark lands in the turn the end happened, before anything waiting on the connection resumes, so a
+        rotation in progress sees it and falls back to reconnecting.
+        """
         if live.end is not None:
             return
         live.end = cause
@@ -513,12 +521,13 @@ class Supervisor:
         live.ended.cancel()
         if not self.stopped:
             if cause == "fault":
-                # Given up for a lost publication while the session is still open: close it. Its wants move to the
-                # next connection once that is up, as on a rotation (`_run`).
+                # Given up for a lost publication while the session is still open, so close it. Its wants move to
+                # the next connection once that is up, as on a rotation (`_run`).
                 self._drain_live(live, lambda: self._settle_ended(live))
             else:
-                # A session can report its end before it drained: after a GOAWAY a duplex session's publisher still
-                # waits for the relay to read its tracks' ends. Closing it waits for that, and stop() for the close.
+                # A session can report its end before it drained. After a GOAWAY, a duplex session's publisher
+                # still waits for the relay to read its tracks' ends. Closing it waits for that, and stop() for the
+                # close.
                 self._drain_live(live)
         for generation in live.publications.values():
             generation.ended = True
@@ -554,9 +563,11 @@ class Supervisor:
         return live
 
     def _attach(self, live: _Connection, publication: _Publication, *, hand_over: bool) -> list[asyncio.Future[None]]:
-        """Announce ``publication`` on ``live`` and register its tracks there: bound at once on a fresh
-        connection, or handed over on a rotation. Returns the hand-overs. A connection that refuses the
-        announce is ending: nothing is bound."""
+        """Announce ``publication`` on ``live`` and register its tracks there.
+
+        The tracks bind at once on a fresh connection, or are handed over on a rotation. Returns the
+        hand-overs. A connection that refuses the announce is ending, and nothing is bound.
+        """
         publish = live.session.publish
         if publish is None:
             return []
@@ -573,7 +584,7 @@ class Supervisor:
             for release in list(state.group_holds):
                 release()
             error = done.result().error
-            # The relay stopped soliciting the namespace while the connection lives: a generation serves every
+            # The relay stopped soliciting the namespace while the connection is open. A generation serves every
             # root it carries or none, so the connection ends and the next generation announces them all again.
             if (
                 error is not None
@@ -593,7 +604,7 @@ class Supervisor:
         return []
 
     def _unbind_all(self, live: _Connection) -> None:
-        """Every track bound to ``live`` loses its binding: writes fail with RECONNECTING until the next binds."""
+        """Unbind every track bound to ``live``. Writes fail with RECONNECTING until the next generation binds."""
         for publication, state in live.publications.items():
             for track in list(publication.tracks.values()):
                 track._unbind_generation(state)
@@ -619,8 +630,8 @@ class Supervisor:
                 self._stop_quietly(thrown)
 
         live.over.add_done_callback(on_over)
-        # Checked on the session's future too: `ended` is cancelled in a callback a turn later, and a connect that
-        # fails without suspending would never let it run.
+        # Also checked on the session's future, because `ended` is cancelled in a callback a turn later, and a
+        # connect that fails without suspending would never let it run.
         while not self.stopped and not live.ended.cancelled and not live.session.closed.done():
             try:
                 nxt = await self._connect_once()
@@ -667,8 +678,8 @@ class Supervisor:
         if live.holds == 0 and not wants_moved.done():
             wants_moved.set_result(None)
 
-        # A group can close without the wrapper hearing of it (the relay resetting demand): release its hold once
-        # it is closed, whatever closed it.
+        # A group can close without the wrapper hearing of it, as when the relay resets demand. Release its hold
+        # once it is closed, whatever closed it.
         def sweep() -> None:
             for state in live.publications.values():
                 for release, group in list(state.group_holds.items()):
@@ -775,8 +786,8 @@ class Supervisor:
         attempt = 0
         # A connection a rotation already brought up, reported and moved everything to.
         nxt: _Connection | None = None
-        # A connection given up for a lost publication, still draining: its wants are still subscribed there, and
-        # move to the next connection once it is up, make-before-break, rather than wait out the drain.
+        # A connection given up for a lost publication and still draining. Its wants are still subscribed there,
+        # and move to the next connection once it is up, make-before-break, rather than wait out the drain.
         given_up: _Connection | None = None
         while not self.stopped:
             live, nxt = nxt, None
@@ -885,8 +896,8 @@ class SupervisedPublication:
 
     @property
     def namespace(self) -> tuple[str, ...] | None:
-        """The namespace the live connection serves: the root followed by its generation. ``None`` between
-        connections."""
+        """The namespace the live connection serves, which is the root followed by its generation. ``None``
+        between connections."""
         current = self._supervisor.current
         state = None if current is None else current.publications.get(self._publication)
         return None if state is None else state.namespace
@@ -900,8 +911,8 @@ class SupervisedPublication:
     ) -> RelayTrackWriter:
         """Register a track every generation serves under this root, and return the writer that outlives them.
 
-        The same rules as :meth:`SupervisedPublisher.register_track`, checked at once: names are unique per
-        publication, also after their writer closes; writes wait for demand on the live connection, and
+        The rules of :meth:`SupervisedPublisher.register_track` apply, checked at once. Names are unique per
+        publication, also after their writer closes. Writes wait for demand on the live connection, and
         raise ``RECONNECTING`` while none is up.
         """
         name = track_name(track)
@@ -928,7 +939,10 @@ class SupervisedPublication:
 
     async def close(self) -> None:
         """End the publication's tracks, wait for their unacknowledged groups, and withdraw it from every
-        connection. The connection and the other publications carry on; the root stays taken. Idempotent."""
+        connection.
+
+        The connection and the other publications stay open, and the root stays taken. Idempotent.
+        """
         if self._closing is None:
             self._closing = asyncio.ensure_future(self._supervisor._close_publication(self._publication))
         await asyncio.shield(self._closing)

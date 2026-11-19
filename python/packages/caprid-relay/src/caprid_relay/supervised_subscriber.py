@@ -12,7 +12,7 @@ replacement opens while the current subscription keeps delivering, and ``on_swit
 cutover. Before the connection's credential expires, the supervisor rotates to a new connection the
 same way (issue #261): every want's subscription moves to it make-before-break, and a want that
 keeps its target sees no break and no repeat. Publishing-roots views (:mod:`caprid_relay.publishing_roots`)
-follow the roots publishing under a prefix from the same per-connection discovery. A view over
+follow the roots publishing under a prefix from the same per-connection discovery. It is a view over
 the one supervision loop (``_supervisor.py``) whose connections each subscribe. See
 ``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
@@ -219,8 +219,10 @@ def _guarded(handlers: WantHandlers | PublishingRootsHandlers) -> dict[str, Call
 
 
 class _WantSurface:
-    """The wants and publishing-roots views a supervisor's connections carry: each moves with a rotation
-    and comes back on the next connection. Everything is cancelled when the supervisor stops."""
+    """The wants and publishing-roots views a supervisor's connections carry.
+
+    Each moves with a rotation and comes back on the next connection. The supervisor's stop cancels them all.
+    """
 
     __slots__ = ("_supervisor", "_views", "_wants")
 

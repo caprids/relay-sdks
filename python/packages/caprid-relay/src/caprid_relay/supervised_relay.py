@@ -1,9 +1,9 @@
 """The supervised relay: one connection that publishes and subscribes (:func:`connect_relay`), replaced with
 backoff whenever it ends and make-before-break before its credential expires.
 
-Each connection is a generation. Every published root is served as the root followed by that connection's
-generation field, so all of a client's namespaces change generation together, and every want and
-publishing-roots view moves with them. A view over the one supervision loop (``_supervisor.py``) whose
+Each connection is a generation. The supervisor serves every published root as the root followed by that
+connection's generation field, so all of a client's namespaces change generation together, and every want and
+publishing-roots view moves with them. It is a view over the one supervision loop (``_supervisor.py``) whose
 connections both publish and subscribe. See ``spec/behavior.md``, "Supervised relay". The counterpart of
 ``ts/src/supervised-relay.ts``.
 """
@@ -40,9 +40,9 @@ class SupervisedRelay:
     """One connection that publishes and subscribes, and reconnects. Create one with :func:`connect_supervised_relay`.
 
     It has the supervised subscriber's wants and publishing-roots views, and :meth:`publish` for any number
-    of roots; all of them move to each new connection together. The relay never routes a connection's own
-    announcements back to it: :meth:`publishing_roots` does not report this relay's own roots, and a want
-    for one of its own tracks is refused (request error 16 on moq-relay).
+    of roots. All of them move to each new connection together. The relay never routes a connection's own
+    announcements back to it. :meth:`publishing_roots` does not report this supervised relay's own roots, and
+    the relay refuses a want for one of its own tracks (request error 16 on moq-relay).
     """
 
     __slots__ = ("_closed", "_supervisor", "_wants")
@@ -71,11 +71,11 @@ class SupervisedRelay:
     def publish(self, root: Sequence[str]) -> SupervisedPublication:
         """Publish ``root`` on every connection, as the root followed by the connection's generation field.
 
-        The root is checked at once: the root plus one field must satisfy the namespace rules. The token
-        must grant publishing under it. A root published once stays taken, also after its publication
-        closes: publishing it again raises ``ValueError``. When the relay stops soliciting one of the roots
-        while the connection lives, the connection is replaced: every root changes generation together.
-        Raises :class:`RelayError` with code ``CLOSED`` once the relay is closed.
+        This call checks the root at once. The root plus one field must satisfy the namespace rules. The
+        token must grant publishing under it. A root published once stays taken, also after its publication
+        closes, so publishing it again raises ``ValueError``. When the relay stops soliciting one of the roots
+        while the connection is open, the supervisor replaces the connection, and every root changes
+        generation together. Raises :class:`RelayError` with code ``CLOSED`` once the relay is closed.
         """
         fields = namespace_fields(root)
         # A generation field is always valid; check the whole namespace once so a root at the size limit fails here.
@@ -98,7 +98,7 @@ class SupervisedRelay:
     ) -> None:
         """Keep a subscription to a track open until ``unwant(key)``, as :meth:`SupervisedSubscriber.want` does.
 
-        A want for one of this relay's own tracks is refused by the relay, as on :func:`connect_relay`.
+        The relay refuses a want for one of this supervised relay's own tracks, as on :func:`connect_relay`.
         """
         self._wants.want(
             key,
@@ -124,8 +124,8 @@ class SupervisedRelay:
     def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
         """Follow the roots publishing now under ``prefix``, as :meth:`SupervisedSubscriber.publishing_roots` does.
 
-        A namespace under one of this relay's own roots is never reported, also when the connection a
-        rotation is replacing sees the replacement's announcements.
+        It never reports a namespace under one of this supervised relay's own roots, also when the
+        connection a rotation is replacing sees the replacement's announcements.
         """
         return self._wants.publishing_roots(prefix, handlers)
 
@@ -133,11 +133,11 @@ class SupervisedRelay:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
         credential expires.
 
-        A new connection opens with a fresh token and the next generation. Every track is registered on
-        it and moves at its next write or group, once it has demand there or none on the old connection;
-        every want moves its subscription as :meth:`SupervisedSubscriber.rotate` describes. The old
-        connection closes once everything has moved, after 10 seconds at most. A no-op while no
-        connection is up.
+        A new connection opens with a fresh token and the next generation. The supervisor registers every
+        track on it, and each track moves at its next write or group, once it has demand there or none on
+        the old connection. Every want moves its subscription as :meth:`SupervisedSubscriber.rotate`
+        describes. The old connection closes once everything has moved, after 10 seconds at most. A
+        no-op while no connection is up.
         """
         self._supervisor.rotate()
 
@@ -168,7 +168,7 @@ async def connect_supervised_relay(
     on_generation: Callable[[str], None] | None = None,
     on_status: Callable[[SupervisedStatus, BaseException | None], None] | None = None,
 ) -> SupervisedRelay:
-    """Open one connection that publishes, subscribes and reconnects: each connection is a generation, and
+    """Open one connection that publishes, subscribes and reconnects. Each connection is a generation, and
     every published root, want and publishing-roots view moves to the next one together.
 
     It takes :func:`connect_relay`'s options plus the reconnection policy, and returns once the first
@@ -176,9 +176,9 @@ async def connect_supervised_relay(
     credentials (``UNAUTHORIZED``), raises that failure; any other failure is retried with backoff
     (``reconnect``, from 0.5 s doubling up to 10 s), bounded only by ``cancellation``, whose reason is
     raised. ``on_generation`` receives the generation field once each connection is up and every
-    publication's tracks are registered on it; ``on_status`` runs on every status change, with what ended
-    the previous connection or failed the last attempt. A raise from either stops the supervisor with that
-    error. ``rotate_before`` (seconds, default 60) is how long before the connection's credential expires
+    publication's tracks are registered on it. ``on_status`` runs on every status change, with what ended
+    the previous connection or failed the last attempt. If either callback raises, the supervisor stops
+    with that error. ``rotate_before`` (seconds, default 60) is how long before the connection's credential expires
     (:attr:`RelaySession.expires_at`) a replacement connection is opened, make-before-break; never earlier
     than halfway through the time left. With no ``url``, every connection dials the endpoint the first one
     rooted at its token's root. See ``spec/behavior.md``, "Supervised relay"; :func:`connect_relay` never

@@ -536,7 +536,7 @@ class PublishingRoots:
         self._live_connection = live_connection
         self._current = current
         self._on_closed = on_closed
-        # Whether a namespace is the supervisor's own publishing: its announcement is never reported. The relay
+        # Whether a namespace is the supervisor's own publishing, whose announcement is never reported. The relay
         # hides a connection's own announcements from it, but not those of the connection a rotation is replacing
         # or bringing up. Withdrawals still count, so a root seen before the supervisor published it leaves when it
         # is withdrawn.

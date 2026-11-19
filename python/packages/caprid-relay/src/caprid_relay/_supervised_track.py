@@ -1,7 +1,9 @@
-"""A track a supervisor serves across connections: the writer the application keeps, bound in turn to
-each generation's track, and moved make-before-break on a rotation. A write made while no generation
-is up, or one the connection's end interrupts, fails with ``RECONNECTING``; nothing is replayed onto
-the next generation. The counterpart of ``ts/src/supervised-track.ts``.
+"""A track a supervisor serves across connections.
+
+The application keeps one writer. The supervisor binds it to each generation's track in turn, and moves
+it make-before-break on a rotation. A write made while no generation is up, or one the connection's end
+interrupts, fails with ``RECONNECTING``. Nothing is replayed onto the next generation. The counterpart of
+``ts/src/supervised-track.ts``.
 """
 
 from __future__ import annotations

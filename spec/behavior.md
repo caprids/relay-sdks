@@ -968,8 +968,8 @@ taken over.
 `connectSupervisedRelay` supervises one [connection that publishes and subscribes](#one-connection-that-publishes-and-subscribes).
 It has the supervised subscriber's wants and publishing-roots views, and `publish(root)` for any
 number of roots. Python's `connect_supervised_relay` passes `on_generation` the generation field
-itself, where TypeScript's `onGeneration` takes `{ generation }`, and its `close()` is a coroutine,
-as `RelaySession.close()` is.
+itself, where TypeScript's `onGeneration` takes `{ generation }`. Its `close()` is a coroutine, as
+`RelaySession.close()` is.
 
 - **A generation is a connection.** Each connection gets one generation field, chosen as for a
   supervised publisher, and serves every published root followed by that field. All of a client's
@@ -1006,9 +1006,9 @@ tracks with `generations: true`. Halfway through an 8 s run, A rotated. Both of 
 the new generation together; A held 2 connections in all and B 1; B moved to A's new generation by
 a switch, with no restart, and received 39 to 40 objects on each track; and neither roster listed
 its own root. Before the SDK left its own roots out, A's roster listed A during the overlap.
-The Python SDK over aioquic (`python/scripts/probe_supervised_relay.py`, the same run) passed the
-same eight checks in 3 of 3 runs on 2026-11-19: B received 40 objects on each of A's tracks, 19 to
-20 of them before the rotation, with one switch and no restart per want, and A received 39 on each
+The Python SDK over aioquic (`python/scripts/probe_supervised_relay.py`, the same scenario) passed
+the same eight checks in 3 of 3 runs on 2026-11-19. B received 40 objects on each of A's tracks, 19
+to 20 of them before the rotation, with one switch and no restart per want. A received 39 on each
 of B's.
 
 ### Publishing roots

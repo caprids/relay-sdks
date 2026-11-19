@@ -74,4 +74,5 @@ We decided (#525):
 - **Python has it too, unsupervised.** `connect_relay` and `create_moqt_duplex_session` port the same
   design over the Python core's two drivers, and passed the same live check on ord (`spec/behavior.md`). A
   Python `RelaySession` is not a `RelaySubscriber` instance, because its `close()` is a coroutine and a
-  subscriber's is not. `connect_supervised_relay` supervises it as TypeScript does, and passed the same ord check.
+  subscriber's is not. `connect_supervised_relay` supervises it as TypeScript does, and passed the same live check
+  on ord.

@@ -1125,9 +1125,9 @@ must grant every namespace the connection publishes and every one it subscribes 
   `RelayPublisher.close()` does. A `RelaySession` has every `RelaySubscriber` method and property, but
   it is not a `RelaySubscriber` instance.
 
-`connect_supervised_relay` does the same and reconnects. Each connection is one generation, and every
-root you publish is served as the root followed by that generation's field, so all of a client's
-namespaces move to a new connection together:
+`connect_supervised_relay` does the same and reconnects. Each connection is one generation. The
+supervisor serves every root you publish as the root followed by that generation's field, so all of
+a client's namespaces move to a new connection together:
 
 ```python
 from caprid_relay import PublishingRootsHandlers, WantHandlers, connect_supervised_relay
@@ -1138,7 +1138,7 @@ video = me.register_track("video")  # the writer outlives the connections
 
 
 def on_changed(change):
-    # Your own root is not reported: the relay never routes a connection's own announcements back to it.
+    # Your own root is not reported. The relay never routes a connection's own announcements back to it.
     for root in change.added:
         relay.want(f"video/{root.id}", root.namespace, "video", WantHandlers(on_object=render), generations=True)
     for root in change.removed:
@@ -1149,11 +1149,11 @@ relay.publishing_roots(["room", "p"], PublishingRootsHandlers(on_changed=on_chan
 ```
 
 It has every `want()` and `publishing_roots()` feature of the supervised subscriber, and the track
-writers of the supervised publisher. If the relay stops soliciting one of your roots, the whole
-connection is replaced, so every root moves to the next generation together. `relay.generation` is the
-live connection's field, `on_generation` receives it as each connection comes up, and `await
-relay.close()` drains the publications' groups as `RelaySession.close()` does. See the
-[supervised relay contract](../spec/behavior.md#supervised-relay).
+writers of the supervised publisher. If the relay stops soliciting one of your roots, the supervisor
+replaces the whole connection, so every root moves to the next generation together.
+`relay.generation` is the live connection's field, and `on_generation` receives it as each
+connection comes up. `await relay.close()` drains the publications' groups as
+`RelaySession.close()` does. See the [supervised relay contract](../spec/behavior.md#supervised-relay).
 
 ### Advanced media groups
 

@@ -3,8 +3,8 @@ ends, each serving the application's root namespace plus a fresh generation fiel
 
 Track writers outlive the connections: the application registers a track once and keeps writing to
 the same writer, which binds to each generation's track in turn. Nothing written is replayed onto a
-new generation; a write made while no generation is up fails at once with ``RECONNECTING``. A view
-over the one supervision loop (``_supervisor.py``) whose connections each publish one namespace. See
+new generation; a write made while no generation is up fails at once with ``RECONNECTING``. It is a
+view over the one supervision loop (``_supervisor.py``) whose connections each publish one namespace. See
 ``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervised-publisher.ts``.
 """
 
@@ -195,7 +195,7 @@ async def _supervise_relay_publisher(
         cancellation.throw_if_cancelled()
 
     async def connect_generation(attempt: CancellationToken, generation: str) -> SupervisedConnection:
-        # A publisher connection announces one namespace, chosen as it connects: this generation's.
+        # A publisher connection announces one namespace, chosen as it connects, so this generation's.
         served = (*root, generation)
         publisher = await connect(served, attempt)
 
