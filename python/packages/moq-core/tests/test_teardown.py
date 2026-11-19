@@ -23,6 +23,7 @@ from moq_core.bytes import ByteWriter
 from moq_core.control_messages import (
     REQUEST_ERROR_CODE,
     SETUP_OPTION,
+    STREAM_RESET_CODE,
     ControlMessage,
     ControlMessageDeframer,
     KeyValuePair,
@@ -631,14 +632,53 @@ class TestSubscribeDriverTeardown:
 # ============================================================================
 
 
+class HeldFin:
+    """A response direction whose writes land but whose FIN waits for ``release()``, as behind a peer's flow control."""
+
+    def __init__(self, inner: SendStream) -> None:
+        self._inner = inner
+        self._released = asyncio.Event()
+
+    def release(self) -> None:
+        self._released.set()
+
+    async def write(self, data: bytes) -> None:
+        await self._inner.write(data)
+
+    async def close(self) -> None:
+        await self._released.wait()
+        await self._inner.close()
+
+    def abort(self, reason: object = None) -> None:
+        self._inner.abort(reason)
+        self._released.set()
+
+
 @asynccontextmanager
 async def publish_session(
-    callbacks: MoqtPublishSessionCallbacks | None = None, *, hold_open: bool = False, setup: bool = True
+    callbacks: MoqtPublishSessionCallbacks | None = None,
+    *,
+    hold_open: bool = False,
+    setup: bool = True,
+    held_fins: list[HeldFin] | None = None,
 ) -> AsyncIterator[tuple[TransportPair, MoqtPublishSession, SendStream]]:
+    """``held_fins``, when given, collects every response direction the publisher answers on, each as a
+    :class:`HeldFin`."""
     pair = create_transport_pair()
 
     if hold_open:
         setattr(pair.client, "close", lambda close_code=0, reason="": None)  # noqa: B010 - replaces a method in place
+
+    if held_fins is not None:
+        incoming = pair.client.incoming_bidirectional_streams
+
+        async def holding() -> AsyncIterator[BidirectionalStream]:
+            async for stream in incoming():
+                held = HeldFin(stream.writable)
+                held_fins.append(held)
+                yield BidirectionalStream(readable=stream.readable, writable=held)
+
+        setattr(pair.client, "incoming_bidirectional_streams", holding)  # noqa: B010 - replaces a method in place
 
     session = create_moqt_publish_session(
         pair.client, MoqtPublishSessionConfig(callbacks=callbacks or MoqtPublishSessionCallbacks())
@@ -1141,3 +1181,128 @@ class TestPublishDriverTeardown:
 
             with pytest.raises(StreamClosedError):
                 await asyncio.wait_for(read_to_end(stream.readable), 1)
+
+    async def test_resets_a_publish_done_whose_fin_is_still_held_when_it_ends(self) -> None:
+        closed: list[object] = []
+        held: list[HeldFin] = []
+
+        async with publish_session(
+            MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True, held_fins=held
+        ) as (pair, session, control):
+            track = session.register_track(RegisterTrackOptions(track_namespace=NAMESPACE, track_name="audio"))
+            subscribe = await raw_subscribe(pair.server, NAMESPACE, "audio", 3)
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok"])
+
+            track.end()
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok", "publish-done"])
+            await control.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert subscribe.ended()
+            assert isinstance(subscribe.failure(), StreamClosedError)
+
+    async def test_resets_a_solicitation_accepted_during_the_drain_whose_fin_is_still_held_when_it_ends(
+        self,
+    ) -> None:
+        closed: list[object] = []
+        held: list[HeldFin] = []
+
+        async with publish_session(
+            MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True, held_fins=held
+        ) as (pair, session, _):
+            subscribe = await raw_subscribe(pair.server, NAMESPACE, "video", 3)
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok"])
+            held[0].release()
+
+            # Nothing reads the response yet, so the REQUEST_OK write waits across the start of the drain.
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(
+                encode_subscribe_namespace(SubscribeNamespace(request_id=5, track_namespace_prefix=["live"]))
+            )
+            await settle()
+            session.close()
+            await wait_for(lambda: "publish-done" in subscribe.kinds())
+
+            assert await stream.readable.read() == encode_request_ok()
+            await ended_by_the_drain(subscribe)
+            await wait_for(lambda: closed)
+
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(stream.readable), 1)
+
+    async def test_resets_a_failed_solicitation_whose_fin_is_still_held_when_it_ends(self) -> None:
+        closed: list[object] = []
+        held: list[HeldFin] = []
+
+        async with publish_session(
+            MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True, held_fins=held
+        ) as (pair, _, control):
+            solicitation = await solicit_namespace(pair.server, ["live"])
+            await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
+
+            await solicitation.send(encode_request_update(3))
+            await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace", "request-error"])
+            await control.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert solicitation.ended()
+            assert isinstance(solicitation.failure(), StreamClosedError)
+
+    @pytest.mark.parametrize("ending", ["reset", "malformed follow-up"])
+    async def test_resets_a_subscriptions_response_whose_fin_is_still_held_when_it_ends(self, ending: str) -> None:
+        closed: list[object] = []
+        held: list[HeldFin] = []
+
+        async with publish_session(
+            MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True, held_fins=held
+        ) as (pair, _, control):
+            subscribe = await raw_subscribe(pair.server, NAMESPACE, "video", 3)
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok"])
+
+            if ending == "reset":
+                subscribe.reset()
+                await settle()
+                await control.write(UNKNOWN_MESSAGE)
+            else:
+                await subscribe.send(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert subscribe.ended()
+            assert isinstance(subscribe.failure(), StreamClosedError)
+
+    @pytest.mark.parametrize("fatal", ["on the control stream", "as the subscription's follow-up"])
+    async def test_resets_a_subscriptions_open_data_stream_when_a_protocol_error_ends_it(self, fatal: str) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            control,
+        ):
+            subscribe = await raw_subscribe(pair.server, NAMESPACE, "video", 3)
+            await wait_for(lambda: subscribe.kinds() == ["subscribe-ok"])
+            data_stream = await session.open_uni_stream(3)
+            incoming = await pair.server.incoming_unidirectional_streams().__anext__()
+            # Nothing reads the data stream yet, so the write waits across the end.
+            writing = asyncio.ensure_future(data_stream.write(b"\x07"))
+            await settle()
+
+            if fatal == "on the control stream":
+                await control.write(UNKNOWN_MESSAGE)
+            else:
+                await subscribe.send(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+
+            try:
+                await asyncio.wait_for(read_to_end(incoming), 1)
+            except Exception as error:
+                ended: BaseException = error
+            else:
+                pytest.fail("the data stream ended with a FIN")
+
+            assert getattr(ended, "stream_error_code", None) == STREAM_RESET_CODE.CANCELLED
+            with pytest.raises(StreamClosedError):
+                await writing
