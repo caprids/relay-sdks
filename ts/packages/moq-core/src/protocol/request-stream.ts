@@ -10,6 +10,8 @@
  * Callback-shaped, no signals — the session driver binds this to its own bookkeeping; SPF actors bind signals at the
  * `playback/` layer.
  */
+
+import type { StreamReader } from './bytes.js';
 import {
   type ControlMessage,
   ControlMessageDeframer,
@@ -17,7 +19,7 @@ import {
   MOQT_PROTOCOL_ID,
   type MoqtProtocolId,
 } from './control-messages.js';
-import { MoqtProtocolError } from './errors.js';
+import { isMoqtProtocolError, MoqtProtocolError } from './errors.js';
 
 /** Structural subset of `WebTransportBidirectionalStream`. */
 export interface BidirectionalStreamLike {
@@ -37,6 +39,11 @@ export interface RequestStreamHandlers {
   onFin?(): void;
   /** Read failure, stream reset, or a decode error (`MoqtProtocolError`). */
   onError?(error: unknown): void;
+  /**
+   * Both directions are over: the receiving one ended, failed or was cancelled, and the sending one's FIN landed or it
+   * was aborted. Runs once, after any other handler. A request whose sending direction is never ended never gets it.
+   */
+  onClosed?(): void;
 }
 
 export interface RequestStream {
@@ -70,6 +77,11 @@ export function openRequestStream(
   const reader = stream.readable.getReader();
   let cancelled = false;
   let finished = false;
+  let readOver = false;
+  let writeOver = false;
+  const directionOver = () => {
+    if (readOver && writeOver) handlers.onClosed?.();
+  };
 
   const readLoop = async () => {
     const deframer = new ControlMessageDeframer();
@@ -98,6 +110,8 @@ export function openRequestStream(
       if (!cancelled) handlers.onError?.(error);
     } finally {
       reader.releaseLock();
+      readOver = true;
+      directionOver();
     }
   };
 
@@ -119,7 +133,15 @@ export function openRequestStream(
 
       finished = true;
       await firstWrite;
-      await writer.close();
+
+      try {
+        await writer.close();
+      } finally {
+        if (!writeOver) {
+          writeOver = true;
+          directionOver();
+        }
+      }
     },
 
     cancel(reason?: unknown): void {
@@ -127,9 +149,13 @@ export function openRequestStream(
 
       cancelled = true;
 
-      if (!finished) {
-        finished = true;
+      // A FIN asked for but not yet landed is aborted too: its write may still be waiting on the peer.
+      finished = true;
+
+      if (!writeOver) {
+        writeOver = true;
         writer.abort(reason).catch(() => {});
+        directionOver();
       }
 
       // STOP_SENDING on the receiving direction. The read loop's pending
@@ -141,4 +167,26 @@ export function openRequestStream(
       return cancelled;
     },
   };
+}
+
+/**
+ * Read the message that opens an incoming request stream. A stream that ends or resets before a whole message has no
+ * request to answer, so both directions are dropped: left alone, the response direction would hold bidirectional
+ * stream credit until the session ends. A protocol error is the caller's to close the session on.
+ */
+export async function readRequest(
+  stream: BidirectionalStreamLike,
+  reader: StreamReader,
+  readFrame: (type: number) => Promise<ControlMessage>
+): Promise<ControlMessage> {
+  try {
+    return await readFrame(await reader.readVarint());
+  } catch (error) {
+    if (!isMoqtProtocolError(error)) {
+      void reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+    }
+
+    throw error;
+  }
 }

@@ -44,7 +44,11 @@ export interface MoqtDuplexSessionConfig {
 
 /** One session, seen through each driver. Created by {@link createMoqtDuplexSession}. */
 export interface MoqtDuplexSession {
-  /** Starts this endpoint's requests and receives their data. Its `ready`, `close` and `destroy` are the session's. */
+  /**
+   * Starts this endpoint's requests and receives their data. Its `ready` is the session's. Its `close()` and
+   * `destroy()` end the session as {@link MoqtDuplexSession.destroy} does: the subscriber at once, the transport once
+   * the publisher has drained, with the close code and reason `close()` was given.
+   */
   readonly subscriber: MoqtSession;
   /**
    * Announces namespaces and serves the peer's requests for their tracks. Its `ready` follows the subscriber's; its
@@ -53,10 +57,10 @@ export interface MoqtDuplexSession {
   readonly publisher: MoqtPublishSession;
   /**
    * End the session. The subscriber ends at once, its requests with it, but leaves the transport open; the publisher
-   * ends its subscriptions and retracts its announces within its bounded drain, then closes the transport. Call this
-   * rather than the subscriber's own `close()` or `destroy()`, which would cut the publisher's drain short. `error`, if
+   * ends its subscriptions and retracts its announces within its bounded drain, then closes the transport. `error`, if
    * given, is the local closure error both drivers report. Each driver's callbacks end at its own `onClosed`: the
-   * subscriber's at once, the publisher's (subscription ends, bindings) once its drain is over.
+   * subscriber's at once, the publisher's (subscription ends, unbindings) once its drain is over. A session error (a
+   * protocol violation, a lost control stream) is not a drain: it closes the transport at once, during a drain too.
    */
   destroy(error?: unknown): void;
 }
@@ -107,19 +111,31 @@ async function peekRequestType(
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       if (replay.length > 0) controller.enqueue(replay);
-      if (failure) controller.error(failure.error);
+      if (failure) {
+        controller.error(failure.error);
+        reader.releaseLock();
+      }
     },
+    // The peek reader is released once the replay has read the stream to its end, by FIN, reset or cancel.
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
-        if (done) controller.close();
-        else controller.enqueue(value);
+        if (!done) {
+          controller.enqueue(value);
+          return;
+        }
+        controller.close();
       } catch (error) {
         controller.error(error);
       }
+      reader.releaseLock();
     },
-    cancel(reason) {
-      return reader.cancel(reason);
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        reader.releaseLock();
+      }
     },
   });
 
@@ -285,20 +301,46 @@ export function createMoqtDuplexSession(
     }
   })();
 
+  // The subscriber ends now but leaves the transport to the publisher, which closes it after its drain.
+  const end = (endSubscriber: () => void, endPublisher: () => void): void => {
+    if (destroyed) return;
+    destroyed = true;
+    deferSubscriberClose = true;
+    // A throwing subscriber callback must not leave the publisher, and with it the transport, open.
+    try {
+      endSubscriber();
+    } finally {
+      endPublisher();
+    }
+  };
+
   return {
-    subscriber,
-    publisher,
-    destroy(error) {
-      if (destroyed) return;
-      destroyed = true;
-      // The subscriber ends now, with `error`, but leaves the transport to the publisher, which closes it after its drain.
-      deferSubscriberClose = true;
-      // A throwing subscriber callback must not leave the publisher, and with it the transport, open.
-      try {
-        subscriber.destroy(error);
-      } finally {
-        publisher.destroy(error);
-      }
+    // The driver itself, except that ending it ends the session in order, as `destroy()` below does.
+    subscriber: {
+      ready: subscriber.ready,
+      get maxAgeSupported() {
+        return subscriber.maxAgeSupported;
+      },
+      subscribe: (options, handlers) => subscriber.subscribe(options, handlers),
+      fetch: (options, handlers) => subscriber.fetch(options, handlers),
+      trackStatus: (options, handlers) => subscriber.trackStatus(options, handlers),
+      subscribeNamespace: (options, handlers) => subscriber.subscribeNamespace(options, handlers),
+      close: (closeCode, reason) =>
+        end(
+          () => subscriber.close(closeCode, reason),
+          () => publisher.close(closeCode, reason)
+        ),
+      destroy: (error) =>
+        end(
+          () => subscriber.destroy(error),
+          () => publisher.destroy(error)
+        ),
     },
+    publisher,
+    destroy: (error) =>
+      end(
+        () => subscriber.destroy(error),
+        () => publisher.destroy(error)
+      ),
   };
 }
