@@ -908,7 +908,7 @@ class SupervisedPublication:
         if supervisor.stopped or publication.closed:
             raise supervisor.closed_error()
         if name in publication.names:
-            raise ValueError(f"Track name is already registered on this supervised {supervisor.name}")
+            raise ValueError("Track name is already registered on this supervised publication")
         tracks = publication.tracks
 
         def forget() -> None:
