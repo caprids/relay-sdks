@@ -1139,6 +1139,9 @@ class MoqtSessionImpl implements MoqtSession {
             return;
           }
 
+          // The response direction failed, so the request is over: its sending direction goes with it.
+          record.stream?.cancel(error);
+
           if (record.settled) {
             if (!record.cancelled && !this.#destroyed) onSettledError?.(error);
             return;

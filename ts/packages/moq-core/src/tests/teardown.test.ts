@@ -223,6 +223,23 @@ describe('subscribe driver teardown', () => {
     await vi.waitFor(() => expect(finished).toBe(true));
   });
 
+  it('resets a fetch request whose answered response the peer reset', async () => {
+    const { session, requests } = await harness();
+
+    session.fetch(TRACK);
+    const stream = await requests.next();
+    let reset = false;
+    void stream.readable.pipeTo(new WritableStream()).catch(() => {
+      reset = true;
+    });
+    const writer = stream.writable.getWriter();
+    await writer.write(encodeRequestOk());
+    await settle();
+    await writer.abort(new Error('reset'));
+
+    await vi.waitFor(() => expect(reset).toBe(true));
+  });
+
   it('resets a request the peer finished without answering', async () => {
     const onError = vi.fn();
     const { session, requests } = await harness();
