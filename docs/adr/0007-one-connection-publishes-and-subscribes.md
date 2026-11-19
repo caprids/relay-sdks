@@ -23,7 +23,8 @@ refresh, reconnect and congestion controller. Neither MOQT nor the relay asks fo
 
 A probe on ord (moq-relay 0.17, 2026-11-18) ran both drivers on one native QUIC connection, routing the relay's
 requests by message type. Two peers each announced a namespace, opened discovery on the shared root and subscribed to
-each other. Both directions delivered 30 of 30 objects, in every run.
+each other. Both directions delivered 30 of 30 objects, in every run. The shipped `connectRelay` passed the same check
+with two namespaces per peer: all four tracks delivered 30 of 30 objects in 3 of 3 runs (`spec/behavior.md`).
 
 We decided (#525):
 
@@ -59,10 +60,12 @@ We decided (#525):
 - **The relay hides a session's own routes from it (split horizon).** Discovery on a shared session doesn't list the
   client's own namespaces, and subscribing to its own track is refused with request error 16. Code that confirmed
   its own presence through discovery needs another way. `spec/behavior.md` records this, with the ord measurements.
-- **A failure in either direction ends both.** A protocol error or GOAWAY ends the whole connection. The two halves
-  already shared a relay, a network path and a token, so they mostly failed together anyway.
-- **Each driver's callbacks end at its own `onClosed`.** The duplex session keeps the transport open while the
-  publish driver drains, which widens existing teardown gaps in both drivers (#527).
+- **A failure in either direction ends both.** A protocol error ends the whole connection, and a session GOAWAY
+  from the relay moves both directions at once. The two halves already shared a relay, a network path and a token,
+  so they mostly failed together anyway.
+- **Each driver's callbacks are meant to end at its own `onClosed`, but don't always yet.** Both drivers have paths
+  that can still call back after it (#527). The duplex session keeps the transport open while the publish driver
+  drains, which widens that window.
 - **Supervision is still per direction.** The supervised publisher and subscriber each open their own connection.
   The planned supervised `connectRelay` makes one connection one generation: every namespace it announces carries
   that generation, a reconnect brings everything back together as the next generation, and a rotation moves the
