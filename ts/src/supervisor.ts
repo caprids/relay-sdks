@@ -228,18 +228,27 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       if (after) void already.then(after);
       return;
     }
+    let drained!: { resolve(): void; reject(error: unknown): void };
+    // Registered before the close runs: a close that stops the supervisor finds it among the drains to wait for.
+    draining.set(
+      live,
+      new Promise<void>((resolve, reject) => {
+        drained = { resolve, reject };
+      }),
+    );
     const closing = live.closing ? undefined : closeLive(live);
     if (!closing) {
+      draining.delete(live);
+      drained.resolve();
       after?.();
       return;
     }
-    draining.set(
-      live,
-      closing.then(() => {
+    closing
+      .then(() => {
         draining.delete(live);
         after?.();
-      }),
-    );
+      })
+      .then(drained.resolve, drained.reject);
   };
 
   /** The connection ended or was given up: release what it ran and stop anything still waiting on it. */
@@ -264,7 +273,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     for (const track of allTracks()) track.retire();
     for (const live of open) {
       // Registered as drains, so a publication's `close()` after this one waits for its groups too.
-      if (!draining.has(live)) {
+      // One the loop already closed, and that closed at once, needs no second close.
+      if (!draining.has(live) && !live.closing) {
         const closing = closeLive(live);
         if (closing) draining.set(live, closing);
       }

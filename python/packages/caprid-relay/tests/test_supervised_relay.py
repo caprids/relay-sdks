@@ -523,6 +523,68 @@ async def test_a_close_waits_for_a_replacement_whose_connection_was_on_its_way_b
         await stop_after(turns)
 
 
+async def test_a_close_waits_for_a_discarded_replacement_whose_close_stops_the_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soon = datetime.now(UTC) + timedelta(seconds=0.1)
+    drain = asyncio.Event()
+    connections: list[FakeSession] = []
+    stopping: list[asyncio.Future[None]] = []
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        session = FakeSession(soon)
+        if connections:
+            close = session.close
+
+            async def slow() -> None:
+                await drain.wait()
+                await close()
+
+            def stop_then_drain() -> Awaitable[None]:
+                stopping.append(relay._supervisor.stop())
+                return slow()
+
+            monkeypatch.setattr(session, "close", stop_then_drain)
+        connections.append(session)
+        return session
+
+    relay = await _supervise_relay(connect, reconnect=FAST, rotate_before=60)
+    await until(lambda: bool(stopping), "replacement discarded")
+    await asyncio.sleep(0.02)
+    try:
+        assert not stopping[0].done()
+    finally:
+        drain.set()
+        await stopping[0]
+
+
+async def test_a_connection_that_ended_is_closed_once_also_when_its_close_stops_the_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = FakeSession()
+    closes = 0
+    end = old.end
+    stopping: list[asyncio.Future[None]] = []
+
+    def close() -> None:
+        nonlocal closes
+        closes += 1
+        if not stopping:
+            stopping.append(relay._supervisor.stop())
+        end()
+
+    monkeypatch.setattr(old, "close", close)
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        return old
+
+    relay = await _supervise_relay(connect, reconnect=SupervisionBackoff(initial_delay=10, max_delay=10))
+    old.end(lost("GOAWAY", "going away"))
+    await until(lambda: bool(stopping), "closed")
+    await stopping[0]
+    assert closes == 1
+
+
 async def test_wants_leave_a_connection_given_up_for_a_lost_root_without_waiting_for_its_drain(
     monkeypatch: pytest.MonkeyPatch, cleanup: list[Callable[[], object]]
 ) -> None:

@@ -434,7 +434,8 @@ class Supervisor:
             track._retire()
         for live in open_:
             # Registered as drains, so a publication's `close()` after this one waits for its groups too.
-            if live not in self._draining:
+            # One the loop already closed, and that closed at once, needs no second close.
+            if live not in self._draining and not live.closing:
                 closing = self._close_live(live)
                 if closing is not None:
                     self._draining[live] = closing
@@ -503,8 +504,14 @@ class Supervisor:
             if after is not None:
                 already.add_done_callback(lambda _: after())
             return
+        drained: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        _observe(drained)
+        # Registered before the close runs: a close that stops the supervisor finds it among the drains to wait for.
+        self._draining[live] = drained
         closing = None if live.closing else self._close_live(live)
         if closing is None:
+            self._draining.pop(live, None)
+            drained.set_result(None)
             if after is not None:
                 after()
             return
@@ -515,9 +522,15 @@ class Supervisor:
             if after is not None:
                 after()
 
-        drained = asyncio.ensure_future(drain())
-        _observe(drained)
-        self._draining[live] = drained
+        def settle(done: asyncio.Future[None]) -> None:
+            if done.cancelled():
+                drained.cancel()
+            elif (failure := done.exception()) is not None:
+                drained.set_exception(failure)
+            else:
+                drained.set_result(None)
+
+        asyncio.ensure_future(drain()).add_done_callback(settle)
 
     def _settle_ended(self, live: _Connection) -> None:
         """Release what an ended or given-up connection ran, and stop anything still waiting on it."""

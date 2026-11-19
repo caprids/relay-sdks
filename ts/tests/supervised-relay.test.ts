@@ -400,6 +400,60 @@ describe('Codex pass 1 on #529', () => {
     expect(relay.status).toBe('closed');
   });
 
+  it('Codex pass 2 on #536: close waits for a discarded replacement whose close stops the relay', async () => {
+    const soon = new Date(Date.now() + 100);
+    const drain = deferred();
+    const connections: FakeSession[] = [];
+    let stopping: Promise<void> | undefined;
+    const relay = await superviseRelay(
+      async () => {
+        const session = fakeSession(soon);
+        if (connections.length > 0) {
+          const close = session.close.bind(session);
+          session.close = (() => {
+            stopping = relay.close();
+            return drain.promise.then(close);
+          }) as never;
+        }
+        connections.push(session);
+        return session as unknown as RelaySession;
+      },
+      { ...options, rotateBeforeMs: 60 },
+    );
+    await until(() => stopping !== undefined, 'replacement discarded');
+    let stopped = false;
+    void stopping!.then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(stopped).toBe(false);
+    } finally {
+      drain.resolve();
+      await stopping;
+    }
+  });
+
+  it('Codex pass 2 on #536: a connection that ended is closed once, also when its close stops the relay', async () => {
+    const old = fakeSession();
+    let closes = 0;
+    const end = old.end.bind(old);
+    let stopping: Promise<void> | undefined;
+    old.close = (() => {
+      closes++;
+      stopping ??= relay.close();
+      end();
+    }) as never;
+    const relay = await superviseRelay(async () => old as unknown as RelaySession, {
+      ...options,
+      reconnect: { initialDelayMs: 10_000, maxDelayMs: 10_000 },
+    });
+    old.end(new RelayError('GOAWAY', 'going away', 'connection'));
+    await until(() => stopping !== undefined, 'closed');
+    await stopping;
+    expect(closes).toBe(1);
+  });
+
   it('publication.close waits for its groups on an already draining generation', async () => {
     const old = fakeSession();
     const next = fakeSession();
