@@ -244,27 +244,6 @@ class _WantSurface:
         until: Until = "first-object",
         drain: float = 0.0,
     ) -> None:
-        """Keep a subscription to a track open until ``unwant(key)``.
-
-        ``generations=True`` makes ``namespace`` a supervised publisher's root: the want follows the
-        newest generation announced one field below it, and the subscriber's token must allow
-        discovering the root. ``stale_after`` (seconds) resubscribes when no object arrived for that
-        long, for tracks that are never silent while live. ``parameters`` is sent on every SUBSCRIBE;
-        ``retry`` is the backoff between resubscriptions (from 0.25 s, doubling up to 8 s).
-
-        A move (a newer generation, or a re-want with another track or parameters) is made before the
-        break, as ``switch_to`` makes one: the current subscription keeps delivering until an object
-        of the replacement passes ``until`` (``"first-object"``, the default, or a synchronous
-        predicate), and ``on_switched`` reports the cutover. Compare the object's own timeline with
-        what was delivered, never group IDs: each generation and track numbers its own groups.
-        ``drain`` (seconds, default 0) keeps the old subscription delivering its in-flight groups
-        that long after the cutover.
-
-        Wanting a key again with the same namespace and ``generations`` updates the want in place:
-        the handlers, ``retry``, ``stale_after``, ``until`` and ``drain`` are swapped, and another
-        track or parameters moves the subscription. Another namespace or ``generations`` replaces the
-        want. Arguments are checked at once.
-        """
         if not isinstance(key, str):
             raise TypeError("want key must be a string")
         if handlers is None:
@@ -317,21 +296,11 @@ class _WantSurface:
         _observe(task)
 
     def unwant(self, key: str) -> None:
-        """Cancel a want's subscription and forget it. Unknown keys are ignored."""
         want = self._wants.get(key)
         if want is not None:
             self._forget(key, want)
 
     def catch_up(self, key: str) -> None:
-        """Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use.
-
-        It cancels the subscription, which makes the relay drop what it still holds queued for it, and subscribes
-        again with the same options, so a want without a location filter starts at the newest group.
-        ``on_restarted`` reports ``"catch-up"``. A latest-value reader's ``on_catch_up`` is the usual caller. The new
-        subscription opens without delay when the old one had moved past its first group, and otherwise after the
-        want's ``retry`` backoff, so a link too slow for the track cannot make it spin. Ignored for an unknown key and
-        while no subscription is accepted.
-        """
         if not isinstance(key, str):
             raise TypeError("want key must be a string")
         want = self._wants.get(key)
@@ -339,20 +308,6 @@ class _WantSurface:
             want.catch_up()
 
     def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
-        """Follow the roots that are publishing now under ``prefix``, across reconnects and rotations, with no
-        roster server.
-
-        Publishing means announced, not necessarily sending objects. A root is the namespace one field below
-        the prefix, publishing while it or a namespace one field below it is announced, and removed once
-        its last namespace has been withdrawn for 0.1 s (soon after a clean close, at the relay's idle
-        timeout after a crash). The layout is a contract: a namespace one field below a root, two below the
-        prefix, is read as that root's generation, so a supervised publisher's generations count as one
-        root, and anything deeper is ignored. The prefix follows the namespace rules with room for the two
-        fields under it (1 to 30 fields), and the subscriber's token must allow discovering it. Shares the
-        connection's discovery with every want and view under the same prefix tree. Arguments are checked
-        at once; handlers run from a later turn on. Raises :class:`RelayError` with code ``CLOSED`` when the
-        subscriber is already closed. See ``spec/behavior.md``, "Publishing roots".
-        """
         if not isinstance(handlers, PublishingRootsHandlers):
             raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
         guarded = _guarded(handlers)
@@ -390,14 +345,15 @@ class _WantSurface:
             view.close()
 
 
-class SupervisedSubscriber(_WantSurface):
+class SupervisedSubscriber:
     """A subscriber that reconnects and keeps wanted tracks subscribed. Create one with
     :func:`connect_supervised_subscriber`."""
 
-    __slots__ = ("_closed",)
+    __slots__ = ("_closed", "_supervisor", "_wants")
 
     def __init__(self, supervisor: Supervisor) -> None:
-        super().__init__(supervisor)
+        self._supervisor = supervisor
+        self._wants = _WantSurface(supervisor)
         self._closed = RelayAwaitable(supervisor.closed)
 
     @property
@@ -411,6 +367,70 @@ class SupervisedSubscriber(_WantSurface):
         reason as ``error`` (``None`` after :meth:`close`). Never raises."""
         return self._closed
 
+    def want(
+        self,
+        key: str,
+        namespace: Sequence[str],
+        track: str,
+        handlers: WantHandlers | None = None,
+        *,
+        parameters: MessageParameters | None = None,
+        generations: bool = False,
+        stale_after: float | None = None,
+        retry: SupervisionBackoff | None = None,
+        until: Until = "first-object",
+        drain: float = 0.0,
+    ) -> None:
+        """Keep a subscription to a track open until ``unwant(key)``.
+
+        ``generations=True`` makes ``namespace`` a supervised publisher's root: the want follows the
+        newest generation announced one field below it, and the subscriber's token must allow
+        discovering the root. ``stale_after`` (seconds) resubscribes when no object arrived for that
+        long, for tracks that are never silent while live. ``parameters`` is sent on every SUBSCRIBE;
+        ``retry`` is the backoff between resubscriptions (from 0.25 s, doubling up to 8 s).
+
+        A move (a newer generation, or a re-want with another track or parameters) is made before the
+        break, as ``switch_to`` makes one: the current subscription keeps delivering until an object
+        of the replacement passes ``until`` (``"first-object"``, the default, or a synchronous
+        predicate), and ``on_switched`` reports the cutover. Compare the object's own timeline with
+        what was delivered, never group IDs: each generation and track numbers its own groups.
+        ``drain`` (seconds, default 0) keeps the old subscription delivering its in-flight groups
+        that long after the cutover.
+
+        Wanting a key again with the same namespace and ``generations`` updates the want in place:
+        the handlers, ``retry``, ``stale_after``, ``until`` and ``drain`` are swapped, and another
+        track or parameters moves the subscription. Another namespace or ``generations`` replaces the
+        want. Arguments are checked at once.
+        """
+        self._wants.want(
+            key,
+            namespace,
+            track,
+            handlers,
+            parameters=parameters,
+            generations=generations,
+            stale_after=stale_after,
+            retry=retry,
+            until=until,
+            drain=drain,
+        )
+
+    def unwant(self, key: str) -> None:
+        """Cancel a want's subscription and forget it. Unknown keys are ignored."""
+        self._wants.unwant(key)
+
+    def catch_up(self, key: str) -> None:
+        """Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use.
+
+        It cancels the subscription, which makes the relay drop what it still holds queued for it, and subscribes
+        again with the same options, so a want without a location filter starts at the newest group.
+        ``on_restarted`` reports ``"catch-up"``. A latest-value reader's ``on_catch_up`` is the usual caller. The new
+        subscription opens without delay when the old one had moved past its first group, and otherwise after the
+        want's ``retry`` backoff, so a link too slow for the track cannot make it spin. Ignored for an unknown key and
+        while no subscription is accepted.
+        """
+        self._wants.catch_up(key)
+
     def rotate(self) -> None:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
         credential expires.
@@ -422,6 +442,23 @@ class SupervisedSubscriber(_WantSurface):
         every want has moved, after 10 seconds at most. A no-op while no connection is up.
         """
         self._supervisor.rotate()
+
+    def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
+        """Follow the roots that are publishing now under ``prefix``, across reconnects and rotations, with no
+        roster server.
+
+        Publishing means announced, not necessarily sending objects. A root is the namespace one field below
+        the prefix, publishing while it or a namespace one field below it is announced, and removed once
+        its last namespace has been withdrawn for 0.1 s (soon after a clean close, at the relay's idle
+        timeout after a crash). The layout is a contract: a namespace one field below a root, two below the
+        prefix, is read as that root's generation, so a supervised publisher's generations count as one
+        root, and anything deeper is ignored. The prefix follows the namespace rules with room for the two
+        fields under it (1 to 30 fields), and the subscriber's token must allow discovering it. Shares the
+        connection's discovery with every want and view under the same prefix tree. Arguments are checked
+        at once; handlers run from a later turn on. Raises :class:`RelayError` with code ``CLOSED`` when the
+        subscriber is already closed. See ``spec/behavior.md``, "Publishing roots".
+        """
+        return self._wants.publishing_roots(prefix, handlers)
 
     def close(self) -> None:
         """Stop reconnecting, cancel every want, close every publishing-roots view without calling its handlers,
