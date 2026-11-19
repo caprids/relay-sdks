@@ -6,6 +6,14 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-moq-core`: after a session's `on_closed`, none of its callbacks run, as in the TypeScript SDK (#530). A
+  subscribe session that has ended starts no request, and at its end it stops every request stream and data stream it
+  was reading, so a fetch reports no entry and a namespace subscription no end after `on_closed`. A request that is
+  over finishes or resets its stream: a fetch FINs its side once the peer's FIN or a REQUEST_ERROR completes it, and a
+  request that fails resets it. A publish session that is closing refuses SUBSCRIBE, TRACK_STATUS and
+  SUBSCRIBE_NAMESPACE with `GOING_AWAY`, and from `close()` to `on_closed` reports only ends (`on_subscribe_end`, an
+  `on_track_binding` with no alias). At its end it resets every data stream the application has not closed and every
+  response but an announce carrier whose FIN the transport has not taken yet. Nothing to change in an application.
 - `caprid-relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
   when a want's track has delivered nothing, such as an interrupt or transcript track before its first object, as in
   the TypeScript SDK (#524). Such a want now moves when the replacement's SUBSCRIBE is accepted. On ord the old

@@ -64,6 +64,15 @@ class RawRequest:
         except Exception:
             pass
 
+    async def stopped(self) -> bool:
+        """True once the publisher has stopped reading the request (STOP_SENDING): an empty write then fails."""
+        assert self._writer is not None
+        try:
+            await self._writer.write(b"")
+        except Exception:
+            return True
+        return False
+
     def abandon_reads(self) -> None:
         """Reset only the response direction (stop reading) while keeping the request half open."""
         assert self._reader is not None
