@@ -275,7 +275,14 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     if (connecting) {
       pending.push(
         connecting.then(
-          (session) => Promise.resolve(session.close()).catch(() => {}),
+          (session) => {
+            try {
+              return Promise.resolve(session.close()).catch(() => {});
+            } catch {
+              // A close that throws at once has nothing left to wait for.
+              return undefined;
+            }
+          },
           () => {},
         ),
       );
@@ -337,9 +344,15 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const connectOnce = async (): Promise<Live | undefined> => {
     const generation = newGeneration();
     let session: SupervisedConnection;
+    // Registered before the connector runs: a `close()` it makes before returning is a `stop()` that must see it.
+    let arrived!: { resolve(session: SupervisedConnection): void; reject(error: unknown): void };
+    connecting = new Promise<SupervisedConnection>((resolve, reject) => {
+      arrived = { resolve, reject };
+    });
+    connecting.catch(() => {});
     try {
       attemptInProgress = new AbortController();
-      connecting = connect(
+      session = await connect(
         {
           ...connection,
           signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
@@ -349,13 +362,14 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         },
         generation,
       );
-      session = await connecting;
     } catch (error) {
+      arrived.reject(error);
       connecting = undefined;
       throw error;
     } finally {
       attemptInProgress = undefined;
     }
+    arrived.resolve(session);
     // `stop()` ran while the attempt was in progress: it closes what the attempt brought back.
     if (stopped) return undefined;
     const ended = new AbortController();

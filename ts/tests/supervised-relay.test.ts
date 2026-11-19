@@ -356,6 +356,50 @@ describe('Codex pass 1 on #529', () => {
     }
   });
 
+  it('Codex pass 1 on #536: close from inside the connector closes the replacement it returns', async () => {
+    const old = fakeSession();
+    const next = fakeSession();
+    let closes = 0;
+    const close = next.close.bind(next);
+    next.close = async () => {
+      closes++;
+      await close();
+    };
+    let attempts = 0;
+    let stopping: Promise<void> | undefined;
+    const relay = await superviseRelay(async () => {
+      if (++attempts === 1) return old as unknown as RelaySession;
+      stopping = relay.close();
+      return next as unknown as RelaySession;
+    }, options);
+    relay.rotate();
+    await until(() => stopping !== undefined, 'closed from the connector');
+    await stopping;
+    expect(closes).toBe(1);
+    expect(relay.status).toBe('closed');
+  });
+
+  it('Codex pass 1 on #536: a replacement whose close throws at once still lets close settle', async () => {
+    const old = fakeSession();
+    const next = fakeSession();
+    next.close = (() => {
+      throw new Error('close failed');
+    }) as never;
+    const replacement = deferred<RelaySession>();
+    let attempts = 0;
+    const relay = await superviseRelay(
+      async () => (++attempts === 1 ? (old as unknown as RelaySession) : replacement.promise),
+      options,
+    );
+    relay.rotate();
+    await until(() => attempts === 2, 'replacement attempted');
+    const stopping = relay.close();
+    replacement.resolve(next as unknown as RelaySession);
+    await stopping;
+    await expect(relay.closed).resolves.toEqual({});
+    expect(relay.status).toBe('closed');
+  });
+
   it('publication.close waits for its groups on an already draining generation', async () => {
     const old = fakeSession();
     const next = fakeSession();
