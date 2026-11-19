@@ -213,7 +213,12 @@ export function createSupervisor<O extends ConnectRelayOptions>(
 
   /** Close a connection given up while the loop runs on, draining in the background; `after` runs once it closed. */
   const drainLive = (live: Live, after?: () => void) => {
-    if (draining.has(live)) return;
+    const already = draining.get(live);
+    if (already) {
+      // Started for a lost root before a rotation gave the connection up: its clean-up still runs once it closed.
+      if (after) void already.then(after);
+      return;
+    }
     const closing = closeLive(live);
     if (!closing) {
       after?.();
@@ -248,12 +253,15 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     current = undefined;
     retiring = undefined;
     for (const track of allTracks()) track.retire();
-    const pending: Promise<void>[] = [...draining.values()];
     for (const live of open) {
-      const closing = closeLive(live);
+      // Registered as drains, so a publication's `close()` after this one waits for its groups too.
+      if (!draining.has(live)) {
+        const closing = closeLive(live);
+        if (closing) draining.set(live, closing);
+      }
       settleEnded(live);
-      if (closing) pending.push(closing);
     }
+    const pending: Promise<void>[] = [...draining.values()];
     wakeWaiters();
     const finish = () => {
       try {

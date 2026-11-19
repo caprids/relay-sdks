@@ -328,4 +328,32 @@ describe('Codex pass 1 on #529', () => {
     }).not.toThrow();
     await expect(closing).rejects.toBe(failure);
   });
+
+  it('Codex pass 2: a publication closed after the relay waits for the drain stop() started', async () => {
+    const session = fakeSession();
+    const drain = deferred();
+    let drained = false;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await drain.promise;
+      drained = true;
+      await close();
+    };
+    const relay = await superviseRelay(async () => session as unknown as RelaySession, options);
+    const publication = relay.publish(['alice']);
+    const stopping = relay.close();
+    let publicationClosed = false;
+    const closing = publication.close().then(() => {
+      publicationClosed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(drained).toBe(false);
+      expect(publicationClosed).toBe(false);
+    } finally {
+      drain.resolve();
+      await closing;
+      await stopping;
+    }
+  });
 });
