@@ -77,7 +77,7 @@ class TrackGeneration:
 def _reconnecting(cause: BaseException | None = None) -> RelayError:
     """The failure for a write made while no generation is up, or one the connection's end interrupted."""
     error = RelayError(
-        "The supervised publisher is between connections; nothing was replayed. Write the next object when it is live",
+        "The supervisor is between connections; nothing was replayed. Write the next object when it is live",
         code="RECONNECTING",
         phase="connection",
     )
