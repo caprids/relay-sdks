@@ -1593,9 +1593,10 @@ The observable behavior is the same. The spelling follows Python conventions:
 
 The SDK subscribes to tracks over reliable streams, updates and cancels subscriptions, discovers
 namespaces with `namespace_events` ([discovery contract](../spec/behavior.md#discovery)), and publishes
-on a dedicated connection or on one that also subscribes (`connect_relay`). The supervised connections add reconnection, resubscription, and token
-rotation. The generic core also exposes FETCH and TRACK_STATUS. The SDK offers `moqt-22`, then
-`moqt-20` as a fallback, and speaks whichever the relay selects.
+on a dedicated connection or on one that also subscribes (`connect_relay`). The supervised
+connections add reconnection, resubscription, and token rotation. The generic core also exposes FETCH
+and TRACK_STATUS. The SDK offers `moqt-22`, then `moqt-20` as a fallback, and speaks whichever the
+relay selects.
 
 The SDK does not refresh the token of a live session, receive datagrams, or discover tracks within a
 namespace. A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`. Subscriptions still

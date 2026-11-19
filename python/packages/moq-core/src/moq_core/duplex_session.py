@@ -379,8 +379,8 @@ class MoqtDuplexSession:
         its subscriptions and retracts its announces within its bounded drain, then closes the transport.
         ``error``, if given, is the local closure error both drivers report. Each driver's callbacks end at
         its own ``on_closed``: the subscriber's at once, the publisher's (subscription ends, unbindings) once
-        its drain is over. A session error (a protocol violation) is not a drain: it closes the transport at
-        once, during a drain too.
+        its drain is over. A session error before then (a protocol violation on either side) is not a drain:
+        it closes the transport at once.
         """
         subscriber = self.subscriber
         self._end(lambda: MoqtSession.destroy(subscriber, error), lambda: self.publisher.destroy(error))
