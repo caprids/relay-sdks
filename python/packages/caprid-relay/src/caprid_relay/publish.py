@@ -59,10 +59,10 @@ DEFAULT_WRITE_TIMEOUT = 10.0
 
 
 class RelayPublication:
-    """One namespace a connection announces, with the tracks it serves: what :meth:`RelaySession.publish` returns.
+    """One namespace a connection announces, with the tracks it serves. :meth:`RelaySession.publish` returns one.
 
-    A dedicated publisher connection (:class:`RelayPublisher`) is one of these. Its tracks behave as on
-    :class:`RelayPublisher`.
+    A dedicated publisher connection (:class:`RelayPublisher`) serves its one namespace through one of these, so
+    tracks behave the same on both.
     """
 
     __slots__ = (
@@ -98,7 +98,7 @@ class RelayPublication:
         # How long closing waits for the groups: the largest write deadline among the tracks.
         self._drain_timeout = 0.0
         self._closing = False
-        # Set when the namespace was lost while the connection lives: every later operation fails with it.
+        # Set when the namespace is lost while the connection stays open. Every later operation fails with it.
         self._lost: BaseException | None = None
         self._shutdown: asyncio.Future[None] | None = None
         loop = asyncio.get_running_loop()
@@ -120,8 +120,8 @@ class RelayPublication:
     def announced(self) -> RelayAwaitable[None]:
         """Settles once the namespace announce has reached the wire on a solicitation that covers it.
 
-        No earlier than the first :meth:`register_track`; see :attr:`RelayPublisher.announced`. The
-        publication or the connection ending first terminates it. Every waiter is isolated.
+        That is no earlier than the first :meth:`register_track`. :attr:`RelayPublisher.announced` says what it
+        guarantees. It terminates if the publication or the connection ends first. Every waiter is isolated.
         """
         return self._announced_awaitable
 
@@ -129,9 +129,9 @@ class RelayPublication:
     def closed(self) -> RelayAwaitable[Closed]:
         """Resolves once the publication has ended. Errors are returned as data; this never raises.
 
-        That is after :meth:`close`, when the relay withdrew its interest in the namespace (a ``RelayError``
-        with code ``NAMESPACE_ENDED``; the connection stays open), or with the connection. The error is
-        ``None`` after ``close()`` or a clean connection shutdown.
+        The publication ends after :meth:`close`, when the relay withdraws its interest in the namespace, or
+        when the connection ends. A withdrawal gives a ``RelayError`` with code ``NAMESPACE_ENDED``, and the
+        connection stays open. The error is ``None`` after ``close()`` or a clean connection shutdown.
         """
         return self._closed_awaitable
 
@@ -187,10 +187,10 @@ class RelayPublication:
     async def close(self) -> None:
         """End this namespace's tracks, wait for their groups, then withdraw the namespace. Idempotent.
 
-        It waits, for up to the largest ``write_timeout`` among the tracks, for the relay to acknowledge
-        the groups that completed and each track's end, as :meth:`RelayPublisher.close` does, then
-        withdraws the namespace (NAMESPACE_DONE). The connection stays open. Cancelling the caller does
-        not stop the close.
+        It waits up to the largest ``write_timeout`` among the tracks for the relay to acknowledge the
+        groups that completed and each track's end, as :meth:`RelayPublisher.close` does. Then it
+        withdraws the namespace with NAMESPACE_DONE. The connection stays open. Cancelling the caller
+        does not stop the close.
         """
         if self._shutdown is None:
             # A publication the connection's end already ended has nothing left to do.
@@ -255,10 +255,11 @@ class RelayPublication:
             writer._bind(binding.track_alias, binding.object_delivery_timeout, binding.subgroup_delivery_timeout)
 
     def _disconnect(self, error: BaseException | None, *, live: bool = False) -> None:
-        """The connection ended with ``error``, or (``live``) the namespace was lost while the connection lives.
+        """The connection ended with ``error``, or, with ``live``, the namespace was lost while the connection
+        is still open.
 
-        A lost namespace ends its tracks as ``close()`` would, failing what is in flight with ``error``; the
-        transport goes on, and so do the delivery timeouts it still needs.
+        A lost namespace ends its tracks as ``close()`` would, and what is in flight fails with ``error``. The
+        transport stays open, and the delivery timeouts it still needs keep running.
         """
         self._closing = True
 
@@ -279,15 +280,15 @@ class RelayPublication:
             else:
                 writer._disconnect(error)
 
-        # The relay withdrawing the namespace while the application's own close() drains it does not make that
-        # close a withdrawal: `closed` reports the close the application asked for.
+        # If the relay withdraws the namespace while the application's own close() drains it, `closed` still
+        # reports the close the application asked for.
         withdrawn_while_closing = live and self._shutdown is not None
         if not self._closed.done():
             self._closed.set_result(Closed() if error is None or withdrawn_while_closing else Closed(error))
 
 
 class _PublishHost:
-    """The publishing state of one connection: its publications, and how the connection tells them it has ended."""
+    """The publishing state of one connection. It holds the publications and tells them when the connection ends."""
 
     __slots__ = ("_bound", "_groups", "_publications", "_shutting_down")
 
@@ -296,7 +297,7 @@ class _PublishHost:
         # Groups whose FIN the transport took but the relay has not acknowledged, shared by every track on the
         # connection.
         self._groups = SettlingGroups()
-        # Set once the connection starts closing: no publication may start after `end_all()` took its snapshot.
+        # Set once the connection starts closing, so no publication starts after `end_all()` took its snapshot.
         self._shutting_down = False
         self._bound: tuple[MoqtPublishSession, RelaySessionLifetime[Any]] | None = None
 
@@ -305,10 +306,11 @@ class _PublishHost:
         connection: LifetimeCallbacks,
         on_namespace_ended: Callable[[TrackNamespace, BaseException | None], None],
     ) -> MoqtPublishSessionCallbacks:
-        """The publish session's callbacks: the connection's closure and GOAWAY, and what reaches the publications.
+        """The publish session's callbacks.
 
-        ``on_namespace_ended`` is told when the relay withdraws its interest in a namespace (no solicitation
-        covers it anymore).
+        The closure and GOAWAY go to ``connection``, and each announce and track binding goes to its publication.
+        ``on_namespace_ended`` runs when the relay withdraws its interest in a namespace, which is when no
+        solicitation covers it any more.
         """
 
         def on_announced(namespace: TrackNamespace) -> None:
@@ -359,10 +361,10 @@ class _PublishHost:
         return publication
 
     def end_all(self) -> Awaitable[object]:
-        """End every publication's tracks now; the result waits, bounded, for their groups to settle.
+        """End every publication's tracks now. The returned awaitable waits, bounded, for their groups to settle.
 
-        For a connection about to close: the connection's groups get the largest deadline among all its
-        tracks, as a publisher connection's do.
+        Call it when the connection is about to close. Every publication's groups get the largest deadline
+        among all the connection's tracks, as a publisher connection's do.
         """
         self._shutting_down = True
         publications = list(self._publications.values())
@@ -374,8 +376,8 @@ class _PublishHost:
         return asyncio.gather(*(publication._drain(seconds) for publication in publications))
 
     def disconnect(self, namespace: TrackNamespace, error: BaseException) -> None:
-        """End one publication while the connection lives: its tracks fail with ``error``, and the namespace is
-        withdrawn."""
+        """End one publication while the connection stays open. Its tracks fail with ``error``, and the session
+        withdraws the namespace."""
         publication = self._publications.get(tuple(namespace))
 
         if publication is None or self._bound is None:
@@ -589,7 +591,7 @@ async def connect_relay_publisher(
     def create_session(
         transport: MoqtTransport, callbacks: LifetimeCallbacks, setup_options: Sequence[KeyValuePair]
     ) -> MoqtPublishSession:
-        # A dedicated publisher's one namespace is the whole connection: losing it ends the connection.
+        # A dedicated publisher serves one namespace, so losing it ends the connection.
         def on_namespace_ended(_: TrackNamespace, cause: BaseException | None) -> None:
             callbacks.on_closed(Closed(_namespace_ended(cause)))
 

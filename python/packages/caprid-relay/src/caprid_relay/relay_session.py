@@ -43,10 +43,10 @@ from .publish import RelayPublication, _namespace_ended, _PublishHost
 class RelaySession(_Subscribing):
     """A connection that publishes and subscribes. Create one with :func:`connect_relay`.
 
-    Everything a :class:`RelaySubscriber` does works here unchanged; :meth:`publish` adds namespaces this
-    connection announces and serves. The relay never routes a connection's own announcements back to it:
-    ``namespace_events`` does not report this connection's publications, and subscribing to one of its own
-    tracks is refused (request error 16 on moq-relay).
+    Everything a :class:`RelaySubscriber` does works here unchanged. :meth:`publish` adds a namespace that this
+    connection announces and serves. The relay never routes a connection's own announcements back to it.
+    ``namespace_events`` does not report this connection's publications, and the relay refuses a subscribe to one
+    of its own tracks (request error 16 on moq-relay).
     """
 
     __slots__ = ("_host", "_shutdown")
@@ -59,9 +59,9 @@ class RelaySession(_Subscribing):
     def publish(self, namespace: Sequence[str]) -> RelayPublication:
         """Announce ``namespace`` and return the publication that serves its tracks.
 
-        Nothing is sent until its first track is registered. ``namespace`` follows the namespace rules. A
-        namespace published once stays taken on this connection, also after its publication closes: publishing
-        it again raises ``ValueError``. The token must grant publishing it.
+        The connection sends nothing for it until its first track is registered. ``namespace`` follows the
+        namespace rules. A namespace published once stays taken on this connection, also after its publication
+        closes, so publishing it again raises ``ValueError``. The token must grant publishing it.
         """
         # Arguments before connection state, as on the other entry points.
         return self._host.publish(namespace_fields(namespace))
@@ -69,9 +69,9 @@ class RelaySession(_Subscribing):
     async def close(self) -> None:
         """End every publication's tracks, wait for their groups, retract the announces, and close the connection.
 
-        The wait for the groups the relay has not acknowledged is the one :meth:`RelayPublisher.close` makes.
-        Every subscription and request ends, and this returns once the transport has closed. Idempotent;
-        cancelling the caller does not stop the shutdown.
+        It waits for the groups the relay has not acknowledged as :meth:`RelayPublisher.close` does. Every
+        subscription and request ends, and this returns once the transport has closed. Idempotent. Cancelling the
+        caller does not stop the shutdown.
         """
         if self._shutdown is None:
             self._shutdown = asyncio.ensure_future(self._close_after(self._host.end_all()))
@@ -107,8 +107,8 @@ async def connect_relay(
 
     It takes the options :func:`connect_relay_subscriber` takes, since publishing adds none. One token covers
     both directions, so it must grant every namespace the connection publishes and every one it subscribes to.
-    A namespace the relay stops soliciting ends only its publication (``NAMESPACE_ENDED`` on its ``closed``);
-    the connection stays open.
+    If the relay stops soliciting a namespace, only that namespace's publication ends, with ``NAMESPACE_ENDED`` on
+    its ``closed``. The connection stays open.
     """
     validate_timeout("request_timeout", request_timeout)
     options = ConnectRelayOptions(
@@ -142,8 +142,8 @@ async def connect_relay(
                 publisher=MoqtPublishSessionConfig(callbacks=host.session_callbacks(callbacks, on_namespace_ended)),
             ),
         )
-        # Ending the subscribe driver ends the session in order: the subscriber at once, the transport after the
-        # publisher's drain.
+        # Ending the subscribe driver ends the session in order. The subscriber ends at once, and the transport
+        # after the publisher's drain.
         return duplex.subscriber
 
     lifetime = await open_relay_session(options, create_session)

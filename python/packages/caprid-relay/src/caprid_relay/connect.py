@@ -65,17 +65,17 @@ from .switchable import SwitchableHandlers, SwitchableSubscription, snapshot_swi
 IMPLEMENTATION_NAME = "caprid-relay (Python)"
 
 SUBSCRIBER_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1), KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1))
-"""The setup options a connection that subscribes adds to the endpoint's.
+"""The setup options a subscriber connection adds to the endpoint's.
 
 Namespaces arrive only on a namespace_events request, never pushed unasked, and a relay with MoQ Active
 Count marks where each request's snapshot ends (spec/behavior.md, "Discovery").
 """
 
 SESSION_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1),)
-"""The setup options of a connection that publishes and subscribes: SOLICIT alone.
+"""The setup options a connection that publishes and subscribes adds to the endpoint's, which is SOLICIT alone.
 
-ACTIVE_COUNT would oblige its publishing side to count the NAMESPACE entries it answers the relay's
-solicitations with, which the publish session does not do.
+It leaves out ACTIVE_COUNT, which would oblige its publishing side to count the NAMESPACE entries it answers the
+relay's solicitations with. The publish session does not count them.
 """
 
 

@@ -4,22 +4,23 @@ The subscribe driver (``session``) and the publish driver (``publish_session``) 
 draft-22 allows (a subscription "can be established by either endpoint"; roles belong to entities, not
 sessions). The counterpart of ``ts/packages/moq-core/src/protocol/duplex-session.ts``.
 
-The subscribe driver owns the session: it sends and reads SETUP, starts every request this endpoint makes
+The subscribe driver owns the session. It sends and reads SETUP, starts every request this endpoint makes
 (SUBSCRIBE, SUBSCRIBE_NAMESPACE, FETCH, TRACK_STATUS), and reads every incoming unidirectional stream, the
-control stream and subgroup data alike. The publish driver serves the peer: each request stream the peer
-opens is routed by its first message type (:data:`_PUBLISHER_REQUESTS`), so SUBSCRIBE_NAMESPACE (the
-relay's solicitation, which carries announces), SUBSCRIBE, TRACK_STATUS and FETCH reach the publish driver,
-and anything else (PUBLISH, PUBLISH_NAMESPACE) the subscribe driver. The publish driver's own control stream
-is swallowed, and it is handed the peer's SETUP options and any control-stream GOAWAY the subscribe driver
-reads, so its readiness and migration silence follow the real session.
+control stream and subgroup data alike. The publish driver serves the peer. The session routes each request
+stream the peer opens by its first message type (:data:`_PUBLISHER_REQUESTS`). SUBSCRIBE_NAMESPACE (the
+relay's solicitation, which carries announces), SUBSCRIBE, TRACK_STATUS and FETCH go to the publish driver,
+and anything else (PUBLISH, PUBLISH_NAMESPACE) goes to the subscribe driver. The session discards what the
+publish driver writes on its own control stream. It hands the publish driver the peer's SETUP options and
+any control-stream GOAWAY the subscribe driver reads, so the publish driver's readiness and its GOAWAY
+handling follow the real session.
 
-This endpoint's Request IDs are allocated by the subscribe driver alone. The peer's are consumed
-session-wide (§6.4.2.1), so both drivers claim them in one shared set: an ID one driver consumed is a reuse
-to the other.
+Only the subscribe driver allocates this endpoint's Request IDs. The peer's IDs are consumed session-wide
+(§6.4.2.1), so both drivers claim them in one shared set, and an ID one driver consumed is a reuse to the
+other.
 
 Measured against moq-relay on 2026-11-18 (spec/behavior.md, "One connection that publishes and
-subscribes"): one session announced, served the relay's SUBSCRIBE and subscribed to another session's track
-at once, with the relay soliciting its announces even though SETUP carried SOLICIT. The relay never routes a
+subscribes"). One session announced, served the relay's SUBSCRIBE and subscribed to another session's track
+at once. The relay solicited its announces even though SETUP carried SOLICIT. The relay never routes a
 session's own announcements back to it.
 """
 
@@ -53,10 +54,11 @@ class MoqtDuplexSessionConfig:
     """
 
     subscriber: MoqtSessionConfig = field(default_factory=MoqtSessionConfig)
-    """The subscribe driver, which sends SETUP: its ``setup_options`` and ``implementation_name`` are the session's."""
+    """The subscribe driver's config. This driver sends SETUP, so its ``setup_options`` and ``implementation_name``
+    are the session's."""
     publisher: MoqtPublishSessionConfig = field(default_factory=MoqtPublishSessionConfig)
-    """The publish driver. It sends no SETUP of its own, so its ``setup_options`` and ``implementation_name`` do not
-    apply."""
+    """The publish driver's config. It sends no SETUP of its own, so its ``setup_options`` and ``implementation_name``
+    do not apply."""
 
 
 _T = TypeVar("_T")
@@ -113,9 +115,10 @@ class _Channel(Generic[_T]):
 
 
 class _ControlCopy(_Channel[bytes]):
-    """The publish driver's control stream from the peer: the peer's SETUP and any GOAWAY, copied from the real one.
+    """The publish driver's control stream from the peer. It carries copies of the peer's SETUP and any GOAWAY.
 
-    It ends only once the publish driver has: the driver reads its control stream ending as the end of the session.
+    It ends only after the publish driver has ended, because the driver reads the end of its control stream as the
+    end of the session.
     """
 
     async def read(self) -> bytes | None:
@@ -126,7 +129,7 @@ class _ControlCopy(_Channel[bytes]):
 
 
 class _Discard:
-    """The publish driver's own control stream: the subscribe driver's is the session's."""
+    """The publish driver's own control stream, which discards every write. The subscribe driver's is the session's."""
 
     async def write(self, data: bytes) -> None:
         pass
@@ -218,8 +221,8 @@ class _SharedTransport:
 
 
 class _SubscriberView(_SharedTransport):
-    """The subscribe driver's transport: the real one, but only the peer's requests routed to it, and a close that
-    waits for the publisher's drain once the session is ending."""
+    """The subscribe driver's transport. It is the real one, except that only the peer's requests routed to this
+    driver reach it, and once the session is ending its close waits for the publisher's drain."""
 
     __slots__ = ("_requests", "_session")
 
@@ -249,8 +252,8 @@ class _SubscriberView(_SharedTransport):
 
 
 class _PublisherView(_SharedTransport):
-    """The publish driver's transport: a copy of the peer's control stream, the peer's requests routed to it, and a
-    swallowed control stream of its own."""
+    """The publish driver's transport. It has a copy of the peer's control stream, the peer's requests routed to
+    this driver, and a control stream of its own that discards every write."""
 
     __slots__ = ("_control", "_control_taken", "_requests", "_uni")
 
@@ -299,7 +302,7 @@ class _DuplexSubscriber(MoqtSession):
         super().__init__(transport, config)
 
     def close(self, close_code: int = SESSION_ERROR.NO_ERROR, reason: str = "") -> None:
-        """End the session: the subscriber at once, the transport once the publisher has drained, with this code."""
+        """End the session with this code. The subscriber ends at once, the transport once the publisher has drained."""
         publisher = self._duplex.publisher
         self._duplex._end(
             lambda: MoqtSession.close(self, close_code, reason), lambda: publisher.close(close_code, reason)
@@ -318,7 +321,8 @@ class MoqtDuplexSession:
     def __init__(self, transport: MoqtTransport, config: MoqtDuplexSessionConfig | None = None) -> None:
         config = config or MoqtDuplexSessionConfig()
         self._ending = False
-        """Set by ending the session: the subscriber's own close must not cut the publisher's drain short."""
+        """Set when the session starts ending, so the subscriber's own close does not cut the publisher's drain
+        short."""
         peer_request_ids: set[int] = set()
         control = _ControlCopy()
         to_subscriber: _Channel[BidirectionalStream] = _Channel()
@@ -354,8 +358,8 @@ class MoqtDuplexSession:
         )
         """Starts this endpoint's requests and receives their data. Its ``ready`` is the session's.
 
-        Its ``close()`` and ``destroy()`` end the session as :meth:`destroy` does: the subscriber at once, the
-        transport once the publisher has drained, with the close code and reason ``close()`` was given.
+        Its ``close()`` and ``destroy()`` end the session as :meth:`destroy` does, with the close code and reason
+        ``close()`` was given. The subscriber ends at once, the transport once the publisher has drained.
         """
         self.publisher: MoqtPublishSession = create_moqt_publish_session(
             publisher_view,
@@ -367,20 +371,20 @@ class MoqtDuplexSession:
         )
         """Announces namespaces and serves the peer's requests for their tracks.
 
-        Its ``ready`` follows the subscriber's; its ``close()`` ends its subscriptions and announces and then
-        closes the whole session.
+        Its ``ready`` follows the subscriber's. Its ``close()`` ends its subscriptions and announces, then closes
+        the whole session.
         """
         spawn(_route(transport, to_subscriber, to_publisher))
 
     def destroy(self, error: BaseException | None = None) -> None:
         """End the session.
 
-        The subscriber ends at once, its requests with it, but leaves the transport open; the publisher ends
-        its subscriptions and retracts its announces within its bounded drain, then closes the transport.
-        ``error``, if given, is the local closure error both drivers report. Each driver's callbacks end at
-        its own ``on_closed``: the subscriber's at once, the publisher's (subscription ends, unbindings) once
-        its drain is over. A session error before then (a protocol violation on either side) is not a drain:
-        it closes the transport at once.
+        The subscriber and its requests end at once, but the transport stays open. The publisher ends its
+        subscriptions and retracts its announces within its bounded drain, then closes the transport.
+        ``error``, if given, is the local closure error both drivers report. Each driver's callbacks stop at
+        its own ``on_closed``. The subscriber's stop at once. The publisher's, which report subscription
+        ends and unbindings, run until its drain is over. A session error before then, such as a protocol
+        violation on either side, closes the transport at once without a drain.
         """
         subscriber = self.subscriber
         self._end(lambda: MoqtSession.destroy(subscriber, error), lambda: self.publisher.destroy(error))

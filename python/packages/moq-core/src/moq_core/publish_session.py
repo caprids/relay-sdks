@@ -97,7 +97,7 @@ from .transport import (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AnnounceEnded:
-    """What ``on_announce_ended`` receives: no solicitation stream carries an announced namespace any more.
+    """What ``on_announce_ended`` receives when no solicitation stream carries an announced namespace any more.
 
     ``error`` is a :class:`MoqtProtocolError` whose ``__cause__`` is the stream failure, if any, that
     ended the last carrier.
@@ -170,14 +170,14 @@ class MoqtPublishSessionCallbacks:
     """An announced namespace first reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation.
 
     The peer can now route SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own;
-    this is the strongest "announced" fact the transport draft offers. Called once per namespace per
+    this is the strongest "announced" fact the transport draft offers. It runs once per namespace per
     ``announce()``.
     """
     on_announce_ended: Callable[[AnnounceEnded], None] | None = None
     """The last solicitation stream carrying an announced namespace ended while the session was still live.
 
     The peer rejected the announce (unauthorized suffix) or withdrew its namespace interest. Either
-    way that namespace's ingest path is gone. Not called for a namespace ``withdraw()`` removed.
+    way that namespace's ingest path is gone. It does not run for a namespace that ``withdraw()`` removed.
     """
     on_subscribe: Callable[[Subscribe], None] | None = None
     """The peer subscribed to a registered track (already answered SUBSCRIBE_OK)."""
@@ -236,10 +236,10 @@ class MoqtPublishSessionConfig:
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
     """Identifies this implementation in SETUP (§9.1.5)."""
     peer_request_ids: set[int] | None = None
-    """The peer's consumed Request IDs (§6.4.2.1); the session's own when ``None``.
+    """The peer's consumed Request IDs (§6.4.2.1). With ``None``, the session keeps a set of its own.
 
-    Sessions sharing one transport pass the same set, so an ID one of them consumed is a reuse to the
-    other; :func:`moq_core.create_moqt_duplex_session` does.
+    Sessions that share one transport pass the same set, so an ID one of them consumed is a reuse to the
+    other. :func:`moq_core.create_moqt_duplex_session` passes one.
     """
     callbacks: MoqtPublishSessionCallbacks = field(default_factory=MoqtPublishSessionCallbacks)
 
@@ -393,7 +393,7 @@ class _DataStream:
 
 
 _NamespaceKey: TypeAlias = tuple[str, ...]
-"""A namespace as a key: its fields as a tuple, so fields holding any character stay apart."""
+"""A namespace as a dict key. A tuple of its fields keeps the fields apart whatever characters they hold."""
 
 _TrackKey: TypeAlias = tuple[_NamespaceKey, str]
 """A track as a key: its namespace and its name."""
@@ -493,9 +493,12 @@ class MoqtPublishSession:
         self._announces: dict[_NamespaceKey, _AnnounceRecord] = {}
         """The namespaces to announce."""
         self._pending_withdrawals: set[asyncio.Task[None]] = set()
-        """NAMESPACE_DONE writes ``withdraw()`` started; an orderly close drains them with its own retractions."""
+        """NAMESPACE_DONE writes that ``withdraw()`` started.
+
+        An orderly close waits for them with its own retractions.
+        """
         self._track_namespaces: set[_NamespaceKey] = set()
-        """Namespaces with at least one registered track: an announce waits for its first."""
+        """Namespaces with at least one registered track. A namespace's announce waits for its first track."""
         self._received_namespace_solicitation = False
 
         loop = asyncio.get_running_loop()
@@ -747,10 +750,10 @@ class MoqtPublishSession:
     def announce(self, track_namespace: Sequence[str]) -> None:
         """Announce a namespace on every matching solicitation, current and future.
 
-        A session announces any number of namespaces; announcing one already announced does nothing.
-        The wire write additionally waits for the first :meth:`register_track` in that namespace: an
-        announce invites immediate SUBSCRIBEs, and an empty registry would answer them with a terminal
-        DOES_NOT_EXIST. Result via ``on_announced`` / ``on_announce_ended``.
+        A session announces any number of namespaces. Announcing one already announced does nothing.
+        The wire write also waits for the first :meth:`register_track` in that namespace, because an
+        announce invites immediate SUBSCRIBEs and an empty registry would answer them with a terminal
+        DOES_NOT_EXIST. The result arrives through ``on_announced`` or ``on_announce_ended``.
         """
         if self._destroyed or self._closing:
             return
@@ -766,10 +769,10 @@ class MoqtPublishSession:
             self._announce_on(stream, record)
 
     def withdraw(self, track_namespace: Sequence[str]) -> None:
-        """Stop announcing a namespace: NAMESPACE_DONE on every solicitation that carried it.
+        """Stop announcing a namespace by sending NAMESPACE_DONE on every solicitation that carried it.
 
-        Its tracks stay registered and their subscriptions are untouched; end them first. Withdrawing a
-        namespace not announced does nothing.
+        Its tracks stay registered, and withdrawing does not touch their subscriptions, so end them first.
+        Withdrawing a namespace that is not announced does nothing.
         """
         if self._destroyed or self._closing:
             return
@@ -805,9 +808,9 @@ class MoqtPublishSession:
 
         Solicitations, ``announce()``, and each namespace's first ``register_track()`` arrive in any
         order (the relay's SUBSCRIBE_NAMESPACE races our post-SETUP setup), so all three paths funnel
-        here. A namespace's announce is deferred until a track in it is registered: an announced
-        namespace invites immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on
-        moq-lite-rs, so advertising an empty registry would permanently break the first viewer in the
+        here. A namespace's announce waits until a track in it is registered. An announced namespace
+        invites immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on moq-lite-rs,
+        so advertising an empty registry would permanently break the first viewer in the
         pre-registration window.
         """
         if record.namespace not in self._track_namespaces:
@@ -832,7 +835,8 @@ class MoqtPublishSession:
         spawn(write_entry())
 
     async def _write_or_drop(self, stream: _NamespaceStream, entry: bytes) -> bool:
-        """Write a NAMESPACE or NAMESPACE_DONE entry; a failed write drops the carrier. Whether it was written."""
+        """Write a NAMESPACE or NAMESPACE_DONE entry and return whether it was written. A failed write drops the
+        carrier."""
         try:
             await stream.writer.write(entry)
         except Exception as error:  # the response half died alone
@@ -842,12 +846,12 @@ class MoqtPublishSession:
         return True
 
     def _drop_carrier(self, stream: _NamespaceStream, error: BaseException) -> None:
-        """A write on a solicitation stream failed: report the namespaces it carried.
+        """Drop a solicitation stream whose write failed, and report the namespaces it carried.
 
-        The response half died alone (a reset the request half may never mirror), so no future write
-        can reach the peer and the read loop may stay open forever: the carrier is dead. Deregister it
-        so the peer's replacement solicitation is a fresh start rather than a PREFIX_OVERLAP against a
-        corpse. If another path already swept it, the loss was reported there.
+        The response half failed alone, with a reset the request half may never mirror. No future write
+        can reach the peer, and the read loop may stay open forever. Deregistering the stream lets the
+        peer's replacement solicitation start fresh instead of failing with PREFIX_OVERLAP against a
+        stream that can carry nothing. If another path already removed it, that path reported the loss.
         """
         if stream not in self._namespace_streams:
             return
@@ -874,8 +878,8 @@ class MoqtPublishSession:
         the peer's streams ending the orderly drain), and once the transport has ended: an ended
         transport fails every stream before the session learns of it, and that is connection loss,
         which ``_handle_closed`` reports, not a withdrawal. A ``source="session"`` failure (TA-23) or the
-        transport's own flag decides, not which of the two wakes first. A namespace withdrawn meanwhile
-        is not reported.
+        transport's own flag decides, not which of the two wakes first. It does not report a namespace
+        withdrawn meanwhile.
         """
         if self._announce_loss_silenced():
             return
@@ -884,7 +888,7 @@ class MoqtPublishSession:
             return
 
         for record in lost:
-            # A handler may withdraw another namespace or end the session: check each again before telling it.
+            # A handler may withdraw another namespace or end the session, so check each again before reporting it.
             if self._announce_loss_silenced() or not self._still_lost(record):
                 continue
 
@@ -1022,9 +1026,9 @@ class MoqtPublishSession:
     async def wait_ends_acknowledged(self, track_namespace: Sequence[str] | None = None) -> None:
         """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
 
-        With ``track_namespace``, only the ends of that namespace's tracks. An end that failed, or whose
-        stream was reset, counts as done. On a transport that does not report acknowledgement, an end
-        counts once its FIN was written. Never raises; the caller bounds the wait.
+        With ``track_namespace``, it waits only for the ends of that namespace's tracks. An end that
+        failed, or whose stream was reset, counts as done. On a transport that does not report
+        acknowledgement, an end counts once its FIN was written. Never raises; the caller bounds the wait.
         """
         namespace = None if track_namespace is None else tuple(track_namespace)
         ends = {

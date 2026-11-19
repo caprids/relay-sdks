@@ -1242,8 +1242,8 @@ and every publishing-roots view.
 ### One connection that publishes and subscribes
 
 `connectRelay` / `connect_relay` opens one connection that does everything a subscriber connection
-does and also publishes. MOQT gives a session no fixed role, and moq-relay serves both directions on one session
-when the token grants both: it solicits the session's announces from the token's publish grant
+does and also publishes. MOQT gives a session no fixed role, and moq-relay serves both directions on
+one session when the token grants both: it solicits the session's announces from the token's publish grant
 whatever the session sends in SETUP, and routes its subscriptions as for any subscriber.
 
 - **One session.** The connection sends one SETUP. It declares SOLICIT, as a subscriber
@@ -1267,9 +1267,9 @@ whatever the session sends in SETUP, and routes its subscriptions as for any sub
   discovery does not report the namespaces it publishes, and a subscribe to one of its own tracks is
   refused: request error 16 on moq-relay.
 - **Shutdown.** `close()` ends every publication's tracks, waits for their groups, retracts every
-  announce, then closes the connection and every request on it. In Python it is a coroutine, where
-  `RelaySubscriber.close()` returns at once, so a `RelaySession` has every `RelaySubscriber` method
-  and property without being a `RelaySubscriber` instance.
+  announce, then closes the connection and every request on it. In Python it is a coroutine, while
+  `RelaySubscriber.close()` returns at once. So a Python `RelaySession` has every `RelaySubscriber`
+  method and property but is not a `RelaySubscriber` instance.
 - **Supervision.** `connectSupervisedRelay` reconnects and rotates such a connection
   ([supervised relay](#supervised-relay)). Python has no supervised counterpart yet.
 
@@ -1282,10 +1282,10 @@ publish and subscribe halves are both derived from the token, and routes announc
 hidden from it.
 
 The Python SDK passed the same check on 2026-11-19 against ord.relay.mux.global over aioquic
-(`python/scripts/probe_relay_session.py`, `mise run python:probe:relay-session`), 3 of 3 runs. Every
-one of the four cross subscriptions received 30 of the 30 objects written and then the track's
-end-of-track status object, each peer's discovery reported only the other's two namespaces, and the
-loopback subscribe was refused with request error 16.
+(`python/scripts/probe_relay_session.py`, `mise run python:probe:relay-session`), 3 of 3 runs. Each
+of the four cross subscriptions received all 30 objects written, then the track's end-of-track
+status object. Each peer's discovery reported only the other's two namespaces, and the relay refused
+the loopback subscribe with request error 16.
 
 ### Delivery timeouts
 

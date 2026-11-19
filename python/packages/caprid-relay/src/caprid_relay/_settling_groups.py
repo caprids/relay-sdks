@@ -55,7 +55,8 @@ class SettlingGroups:
     def subset(self) -> SettlingGroups:
         """A set for some of this connection's groups, such as one publication's.
 
-        Its groups count against this set's limit, and it waits for room here; its ``drain`` waits only for its own.
+        Its groups count against this set's limit, and it waits here for room. Its ``drain`` waits only for its
+        own groups.
         """
         part = SettlingGroups(self._limit)
         part._whole = self

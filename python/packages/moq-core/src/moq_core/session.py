@@ -312,10 +312,10 @@ class MoqtSessionConfig:
     forever.
     """
     peer_request_ids: set[int] | None = None
-    """The peer's consumed Request IDs (§6.4.2.1); the session's own when ``None``.
+    """The peer's consumed Request IDs (§6.4.2.1). With ``None``, the session keeps a set of its own.
 
-    Sessions sharing one transport pass the same set, so an ID one of them consumed is a reuse to the
-    other; :func:`moq_core.create_moqt_duplex_session` does.
+    Sessions that share one transport pass the same set, so an ID one of them consumed is a reuse to the
+    other. :func:`moq_core.create_moqt_duplex_session` passes one.
     """
     callbacks: MoqtSessionCallbacks = field(default_factory=MoqtSessionCallbacks)
 

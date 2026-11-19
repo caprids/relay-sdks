@@ -5,7 +5,7 @@ operation (a single write or an open group) and its phases, the write deadline, 
 the demand observers behind ``has_demand`` and ``demand_changes()``. Its public face is
 :class:`RelayTrackWriter`, the class the application holds; the publication drives it through
 inbound calls: ``_bind()`` when the relay's binding changes, ``_disconnect()`` when the connection
-ends, and ``_end()`` when the relay stops soliciting the namespace while the connection lives.
+ends, and ``_end()`` when the relay stops soliciting the namespace while the connection stays open.
 
 An operation completes once the transport has taken its group's FIN, not once the relay has
 acknowledged it: the slot frees itself and passes the group on to the connection as a settling group
@@ -712,8 +712,8 @@ class RelayTrackWriter:
         self._close(error, _connection_reset_code(error))
 
     def _end(self, error: BaseException) -> None:
-        """The track ends while the connection lives, as ``close()`` ends it, except that an operation in flight
-        fails with ``error``. Groups already handed to the transport keep their delivery timeouts."""
+        """The track ends while the connection stays open, as ``close()`` ends it, except that an operation in
+        flight fails with ``error``. Groups already handed to the transport keep their delivery timeouts."""
         self._close(error, STREAM_RESET_CODE.CANCELLED)
 
     # ------------------------------------------------------------------ public API
