@@ -626,6 +626,61 @@ class TestSubscribeDriverTeardown:
 
             assert order == ["ok"]
 
+    @pytest.mark.parametrize("end", ["FIN", "reset"])
+    @pytest.mark.parametrize("when", ["on_ok", "between entries", "on_entry"])
+    async def test_a_cancelled_fetch_stops_its_data_stream_and_reports_no_end(self, when: str, end: str) -> None:
+        order: list[str] = []
+        fetch: FetchHandle | None = None
+
+        def on_ok(_: object) -> None:
+            order.append("ok")
+            if when == "on_ok":
+                assert fetch is not None
+                fetch.cancel()
+
+        def on_entry(_: object) -> None:
+            order.append("entry")
+            if when == "on_entry":
+                assert fetch is not None
+                fetch.cancel()
+
+        async with subscribe_session() as (fake, session, _):
+            fetch = session.fetch(
+                TRACK,
+                FetchHandlers(
+                    on_ok=on_ok,
+                    on_entry=on_entry,
+                    on_end=lambda: order.append("end"),
+                    on_reset=lambda _: order.append("reset"),
+                ),
+            )
+            request = await fake.next_request_stream()
+            data = fake.open_controlled_data_stream()
+
+            if when == "on_ok":
+                await data.write(fetch_header(fetch.request_id))
+                await settle()
+                await request.send(encode_fetch_ok(False, Location(4, 1)))
+                await wait_for(lambda: order == ["ok"])
+            else:
+                await request.send(encode_fetch_ok(False, Location(4, 1)))
+                await data.write(fetch_header(fetch.request_id) + fetch_entry(4, 0))
+                await wait_for(lambda: order == ["ok", "entry"])
+                if when == "between entries":
+                    fetch.cancel()
+
+            assert await stopped(data.write)
+            try:
+                if end == "FIN":
+                    await data.close()
+                else:
+                    data.reset()
+            except StreamClosedError:
+                pass
+            await settle()
+
+            assert order == (["ok"] if when == "on_ok" else ["ok", "entry"])
+
 
 # ============================================================================
 # Publish driver

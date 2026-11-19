@@ -441,6 +441,8 @@ class _SubscriptionRecord(_RequestRecord):
 class _FetchRecord(_RequestRecord):
     handlers: FetchHandlers
     group_order: GroupOrder = "ascending"
+    reader: StreamReader | None = None
+    """The data stream being read, so a cancel stops it at once rather than at the next entry."""
     # The data stream ended or reset. The session forgets the fetch once its request is answered too (#419).
     data_ended: bool = False
 
@@ -1349,6 +1351,8 @@ class MoqtSession:
         self._settle_request(record)
         if record.stream is not None:
             record.stream.cancel(reason)
+        if record.reader is not None:
+            record.reader.cancel(reason)
         self._fetches.pop(record.request_id, None)
 
     # --------------------------------------------------------------------------
@@ -1519,6 +1523,8 @@ class MoqtSession:
             reader.cancel()
             return
 
+        record.reader = reader
+
         try:
             async with aclosing(read_fetch_entries(reader, record.group_order)) as entries:
                 async for entry in entries:
@@ -1528,14 +1534,15 @@ class MoqtSession:
 
                     _call(record.handlers.on_entry, entry)
 
-            # Teardown's cancel of this reader reads as a clean end.
-            if not self._destroyed:
+            # Teardown's or the fetch's own cancel of this reader reads as a clean end.
+            if not self._destroyed and not record.cancelled:
                 _call(record.handlers.on_end)
         except MoqtProtocolError:
-            raise
+            if not record.cancelled:
+                raise
         except Exception as error:  # a reset mid-replay means entries may be missing
             # Never report it as the clean FIN `on_end` promises.
-            if not self._destroyed:
+            if not self._destroyed and not record.cancelled:
                 _call(record.handlers.on_reset, FetchReset(error=error))
         finally:
             # Nothing more arrives for the fetch once its data stream and its response have, so the

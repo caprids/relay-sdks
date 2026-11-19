@@ -61,6 +61,9 @@ class ControlledDataStream:
     async def write(self, data: bytes) -> None:
         await self._writer.write(data)
 
+    async def close(self) -> None:
+        await self._writer.close()
+
     def reset(self, error: object = None) -> None:
         self._writer.abort(error)
 
