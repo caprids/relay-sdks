@@ -30,6 +30,7 @@ from .control_messages import (
     SubscribeOk,
     TrackNamespace,
 )
+from .duplex_session import MoqtDuplexSession, MoqtDuplexSessionConfig, create_moqt_duplex_session
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import (
     MAX_OBJECT_PAYLOAD_LENGTH,
@@ -106,6 +107,8 @@ __all__ = [
     "LocationFilter",
     "MessageParameters",
     "MoqTrackSource",
+    "MoqtDuplexSession",
+    "MoqtDuplexSessionConfig",
     "MoqtFetchOptions",
     "MoqtObject",
     "MoqtProtocolError",
@@ -143,6 +146,7 @@ __all__ = [
     "TrackNamespace",
     "TrackStatusHandlers",
     "TrackStatusOk",
+    "create_moqt_duplex_session",
     "create_moqt_publish_session",
     "create_moqt_session",
     "create_subgroup_writer",

@@ -51,7 +51,9 @@ PUBLIC_NAMES = [
     "RelayErrorCode",
     "RelayErrorPhase",
     "RelayGroupWriter",
+    "RelayPublication",
     "RelayPublisher",
+    "RelaySession",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
@@ -77,7 +79,9 @@ PUBLIC_NAMES = [
     "UpdateOkEvent",
     "PublisherGeneration",
     "RestartReason",
+    "SupervisedPublication",
     "SupervisedPublisher",
+    "SupervisedRelay",
     "SupervisedStatus",
     "SupervisedSubscriber",
     "SupervisionBackoff",
@@ -86,9 +90,11 @@ PUBLIC_NAMES = [
     "SwitchedInfo",
     "WantHandlers",
     "WantSwitchedInfo",
+    "connect_relay",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",
+    "connect_supervised_relay",
     "connect_supervised_subscriber",
     "read_json",
     "read_text",
@@ -202,13 +208,12 @@ def test_the_snapshot_windows_are_exported_and_equal_the_typescript_constants(
     assert getattr(caprid_relay, python) == int(declared.group(1).replace("_", "")) / 1000 == seconds
 
 
-def test_exports_one_entry_point_per_connection_role_and_nothing_under_the_old_names() -> None:
+def test_exports_one_entry_point_per_connection_kind_and_nothing_under_the_old_names() -> None:
+    assert callable(caprid_relay.connect_relay)
     assert callable(caprid_relay.connect_relay_subscriber)
     assert callable(caprid_relay.connect_relay_publisher)
-
-    for old in ("connect_relay", "RelayConnection"):
-        assert not hasattr(caprid_relay, old)
-        assert old not in caprid_relay.__all__
+    assert not hasattr(caprid_relay, "RelayConnection")
+    assert "RelayConnection" not in caprid_relay.__all__
 
 
 def test_spells_subscription_events_after_what_happened_not_after_the_protocol_message() -> None:

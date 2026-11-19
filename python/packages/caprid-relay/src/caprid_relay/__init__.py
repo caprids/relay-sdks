@@ -29,14 +29,16 @@ from moq_core import (
 from ._awaitable import RelayAwaitable
 from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKind
 from ._supervision import SupervisedStatus, SupervisionBackoff
+from ._supervisor import SupervisedPublication
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayCredential, RelayTransportFactory
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .namespace_events import SNAPSHOT_LIMIT, SNAPSHOT_QUIET, NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
-from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
+from .publish import RelayGroupWriter, RelayPublication, RelayPublisher, RelayTrackWriter, connect_relay_publisher
 from .publishing_roots import PublishingRoot, PublishingRoots, PublishingRootsChange, PublishingRootsHandlers
+from .relay_session import RelaySession, connect_relay
 from .room_endpoint import DEFAULT_ENDPOINT, room_endpoint
 from .subscription_events import (
     GoawayEvent,
@@ -54,6 +56,7 @@ from .subscription_events import (
     UpdateOkEvent,
 )
 from .supervised_publisher import PublisherGeneration, SupervisedPublisher, connect_supervised_publisher
+from .supervised_relay import SupervisedRelay, connect_supervised_relay
 from .supervised_subscriber import (
     RestartReason,
     SupervisedSubscriber,
@@ -95,7 +98,9 @@ __all__ = [
     "RelayErrorCode",
     "RelayErrorPhase",
     "RelayGroupWriter",
+    "RelayPublication",
     "RelayPublisher",
+    "RelaySession",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
@@ -117,7 +122,9 @@ __all__ = [
     "SubscriptionHandlers",
     "SubscriptionOverflowError",
     "SubscriptionRequestError",
+    "SupervisedPublication",
     "SupervisedPublisher",
+    "SupervisedRelay",
     "SupervisedStatus",
     "SupervisedSubscriber",
     "SupervisionBackoff",
@@ -127,9 +134,11 @@ __all__ = [
     "UpdateOkEvent",
     "WantHandlers",
     "WantSwitchedInfo",
+    "connect_relay",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",
+    "connect_supervised_relay",
     "connect_supervised_subscriber",
     "read_json",
     "read_text",

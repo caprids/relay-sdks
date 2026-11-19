@@ -66,9 +66,13 @@ We decided (#525):
 - **Each driver's callbacks are meant to end at its own `onClosed`, but don't always yet.** Both drivers have paths
   that can still call back after it (#527). The duplex session keeps the transport open while the publish driver
   drains, which widens that window.
-- **Supervision is still per direction.** The supervised publisher and subscriber each open their own connection.
-  The planned supervised `connectRelay` makes one connection one generation: every namespace it announces carries
-  that generation, a reconnect brings everything back together as the next generation, and a rotation moves the
-  publications and the wants to the new connection before the old one closes.
-- **Python doesn't have it yet.** The Python core has the same two drivers. `spec/vocabulary.md` lists
-  `connect_relay` as not built yet.
+- **Supervision gained a connection for both directions.** The supervised publisher and subscriber each still open
+  their own connection. The supervised `connectRelay`, `connectSupervisedRelay` (`connect_supervised_relay` in
+  Python), makes one connection one generation: every namespace it announces carries that generation, a reconnect
+  brings everything back together as the next generation, and a rotation moves the publications and the wants to
+  the new connection before the old one closes. All three run on one supervision loop in each SDK.
+- **Python has it too, unsupervised.** `connect_relay` and `create_moqt_duplex_session` port the same
+  design over the Python core's two drivers, and passed the same live check on ord (`spec/behavior.md`). A
+  Python `RelaySession` is not a `RelaySubscriber` instance, because its `close()` is a coroutine and a
+  subscriber's is not. `connect_supervised_relay` supervises it as TypeScript does, and passed the same live check
+  on ord.

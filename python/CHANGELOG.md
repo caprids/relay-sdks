@@ -6,6 +6,43 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: `connect_supervised_relay(url, ...)` supervises one connection that publishes and subscribes, as in
+  the TypeScript SDK (#529). It takes `connect_relay`'s options plus `reconnect`, `rotate_before`, `on_generation` and
+  `on_status`, and returns a `SupervisedRelay`. A `SupervisedRelay` has the supervised subscriber's `want`, `unwant`,
+  `catch_up` and `publishing_roots`, plus `generation`, `rotate()` and an awaitable `close()`. Its `publish(root)`
+  returns a `SupervisedPublication` with `root`, `namespace`, `register_track` and `close`, whose track writers
+  outlive the connections. Each connection is one generation, and it serves every root as the root followed by that
+  generation's field, so a reconnect or rotation moves every root, track and want together. If the relay stops
+  soliciting a root, the supervisor replaces the whole connection. `publishing_roots` never reports the supervised
+  relay's own roots. `on_generation` receives the generation field itself, where TypeScript passes `{ generation }`.
+  On ord.relay.mux.global, two peers each published two roots, followed the other's roots and wanted the other's
+  tracks with `generations=True`, and one peer rotated halfway. They passed all eight checks of
+  `mise run python:probe:supervised-relay` in 3 of 3 runs.
+- `caprid-relay`: the supervised publisher and subscriber now run on one supervision loop, which the supervised relay
+  shares, as in the TypeScript SDK. Their API is unchanged. Some timing at the edges changed. `close()` and a
+  cancellation now retire every track and close the open connections in the same turn, and a supervised subscriber's
+  `close()` reports `closed` before it returns. A write between connections raises `RECONNECTING` with the message
+  "The supervisor is between connections". Applications need no change.
+- `caprid-relay`: `connect_relay(url, ...)` opens one connection that publishes and subscribes, as in the TypeScript
+  SDK (#525). It takes `connect_relay_subscriber`'s options and returns a `RelaySession`. A `RelaySession` has every
+  `RelaySubscriber` method and property and an awaitable `close()`. Its `publish(namespace)` announces a namespace and
+  returns a `RelayPublication` with `register_track`, `announced`, `closed` and `close`. A connection announces any
+  number of namespaces with one token. A namespace the relay stops soliciting ends only its publication, with
+  `NAMESPACE_ENDED`. The relay does not route a connection's own announcements back to it. Its discovery leaves them
+  out, and the relay refuses a subscribe to one of the connection's own tracks. The connection does not declare MoQ
+  Active Count, so its `namespace_events` loads by the timing rules. No deployed moq-relay declares that option, so a
+  subscriber connection's discovery loads the same way today. A `RelaySession` is not a `RelaySubscriber` instance,
+  because its `close()` is a coroutine. `connect_relay_publisher` and `connect_relay_subscriber` behave as before. On
+  ord.relay.mux.global, two peers each opened one connection, announced two namespaces and subscribed to the other's
+  two tracks. All four tracks delivered 30 of 30 objects in 3 of 3 runs (`mise run python:probe:relay-session`).
+- `caprid-moq-core`: `create_moqt_duplex_session(transport, config)` runs the subscribe and publish drivers on one
+  transport. `MoqtPublishSession` announces several namespaces. `announce()` now adds a namespace instead of
+  replacing the one announced, `withdraw(namespace)` sends NAMESPACE_DONE, and `is_solicited(namespace)` reports
+  whether a solicitation covers one namespace. The session announces each namespace once a track in it is registered.
+  `on_announced` runs once per namespace, `AnnounceEnded` carries the `namespace` it lost, and `TrackBinding` and
+  `SubscribeFailed` carry `track_namespace`. Code that builds them itself must pass it. Code that called `announce()`
+  twice to move to another namespace must `withdraw()` the first. Both drivers' configs take `peer_request_ids`, the
+  set of the peer's request IDs that two drivers on one transport share.
 - `caprid-moq-core`: after a session's `on_closed`, none of its callbacks run, as in the TypeScript SDK (#530). A
   subscribe session that has ended starts no request, and at its end it stops every request stream and data stream it
   was reading, so a fetch reports no entry and a namespace subscription no end after `on_closed`. A request that is

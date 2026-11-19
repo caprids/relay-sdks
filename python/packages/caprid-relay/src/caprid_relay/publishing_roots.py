@@ -506,6 +506,7 @@ class PublishingRoots:
     __slots__ = (
         "_current",
         "_draining",
+        "_hides",
         "_inbox",
         "_leaves",
         "_live_connection",
@@ -527,6 +528,7 @@ class PublishingRoots:
         live_connection: Callable[[CancellationToken], Awaitable[_PublishingRootsConnection | None]],
         current: Callable[[], _PublishingRootsConnection | None],
         on_closed: Callable[[], None],
+        hides: Callable[[tuple[str, ...]], bool],
     ) -> None:
         self._prefix = prefix
         self._on_changed = on_changed
@@ -534,6 +536,11 @@ class PublishingRoots:
         self._live_connection = live_connection
         self._current = current
         self._on_closed = on_closed
+        # Whether a namespace is the supervisor's own publishing, whose announcement is never reported. The relay
+        # hides a connection's own announcements from it, but not those of the connection a rotation is replacing
+        # or bringing up. Withdrawals still count, so a root seen before the supervisor published it leaves when it
+        # is withdrawn.
+        self._hides = hides
         self._phase: _Phase = _Loading()
         self._inbox: deque[_Input] = deque()
         self._draining = False
@@ -611,7 +618,7 @@ class PublishingRoots:
             watch = connection.discovery.watch(
                 self._prefix,
                 DiscoveryWatchHandlers(
-                    on_announced=lambda namespace: self._feed(_Namespace(source, "announced", namespace)),
+                    on_announced=lambda namespace: self._announced(source, namespace),
                     on_unannounced=lambda namespace: self._feed(_Namespace(source, "unannounced", namespace)),
                     on_loaded=lambda: self._feed(_Loaded(source)),
                     on_ended=lambda error: self._feed(_Ended(source, error)),
@@ -635,11 +642,15 @@ class PublishingRoots:
 
         self._opened[source] = _Opened(watch, detach)
         for namespace in watch.namespaces():
-            self._feed(_Namespace(source, "announced", namespace))
+            self._announced(source, namespace)
         if watch.loaded:
             self._feed(_Loaded(source))
         if connection.retiring.cancelled:
             retiring()
+
+    def _announced(self, source: _Source, namespace: tuple[str, ...]) -> None:
+        if not self._hides(namespace):
+            self._feed(_Namespace(source, "announced", namespace))
 
     def _run(self, effect: _Effect) -> None:
         if isinstance(effect, _Open):

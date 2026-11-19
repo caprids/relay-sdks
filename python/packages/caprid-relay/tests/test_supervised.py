@@ -31,7 +31,7 @@ from caprid_relay import (
     SupervisionBackoff,
     WantHandlers,
     WantSwitchedInfo,
-    supervised_publisher,
+    _supervised_track,
 )
 from caprid_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
 from caprid_relay.media import FrameWriter
@@ -149,14 +149,14 @@ async def test_times_an_object_from_the_supervised_call_so_checking_its_argument
     writer = publisher.register_track("video")
     loop = asyncio.get_running_loop()
     checked_at: list[float] = []
-    check = supervised_publisher.object_property_pairs
+    check = _supervised_track.object_property_pairs
 
     def slow_check(properties: object) -> list[KeyValuePair]:
         time.sleep(0.02)  # a large property list takes this long to check
         checked_at.append(loop.time())
         return check(properties)
 
-    monkeypatch.setattr(supervised_publisher, "object_property_pairs", slow_check)
+    monkeypatch.setattr(_supervised_track, "object_property_pairs", slow_check)
     await writer.write(b"\x01")
     await writer.open_group(b"\x02")
     started = p.connections[0].tracks["video"].started

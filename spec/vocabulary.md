@@ -14,8 +14,8 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
-| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | Not built yet (TypeScript first) |
-| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | Not built yet |
+| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | `connect_relay(url, ...)` returns `RelaySession`, with every `RelaySubscriber` method, `publish()`, and an awaitable `close()` |
+| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `register_track()`, `announced`, `closed`, `close()`) |
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
@@ -65,8 +65,8 @@ without a row here is a bug.
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
 | Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` (`ConnectSupervisedPublisherOptions`) returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` |
 | Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` (`ConnectSupervisedSubscriberOptions`) returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` |
-| Open one connection that publishes, subscribes and reconnects, one generation per connection | `connectSupervisedRelay(options)` (`ConnectSupervisedRelayOptions`) returns `SupervisedRelay`: the supervised subscriber's wants and views, `publish()`, `generation`, `onGeneration({ generation })` | Not built yet |
-| Publish a root on every connection of a supervised relay | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `registerTrack()`, `close()`) | Not built yet |
+| Open one connection that publishes, subscribes and reconnects, one generation per connection | `connectSupervisedRelay(options)` (`ConnectSupervisedRelayOptions`) returns `SupervisedRelay`: the supervised subscriber's wants and views, `publish()`, `generation`, `onGeneration({ generation })` | `connect_supervised_relay(url, ...)` returns `SupervisedRelay`, with the supervised subscriber's wants and views, `publish()`, `generation` and an awaitable `close()`. `on_generation(generation)` receives the field itself |
+| Publish a root on every connection of a supervised relay | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `registerTrack()`, `close()`) | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `register_track()`, `close()`) |
 | One supervised publisher connection and the namespace it serves | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `onGeneration(info)` | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `on_generation(info)` |
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
@@ -110,9 +110,12 @@ always seemed to. The role-named entry points stay: `connectRelaySubscriber` and
 
 `RelaySession` is the result type: one MOQT session, both directions. It extends `RelaySubscriber`,
 so anything that takes a subscriber (a supervised subscriber's connection, a player's track source)
-takes it unchanged. `RelayPublication` is one namespace the connection announces, with the tracks it
-serves. It is not a "publisher", which in this vocabulary is a connection, nor an "announcement",
-because it also serves the tracks and owns their writers. Its options type is
+takes it unchanged. In Python the two share every subscriber method and property, but neither
+subclasses the other. A session's `close()` is a coroutine, because it waits for its publications'
+groups as `RelayPublisher.close()` does. `RelaySubscriber.close()` returns at once, and a type
+checker refuses a coroutine that overrides a plain method. `RelayPublication` is one namespace the
+connection announces, with the tracks it serves. It is not a "publisher", which in this vocabulary
+is a connection, nor an "announcement", because it also serves the tracks and owns their writers. Its options type is
 `ConnectRelaySessionOptions`, because `ConnectRelayOptions` already names what every connection
 takes.
 

@@ -12,8 +12,9 @@ replacement opens while the current subscription keeps delivering, and ``on_swit
 cutover. Before the connection's credential expires, the supervisor rotates to a new connection the
 same way (issue #261): every want's subscription moves to it make-before-break, and a want that
 keeps its target sees no break and no repeat. Publishing-roots views (:mod:`caprid_relay.publishing_roots`)
-follow the roots publishing under a prefix from the same per-connection discovery. See ``spec/behavior.md``, "Supervised
-connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
+follow the roots publishing under a prefix from the same per-connection discovery. It is a view over
+the one supervision loop (``_supervisor.py``) whose connections each subscribe. See
+``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
 
 from __future__ import annotations
@@ -41,7 +42,6 @@ from moq_core import (
 
 from ._awaitable import RelayAwaitable
 from ._discovery import (
-    DISCOVERY_CAPACITY,
     DISCOVERY_LINGER,
     DiscoveryIndex,
     DiscoveryWatchHandlers,
@@ -60,7 +60,6 @@ from ._subscription import (
 from ._supervision import (
     RECONNECT_BACKOFF,
     RESUBSCRIBE_BACKOFF,
-    ROTATION_OVERLAP,
     SupervisedStatus,
     SupervisionBackoff,
     _Backoff,
@@ -68,14 +67,11 @@ from ._supervision import (
     backoff_options,
     is_fresh_namespace_rejection,
     is_permanent_request_error,
-    is_setup_failure,
     on_cancel,
     rotate_before_option,
-    rotation_deadline,
-    rotation_due,
-    supervisor_closed,
     wait_any,
 )
+from ._supervisor import SupervisedConnection, Supervisor, _Connection
 from ._validation import namespace_fields, track_name
 from ._write_slot import _observe
 from .cancellation import CancellationToken
@@ -155,43 +151,6 @@ class WantHandlers:
     :class:`SubscriptionRequestError`, or discovery refusing the root."""
 
 
-@dataclass(slots=True, eq=False)
-class _Connection:
-    """One live subscriber connection and the discovery every want on it shares."""
-
-    subscriber: RelaySubscriber
-    ended: CancellationToken
-    """Cancelled when this connection ends."""
-    discovery: DiscoveryIndex
-    retiring: CancellationToken = field(default_factory=CancellationToken)
-    """Cancelled when a rotation replaced this connection: its wants move to the new one."""
-    wakes: dict[tuple[str, ...], _NamespaceWake] = field(default_factory=dict)
-    """One watch per fixed namespace a want waits on to be announced again, shared by every want on it."""
-    holds: int = 0
-    """Wants with a subscription and publishing-roots views with a discovery still on this connection; a
-    rotation closes it once none are left."""
-    idle: asyncio.Future[None] | None = None
-    """Set by a rotation; resolved whenever ``holds`` drops to zero."""
-    rotate_at: float | None = None
-    """When it is due to rotate, on the loop's clock; ``None`` for an unknown expiry."""
-
-    def hold(self) -> Callable[[], None]:
-        """Count a use of this connection until the returned release runs."""
-        self.holds += 1
-        released = False
-
-        def release() -> None:
-            nonlocal released
-            if released:
-                return
-            released = True
-            self.holds -= 1
-            if self.holds == 0 and self.idle is not None and not self.idle.done():
-                self.idle.set_result(None)
-
-        return release
-
-
 @dataclass(frozen=True, slots=True)
 class _WantOptions:
     namespace: tuple[str, ...]
@@ -259,44 +218,150 @@ def _guarded(handlers: WantHandlers | PublishingRootsHandlers) -> dict[str, Call
     return guarded
 
 
-@dataclass(slots=True, eq=False)
-class _State:
-    wants: dict[str, _Want] = field(default_factory=dict)
-    views: set[PublishingRoots] = field(default_factory=set)
-    status: SupervisedStatus = "connecting"
-    stopped: bool = False
-    current: _Connection | None = None
-    retiring: _Connection | None = None
-    """The connection a rotation is replacing, while its wants move off it."""
-    rotate_requested: bool = False
-    """Set by ``rotate()`` while a connection is up, and consumed by the rotation that answers it: the next one
-    to start, or one whose replacement is still connecting or being discarded."""
-    wake: asyncio.Future[None] | None = None
-    """Wakes a serve loop waiting for its rotation; replaced for each wait."""
-    waiters: list[asyncio.Future[None]] = field(default_factory=list)
+class _WantSurface:
+    """The wants and publishing-roots views a supervisor's connections carry.
 
-    def wake_waiters(self) -> None:
-        waiters, self.waiters = self.waiters, []
-        for waiter in waiters:
-            if not waiter.done():
-                waiter.set_result(None)
+    Each moves with a rotation and comes back on the next connection. The supervisor's stop cancels them all.
+    """
+
+    __slots__ = ("_supervisor", "_views", "_wants")
+
+    def __init__(self, supervisor: Supervisor) -> None:
+        self._supervisor = supervisor
+        self._wants: dict[str, _Want] = {}
+        self._views: set[PublishingRoots] = set()
+        supervisor.on_stop(self._cancel_all)
+
+    def want(
+        self,
+        key: str,
+        namespace: Sequence[str],
+        track: str,
+        handlers: WantHandlers | None = None,
+        *,
+        parameters: MessageParameters | None = None,
+        generations: bool = False,
+        stale_after: float | None = None,
+        retry: SupervisionBackoff | None = None,
+        until: Until = "first-object",
+        drain: float = 0.0,
+    ) -> None:
+        if not isinstance(key, str):
+            raise TypeError("want key must be a string")
+        if handlers is None:
+            handlers = WantHandlers()
+        if not isinstance(handlers, WantHandlers):
+            raise TypeError("want handlers must be WantHandlers")
+        safe_handlers = _guarded(handlers)
+        fields_ = namespace_fields(namespace)
+        if not isinstance(generations, bool):
+            raise TypeError("generations must be a bool")
+        if generations:
+            namespace_fields((*fields_, "x"))
+        name = track_name(track)
+        if parameters is not None and not isinstance(parameters, MessageParameters):
+            raise TypeError("parameters must be MessageParameters")
+        if stale_after is not None:
+            validate_timeout("stale_after", stale_after)
+        retry_backoff = backoff_options("retry", retry, RESUBSCRIBE_BACKOFF)
+        predicate = _until_predicate(until)
+        _check_drain(drain)
+        supervisor = self._supervisor
+        if supervisor.stopped:
+            raise supervisor.closed_error()
+
+        # A snapshot, so the caller's later changes to the parameters neither reach the wire nor the identity.
+        options = _WantOptions(fields_, name, generations, stale_after, deepcopy(parameters))
+        existing = self._wants.get(key)
+        if existing is not None and (existing.options.namespace, existing.options.generations) == (
+            fields_,
+            generations,
+        ):
+            existing.handlers = safe_handlers
+            existing.retry = retry_backoff
+            existing.until = predicate
+            existing.drain = float(drain)
+            if existing.options == options:
+                return
+            existing.options = replace(
+                existing.options, track=name, parameters=options.parameters, stale_after=stale_after
+            )
+            existing.changed()
+            return
+        if existing is not None:
+            self._forget(key, existing)
+        want = _Want(options, safe_handlers, retry_backoff, predicate, float(drain))
+        self._wants[key] = want
+        task = asyncio.ensure_future(
+            _run_want(want, supervisor.live_connection, lambda: supervisor.current, lambda: self._forget(key, want))
+        )
+        _observe(task)
+
+    def unwant(self, key: str) -> None:
+        want = self._wants.get(key)
+        if want is not None:
+            self._forget(key, want)
+
+    def catch_up(self, key: str) -> None:
+        if not isinstance(key, str):
+            raise TypeError("want key must be a string")
+        want = self._wants.get(key)
+        if want is not None and want.catch_up is not None:
+            want.catch_up()
+
+    def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
+        if not isinstance(handlers, PublishingRootsHandlers):
+            raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
+        guarded = _guarded(handlers)
+        on_changed = guarded.get("on_changed")
+        if on_changed is None:
+            raise TypeError("on_changed must be callable")
+        fields_ = namespace_fields(prefix)
+        namespace_fields((*fields_, "x", "x"))
+        supervisor = self._supervisor
+        if supervisor.stopped:
+            raise supervisor.closed_error()
+        view = PublishingRoots(
+            fields_,
+            on_changed,
+            guarded.get("on_error"),
+            live_connection=supervisor.live_connection,
+            current=lambda: supervisor.current,
+            on_closed=lambda: self._views.discard(view),
+            hides=supervisor.owns_namespace,
+        )
+        self._views.add(view)
+        return view
+
+    def _forget(self, key: str, want: _Want) -> None:
+        want.controller.cancel()
+        if self._wants.get(key) is want:
+            del self._wants[key]
+
+    def _cancel_all(self) -> None:
+        wants = list(self._wants.values())
+        self._wants.clear()
+        for want in wants:
+            want.controller.cancel()
+        for view in list(self._views):
+            view.close()
 
 
 class SupervisedSubscriber:
     """A subscriber that reconnects and keeps wanted tracks subscribed. Create one with
     :func:`connect_supervised_subscriber`."""
 
-    __slots__ = ("_close", "_closed", "_state")
+    __slots__ = ("_closed", "_supervisor", "_wants")
 
-    def __init__(self, state: _State, closed: asyncio.Future[Closed], close: Callable[[], None]) -> None:
-        self._state = state
-        self._closed = RelayAwaitable(closed)
-        self._close = close
+    def __init__(self, supervisor: Supervisor) -> None:
+        self._supervisor = supervisor
+        self._wants = _WantSurface(supervisor)
+        self._closed = RelayAwaitable(supervisor.closed)
 
     @property
     def status(self) -> SupervisedStatus:
         """Where the supervisor stands; see :data:`SupervisedStatus`."""
-        return self._state.status
+        return self._supervisor.status
 
     @property
     def closed(self) -> RelayAwaitable[Closed]:
@@ -339,62 +404,22 @@ class SupervisedSubscriber:
         track or parameters moves the subscription. Another namespace or ``generations`` replaces the
         want. Arguments are checked at once.
         """
-        if not isinstance(key, str):
-            raise TypeError("want key must be a string")
-        if handlers is None:
-            handlers = WantHandlers()
-        if not isinstance(handlers, WantHandlers):
-            raise TypeError("want handlers must be WantHandlers")
-        safe_handlers = _guarded(handlers)
-        fields_ = namespace_fields(namespace)
-        if not isinstance(generations, bool):
-            raise TypeError("generations must be a bool")
-        if generations:
-            namespace_fields((*fields_, "x"))
-        name = track_name(track)
-        if parameters is not None and not isinstance(parameters, MessageParameters):
-            raise TypeError("parameters must be MessageParameters")
-        if stale_after is not None:
-            validate_timeout("stale_after", stale_after)
-        retry_backoff = backoff_options("retry", retry, RESUBSCRIBE_BACKOFF)
-        predicate = _until_predicate(until)
-        _check_drain(drain)
-        state = self._state
-        if state.stopped:
-            raise supervisor_closed("subscriber")
-
-        # A snapshot, so the caller's later changes to the parameters neither reach the wire nor the identity.
-        options = _WantOptions(fields_, name, generations, stale_after, deepcopy(parameters))
-        existing = state.wants.get(key)
-        if existing is not None and (existing.options.namespace, existing.options.generations) == (
-            fields_,
-            generations,
-        ):
-            existing.handlers = safe_handlers
-            existing.retry = retry_backoff
-            existing.until = predicate
-            existing.drain = float(drain)
-            if existing.options == options:
-                return
-            existing.options = replace(
-                existing.options, track=name, parameters=options.parameters, stale_after=stale_after
-            )
-            existing.changed()
-            return
-        if existing is not None:
-            self._forget(key, existing)
-        want = _Want(options, safe_handlers, retry_backoff, predicate, float(drain))
-        state.wants[key] = want
-        task = asyncio.ensure_future(
-            _run_want(want, self._live_connection, lambda: state.current, lambda: self._forget(key, want))
+        self._wants.want(
+            key,
+            namespace,
+            track,
+            handlers,
+            parameters=parameters,
+            generations=generations,
+            stale_after=stale_after,
+            retry=retry,
+            until=until,
+            drain=drain,
         )
-        _observe(task)
 
     def unwant(self, key: str) -> None:
         """Cancel a want's subscription and forget it. Unknown keys are ignored."""
-        want = self._state.wants.get(key)
-        if want is not None:
-            self._forget(key, want)
+        self._wants.unwant(key)
 
     def catch_up(self, key: str) -> None:
         """Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use.
@@ -406,11 +431,7 @@ class SupervisedSubscriber:
         want's ``retry`` backoff, so a link too slow for the track cannot make it spin. Ignored for an unknown key and
         while no subscription is accepted.
         """
-        if not isinstance(key, str):
-            raise TypeError("want key must be a string")
-        want = self._state.wants.get(key)
-        if want is not None and want.catch_up is not None:
-            want.catch_up()
+        self._wants.catch_up(key)
 
     def rotate(self) -> None:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
@@ -422,12 +443,7 @@ class SupervisedSubscriber:
         delivered is not delivered again: nothing is lost or repeated. The old connection closes once
         every want has moved, after 10 seconds at most. A no-op while no connection is up.
         """
-        state = self._state
-        if state.stopped or state.current is None:
-            return
-        state.rotate_requested = True
-        if state.wake is not None and not state.wake.done():
-            state.wake.set_result(None)
+        self._supervisor.rotate()
 
     def publishing_roots(self, prefix: Sequence[str], handlers: PublishingRootsHandlers) -> PublishingRoots:
         """Follow the roots that are publishing now under ``prefix``, across reconnects and rotations, with no
@@ -444,32 +460,12 @@ class SupervisedSubscriber:
         at once; handlers run from a later turn on. Raises :class:`RelayError` with code ``CLOSED`` when the
         subscriber is already closed. See ``spec/behavior.md``, "Publishing roots".
         """
-        if not isinstance(handlers, PublishingRootsHandlers):
-            raise TypeError("publishing_roots handlers must be PublishingRootsHandlers")
-        guarded = _guarded(handlers)
-        on_changed = guarded.get("on_changed")
-        if on_changed is None:
-            raise TypeError("on_changed must be callable")
-        fields_ = namespace_fields(prefix)
-        namespace_fields((*fields_, "x", "x"))
-        state = self._state
-        if state.stopped:
-            raise supervisor_closed("subscriber")
-        view = PublishingRoots(
-            fields_,
-            on_changed,
-            guarded.get("on_error"),
-            live_connection=self._live_connection,
-            current=lambda: state.current,
-            on_closed=lambda: state.views.discard(view),
-        )
-        state.views.add(view)
-        return view
+        return self._wants.publishing_roots(prefix, handlers)
 
     def close(self) -> None:
         """Stop reconnecting, cancel every want, close every publishing-roots view without calling its handlers,
         and close the connection. Idempotent."""
-        self._close()
+        self._supervisor.stop()
 
     async def __aenter__(self) -> Self:
         return self
@@ -478,26 +474,6 @@ class SupervisedSubscriber:
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         self.close()
-
-    def _forget(self, key: str, want: _Want) -> None:
-        want.controller.cancel()
-        if self._state.wants.get(key) is want:
-            del self._state.wants[key]
-
-    async def _live_connection(self, scope: CancellationToken) -> _Connection | None:
-        """The live connection, waiting for one while reconnecting; ``None`` once ``scope`` is cancelled."""
-        state = self._state
-        while not scope.cancelled and not state.stopped:
-            if state.current is not None and not state.current.ended.cancelled:
-                return state.current
-            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            state.waiters.append(waiter)
-            try:
-                await wait_any([scope], settles=[waiter])
-            finally:
-                if waiter in state.waiters:
-                    state.waiters.remove(waiter)
-        return None
 
 
 async def connect_supervised_subscriber(
@@ -564,287 +540,23 @@ async def _supervise_relay_subscriber(
     if cancellation is not None:
         cancellation.throw_if_cancelled()
 
-    loop = asyncio.get_running_loop()
-    state = _State()
-    closed: asyncio.Future[Closed] = loop.create_future()
-    lifetime = CancellationToken()
-    # The connection attempt in progress only: a live connection is closed cleanly on close().
-    attempt_in_progress: CancellationToken | None = None
-    first: asyncio.Future[None] | None = loop.create_future()
-
-    def set_status(status: SupervisedStatus, error: BaseException | None = None) -> None:
-        if state.status == status and error is None:
-            return
-        state.status = status
-        if on_status is not None:
-            on_status(status, error)
-
-    def stop(error: BaseException | None) -> None:
-        nonlocal first
-        if state.stopped:
-            return
-        state.stopped = True
-        reason = error if error is not None else supervisor_closed("subscriber")
-        lifetime.cancel(reason)
-        if attempt_in_progress is not None:
-            attempt_in_progress.cancel(reason)
-        # A stop while the first connection is still being made fails the call that is waiting for it.
-        if first is not None and not first.done():
-            first.set_exception(reason)
-        first = None
-        wants = list(state.wants.values())
-        state.wants.clear()
-        for want in wants:
-            want.controller.cancel()
-        for view in list(state.views):
-            view.close()
-        if state.current is not None:
-            state.current.subscriber.close()
-        state.current = None
-        if state.retiring is not None:
-            state.retiring.subscriber.close()
-        state.retiring = None
-        state.wake_waiters()
-        try:
-            set_status("closed")
-        finally:
-            if not closed.done():
-                closed.set_result(Closed(error))
-
-    def on_cancelled(reason: BaseException) -> None:
-        stop(reason)
-
-    if cancellation is not None:
-        cancellation.add_callback(on_cancelled)
-
-    async def connect_once() -> _Connection | None:
-        """Open one connection, or ``None`` if the supervisor stopped first. Raises the attempt's failure."""
-        nonlocal attempt_in_progress
-        attempt_in_progress = CancellationToken()
-        try:
-            subscriber = await connect(attempt_in_progress)
-        finally:
-            attempt_in_progress = None
-        if state.stopped:
-            subscriber.close()
-            return None
-        live = _Connection(
-            subscriber,
-            CancellationToken(),
-            DiscoveryIndex(lambda prefix: subscriber.namespace_events(prefix, capacity=DISCOVERY_CAPACITY)),
-            rotate_at=rotation_deadline(subscriber.expires_at, rotate_margin),
+    async def connect_once(attempt: CancellationToken, _generation: str) -> SupervisedConnection:
+        subscriber = await connect(attempt)
+        return SupervisedConnection(
+            closed=subscriber.closed, expires_at=subscriber.expires_at, close=subscriber.close, subscriber=subscriber
         )
-        # Cancelled the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
-        subscriber.closed.add_done_callback(lambda _: live.ended.cancel())
-        return live
 
-    def settle_ended(live: _Connection) -> None:
-        """The connection ended: release what it ran and stop anything still waiting on it."""
-        live.ended.cancel()
-        live.discovery.close()
-
-    async def rotate_from(old: _Connection, manual: Callable[[], bool]) -> _Connection | None:
-        """Open the connection that replaces ``old``, move every want to it, and close ``old`` once they moved.
-
-        ``None`` when ``old`` ended or the supervisor stopped before a replacement was up, or when an
-        automatic rotation found no fresher credential.
-        """
-        failures = 0
-        nxt: _Connection | None = None
-
-        # The live connection ending while its replacement is still connecting is a reconnect: report it at once.
-        def on_old_closed(done: asyncio.Future[Closed]) -> None:
-            if state.stopped or state.current is not old:
-                return
-            state.current = None
-            try:
-                set_status("reconnecting", done.result().error)
-            except Exception as thrown:
-                with contextlib.suppress(Exception):
-                    # A raising on_status while reporting `closed`: `closed` is settled either way.
-                    stop(thrown)
-
-        old.subscriber.closed.add_done_callback(on_old_closed)
-        # Checked on the future itself too: the callback that cancels `ended` runs a turn later, and a connect that
-        # fails without suspending would never let it.
-        while not state.stopped and not old.ended.cancelled and not old.subscriber.closed.done():
-            try:
-                nxt = await connect_once()
-                break
-            except Exception:
-                if state.stopped:
-                    return None
-                # The live connection keeps serving; try again after the backoff unless it ends first.
-                await wait_any([lifetime], settles=[old.subscriber.closed], limit=backoff_delay(failures, backoff))
-                failures += 1
-        if nxt is None:
-            return None
-        # close() may have run while the helper's result was on its way here: it could not see this connection.
-        if state.stopped:
-            nxt.subscriber.close()
-            return None
-        # Consulted whatever happened to the old connection: a queued rotate() is answered by this replacement.
-        asked = manual()
-        if not old.ended.cancelled and not old.subscriber.closed.done() and not asked:
-            # A credential that expires no later than the live one replaces nothing: the relay would end both together.
-            was, now = old.subscriber.expires_at, nxt.subscriber.expires_at
-            if was is not None and (now is None or now <= was):
-                nxt.subscriber.close()
-                return None
-        state.current = nxt
-        state.retiring = old
-        set_status("live")
-        state.wake_waiters()
-        old.idle = loop.create_future()
-        # Every want on the old connection ends its attempt there and subscribes on the new one.
-        old.retiring.cancel()
-        # A want's rotation runs in the turn `retiring` is cancelled and may already have released the last hold.
-        if old.holds == 0 and not old.idle.done():
-            old.idle.set_result(None)
-        # The replacement ending cuts the overlap short too: the wants on it need the next connection now. So
-        # does its own rotation falling due, for a credential shorter than the overlap.
-        next_due = asyncio.ensure_future(rotation_due(nxt.rotate_at, loop.create_future()))
-        _observe(next_due)
-        try:
-            await wait_any(
-                [lifetime, old.ended, nxt.ended],
-                settles=[old.idle, old.subscriber.closed, next_due],
-                limit=ROTATION_OVERLAP,
-            )
-        finally:
-            next_due.cancel()
-        if state.retiring is old:
-            state.retiring = None
-        old.subscriber.close()
-        settle_ended(old)
-        return nxt
-
-    async def serve(live: _Connection) -> Closed | _Connection:
-        """Serve ``live`` until it ends (its ``Closed``), or until a rotation replaced it (the new connection)."""
-        # Cleared once an automatic rotation found no fresher credential: only rotate() tries again.
-        automatic = True
-        while True:
-            wake: asyncio.Future[None] = loop.create_future()
-            state.wake = wake
-            if state.rotate_requested:
-                wake.set_result(None)
-            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, wake))
-            _observe(due)
-            try:
-                await wait_any([lifetime], settles=[live.subscriber.closed, due])
-                if live.subscriber.closed.done() or state.stopped:
-                    return await live.subscriber.closed
-                # A rotate() before the replacement is current makes this rotation a manual one: it takes the
-                # replacement.
-                manual = False
-
-                def is_manual() -> bool:
-                    nonlocal manual
-                    if state.rotate_requested:
-                        state.rotate_requested = False
-                        manual = True
-                    return manual
-
-                is_manual()
-                nxt = await rotate_from(live, is_manual)
-                if nxt is not None:
-                    return nxt
-                if live.ended.cancelled or state.stopped:
-                    return await live.subscriber.closed
-                if not manual:
-                    automatic = False
-            finally:
-                due.cancel()
-                if state.wake is wake:
-                    state.wake = None
-
-    async def run() -> None:
-        nonlocal first
-        attempt = 0
-        # A connection a rotation already opened and moved the wants to.
-        nxt: _Connection | None = None
-        while not state.stopped:
-            live, nxt = nxt, None
-            if live is None:
-                try:
-                    live = await connect_once()
-                except Exception as error:
-                    if state.stopped:
-                        return
-                    if first is not None and is_setup_failure(error):
-                        first.set_exception(error)
-                        first = None
-                        stop(error)
-                        return
-                    set_status("reconnecting", error)
-                    await wait_any([lifetime], limit=backoff_delay(attempt, backoff))
-                    attempt += 1
-                    continue
-                if live is None:
-                    return
-                # close() may have run while the helper's result was on its way here: it could not see this connection.
-                if state.stopped:
-                    live.subscriber.close()
-                    return
-                state.current = live
-                set_status("live")
-                if first is not None:
-                    first.set_result(None)
-                    first = None
-                state.wake_waiters()
-            up_at = loop.time()
-
-            outcome = await serve(live)
-            if isinstance(outcome, _Connection):
-                if state.stopped:
-                    return
-                nxt = outcome
-                attempt = 0
-                continue
-            settle_ended(live)
-            if state.stopped:
-                return
-            state.current = None
-            # Already reported if the connection ended while a rotation's replacement was connecting.
-            if state.status != "reconnecting":
-                set_status("reconnecting", outcome.error)
-            if loop.time() - up_at > backoff.max_delay:
-                attempt = 0
-            await wait_any([lifetime], limit=backoff_delay(attempt, backoff))
-            attempt += 1
-
-    async def supervise() -> None:
-        try:
-            await run()
-        except Exception as error:
-            # An application callback (on_status, on_generation) raised: stop rather than leave the
-            # supervisor neither reconnecting nor closed, and fail a caller still waiting to connect.
-            stop(error)
-
-    runner = asyncio.ensure_future(supervise())
-    _observe(runner)
-    started = first
-    assert started is not None
-    # A caller that stops waiting detaches from the shield, which then no longer observes the result.
-    _observe(started)
-    try:
-        await asyncio.shield(started)
-    except asyncio.CancelledError:
-        if cancellation is not None:
-            cancellation.remove_callback(on_cancelled)
-        stop(None)
-        raise
-    except BaseException:
-        if cancellation is not None:
-            cancellation.remove_callback(on_cancelled)
-        raise
-
-    def close() -> None:
-        if cancellation is not None:
-            cancellation.remove_callback(on_cancelled)
-        stop(None)
-
-    return SupervisedSubscriber(state, closed, close)
+    supervisor = Supervisor(
+        connect_once,
+        name="subscriber",
+        backoff=backoff,
+        rotate_before=rotate_margin,
+        cancellation=cancellation,
+        on_status=on_status,
+    )
+    subscriber = SupervisedSubscriber(supervisor)
+    await supervisor.start()
+    return subscriber
 
 
 @dataclass(frozen=True, slots=True)

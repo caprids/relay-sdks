@@ -311,6 +311,12 @@ class MoqtSessionConfig:
     without this a relay that accepts the stream and then goes quiet leaves the request pending
     forever.
     """
+    peer_request_ids: set[int] | None = None
+    """The peer's consumed Request IDs (§6.4.2.1). With ``None``, the session keeps a set of its own.
+
+    Sessions that share one transport pass the same set, so an ID one of them consumed is a reuse to the
+    other. :func:`moq_core.create_moqt_duplex_session` passes one.
+    """
     callbacks: MoqtSessionCallbacks = field(default_factory=MoqtSessionCallbacks)
 
 
@@ -582,7 +588,9 @@ class MoqtSession:
 
         self._next_request_id = 0  # client request IDs: even, starting at 0 (§6.4.2.1)
         # Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§6.4.2.1).
-        self._peer_request_ids: set[int] = set()
+        self._peer_request_ids: set[int] = (
+            self._config.peer_request_ids if self._config.peer_request_ids is not None else set()
+        )
         self._subscriptions: dict[int, _SubscriptionRecord] = {}
         self._fetches: dict[int, _FetchRecord] = {}
         self._track_statuses: dict[int, _TrackStatusRecord] = {}
