@@ -722,8 +722,8 @@ The iterator owns the request, never the connection.
 
 The primitives above never reconnect or retry. Applications can opt into a supervision layer
 built only on them: `connectSupervisedPublisher` / `connect_supervised_publisher` and
-`connectSupervisedSubscriber` / `connect_supervised_subscriber`, and in TypeScript
-`connectSupervisedRelay`, which does both on one connection ([supervised relay](#supervised-relay)).
+`connectSupervisedSubscriber` / `connect_supervised_subscriber`, and `connectSupervisedRelay` /
+`connect_supervised_relay`, which does both on one connection ([supervised relay](#supervised-relay)).
 It owns the recovery policy in
 [publisher recovery](publisher-recovery.md), so live applications don't each write it again. Neither supervisor changes what
 the primitives do. Python gives the backoff bounds and `stale_after` in seconds, and its want
@@ -967,7 +967,9 @@ taken over.
 
 `connectSupervisedRelay` supervises one [connection that publishes and subscribes](#one-connection-that-publishes-and-subscribes).
 It has the supervised subscriber's wants and publishing-roots views, and `publish(root)` for any
-number of roots. TypeScript only so far.
+number of roots. Python's `connect_supervised_relay` passes `on_generation` the generation field
+itself, where TypeScript's `onGeneration` takes `{ generation }`, and its `close()` is a coroutine,
+as `RelaySession.close()` is.
 
 - **A generation is a connection.** Each connection gets one generation field, chosen as for a
   supervised publisher, and serves every published root followed by that field. All of a client's
@@ -1004,6 +1006,10 @@ tracks with `generations: true`. Halfway through an 8 s run, A rotated. Both of 
 the new generation together; A held 2 connections in all and B 1; B moved to A's new generation by
 a switch, with no restart, and received 39 to 40 objects on each track; and neither roster listed
 its own root. Before the SDK left its own roots out, A's roster listed A during the overlap.
+The Python SDK over aioquic (`python/scripts/probe_supervised_relay.py`, the same run) passed the
+same eight checks in 3 of 3 runs on 2026-11-19: B received 40 objects on each of A's tracks, 19 to
+20 of them before the rotation, with one switch and no restart per want, and A received 39 on each
+of B's.
 
 ### Publishing roots
 

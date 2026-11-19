@@ -6,6 +6,22 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: `connect_supervised_relay(url, ...)` supervises one connection that publishes and subscribes, as in
+  the TypeScript SDK (#529). It takes `connect_relay`'s options plus `reconnect`, `rotate_before`, `on_generation` and
+  `on_status`, and returns a `SupervisedRelay`: the supervised subscriber's `want`, `unwant`, `catch_up` and
+  `publishing_roots`, plus `publish(root)`, which returns a `SupervisedPublication` (`root`, `namespace`,
+  `register_track`, `close`) whose track writers outlive the connections, `generation`, `rotate()`, and an awaitable
+  `close()`. Each connection is one generation, and every root is served as the root followed by its field, so a
+  reconnect or rotation moves every root, track and want together. A root the relay stops soliciting replaces the
+  whole connection. `publishing_roots` never reports the relay's own roots. `on_generation` receives the generation
+  field itself, where TypeScript passes `{ generation }`. On ord, two peers with two roots each, following each
+  other's roots and wanting each other's tracks with `generations=True`, passed all eight checks of
+  `mise run python:probe:supervised-relay` in 3 of 3 runs, with one peer rotating halfway.
+- `caprid-relay`: the supervised publisher and subscriber now run on one supervision loop, which the supervised relay
+  shares, as in the TypeScript SDK. Their API is unchanged. Some timing at the edges changed: `close()` and a
+  cancellation retire every track and close the open connections in the same turn, and a supervised subscriber's
+  `close()` reports `closed` before it returns. A write between connections raises `RECONNECTING` with the message
+  "The supervisor is between connections". Nothing to change in an application.
 - `caprid-relay`: `connect_relay(url, ...)` opens one connection that publishes and subscribes, as in the TypeScript
   SDK (#525). It takes `connect_relay_subscriber`'s options and returns a `RelaySession`. A `RelaySession` has every
   `RelaySubscriber` method and property and an awaitable `close()`. Its `publish(namespace)` announces a namespace and

@@ -533,8 +533,8 @@ so later assignments to the handler object do not change that subscription.
 
 ## Stay connected: supervised connections
 
-`connect_relay_publisher` and `connect_relay_subscriber` never reconnect or resubscribe. A live
-application that has to survive network loss can use the supervisors instead. They take the same
+`connect_relay_publisher`, `connect_relay_subscriber` and `connect_relay` never reconnect or resubscribe. A
+live application that has to survive network loss can use the supervisors instead. They take the same
 connection options and return once their first connection is up. With no `url`, every later
 connection dials the endpoint the first one rooted at its token's root, so a later token that does
 not grant that path fails with `UNAUTHORIZED` rather than moving the connection.
@@ -586,7 +586,7 @@ never silent while live. With `generations=True`, it discovers the publisher's r
 newest generation, moving as soon as a newer one is announced, with no application channel. A
 rejection that waiting does not fix, such as bad credentials or a malformed request, reaches
 `on_error`, and the want stops. To change the backoff bounds, pass
-`SupervisionBackoff(initial_delay=..., max_delay=...)` as `reconnect=` to either supervisor or as
+`SupervisionBackoff(initial_delay=..., max_delay=...)` as `reconnect=` to any supervisor or as
 `retry=` to a want. See the [supervised contract](../spec/behavior.md#supervised-connections).
 
 A move to a newer generation is make-before-break, as with `switch_to`. The old subscription keeps
@@ -613,7 +613,7 @@ numbers its own groups. Wanting the key again with only `until`, `drain`, `stale
 the handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on
 or off, replaces the want.
 
-Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
+The supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
 session never reaches the relay's deadline. `rotate_before` seconds (default 60) before `expires_at`,
 they call `get_token` again and open the replacement while the old connection still serves. The
 publisher's next generation is announced, each track moves to it once viewers subscribe there, and
@@ -1125,6 +1125,36 @@ must grant every namespace the connection publishes and every one it subscribes 
   `RelayPublisher.close()` does. A `RelaySession` has every `RelaySubscriber` method and property, but
   it is not a `RelaySubscriber` instance.
 
+`connect_supervised_relay` does the same and reconnects. Each connection is one generation, and every
+root you publish is served as the root followed by that generation's field, so all of a client's
+namespaces move to a new connection together:
+
+```python
+from caprid_relay import PublishingRootsHandlers, WantHandlers, connect_supervised_relay
+
+relay = await connect_supervised_relay(get_token=get_token, on_status=lambda status, error: show(status))
+me = relay.publish(["room", "p", my_id])  # served as room/p/<my_id>/<generation>
+video = me.register_track("video")  # the writer outlives the connections
+
+
+def on_changed(change):
+    # Your own root is not reported: the relay never routes a connection's own announcements back to it.
+    for root in change.added:
+        relay.want(f"video/{root.id}", root.namespace, "video", WantHandlers(on_object=render), generations=True)
+    for root in change.removed:
+        relay.unwant(f"video/{root.id}")
+
+
+relay.publishing_roots(["room", "p"], PublishingRootsHandlers(on_changed=on_changed))
+```
+
+It has every `want()` and `publishing_roots()` feature of the supervised subscriber, and the track
+writers of the supervised publisher. If the relay stops soliciting one of your roots, the whole
+connection is replaced, so every root moves to the next generation together. `relay.generation` is the
+live connection's field, `on_generation` receives it as each connection comes up, and `await
+relay.close()` drains the publications' groups as `RelaySession.close()` does. See the
+[supervised relay contract](../spec/behavior.md#supervised-relay).
+
 ### Advanced media groups
 
 A media track needs more than one object per group. LOC and MSF map one GOP to one MOQT group whose
@@ -1399,7 +1429,7 @@ Branch on `code` and `phase`, not on message wording. SDK errors use these stabl
 | `UPDATE_QUEUE_FULL` | Eight updates already wait for the relay to accept the subscription. Wait for `subscribed` before updating again. |
 | `PREFIX_OVERLAP` | `namespace_events` refused a prefix that equals, contains, or falls under one this connection already discovers. Nothing was sent. Widen one iterator's prefix and filter, or use a second connection. |
 | `GOAWAY` | The relay asked the client to migrate. Open a replacement connection. |
-| `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
+| `RECONNECTING` | A supervised publisher or relay had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and the connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | No transport is available in this runtime. In TypeScript, supply a transport where browser WebTransport is missing. In Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed. |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR`. |
@@ -1585,6 +1615,7 @@ The observable behavior is the same. The spelling follows Python conventions:
 | Browser `WebTransport`, or `@caprid/relay-quic` on Node | aioquic native QUIC client (`caprid_relay.quic.connect_quic`) |
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
+| `connectSupervisedRelay({ ..., onGeneration })` with `onGeneration({ generation })`; `relay.close()` returns a promise | `connect_supervised_relay(url, ..., on_generation=...)` with `on_generation(generation)`, the field itself; `await relay.close()` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
 | `subscriber.publishingRoots({ prefix }, { onChanged, onError })`; `present` is a `Map` by id | `subscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`; `present` is a tuple of `PublishingRoot`, and `on_changed` is required |
 | `publishPresence`, `createPresenceView` in `@caprid/relay/media` | No helper. Read the `presence` track with a want ([recipe](#presence-read-the-documents-with-a-want)). |
