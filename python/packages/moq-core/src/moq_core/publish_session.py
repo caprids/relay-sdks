@@ -188,8 +188,8 @@ class MoqtPublishSessionCallbacks:
     """The session ended: transport closed, or a fatal protocol error.
 
     It is the last callback. From ``close()`` or ``destroy()`` until it runs, the session takes no new work and reports
-    only ends (``on_subscribe_end``, an ``on_track_binding`` with no alias): requests are refused with GOING_AWAY, and
-    a GOAWAY, an update or an announce is not reported.
+    only ends (``on_subscribe_end``, an ``on_track_binding`` with no alias): SUBSCRIBE, TRACK_STATUS and
+    SUBSCRIBE_NAMESPACE are refused with GOING_AWAY, and a GOAWAY, an update or an announce is not reported.
     """
 
 
