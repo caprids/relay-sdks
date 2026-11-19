@@ -154,8 +154,11 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   let current: Live | undefined;
   /** The connection a rotation is replacing, while what it carries moves off it. */
   let retiring: Live | undefined;
-  /** Retired connections still closing: draining groups the relay has not acknowledged. `stop()` waits for them. */
-  const draining = new Set<Promise<void>>();
+  /**
+   * Connections given up and still closing: draining groups the relay has not acknowledged. `stop()` waits for them, and
+   * a publication's `close()` for those that carry it.
+   */
+  const draining = new Map<Live, Promise<void>>();
   const connectionWaiters: (() => void)[] = [];
   let status: SupervisedStatus = 'connecting';
   let stopped = false;
@@ -208,6 +211,23 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     return closing ? closing.catch(() => {}) : undefined;
   };
 
+  /** Close a connection given up while the loop runs on, draining in the background; `after` runs once it closed. */
+  const drainLive = (live: Live, after?: () => void) => {
+    if (draining.has(live)) return;
+    const closing = closeLive(live);
+    if (!closing) {
+      after?.();
+      return;
+    }
+    draining.set(
+      live,
+      closing.then(() => {
+        draining.delete(live);
+        after?.();
+      }),
+    );
+  };
+
   /** The connection ended or was given up: release what it ran and stop anything still waiting on it. */
   const settleEnded = (live: Live) => {
     live.ended.abort();
@@ -228,7 +248,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     current = undefined;
     retiring = undefined;
     for (const track of allTracks()) track.retire();
-    const pending: Promise<void>[] = [...draining];
+    const pending: Promise<void>[] = [...draining.values()];
     for (const live of open) {
       const closing = closeLive(live);
       settleEnded(live);
@@ -339,6 +359,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     // progress sees it and falls back to reconnecting.
     void live.over.then(() => {
       ended.abort();
+      // Given up for a lost publication while the session is still open, whichever path was serving it: close it.
+      if (live.faulted && !stopped) drainLive(live);
       for (const publication of live.publications.values()) {
         publication.ended = true;
         // The connection's end closed its groups under the application, which may never close them itself.
@@ -489,17 +511,12 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     if (retiring === live) retiring = undefined;
     // Closing drains the old connection's unacknowledged groups for up to a write deadline; the next one is served
     // meanwhile, and `stop()` waits for the drain.
-    const closing = closeLive(live);
+    drainLive(live, () => {
+      for (const [publication, state] of live.publications) {
+        for (const track of publication.tracks.values()) track.forget(state);
+      }
+    });
     settleEnded(live);
-    if (closing) {
-      const drain: Promise<void> = closing.then(() => {
-        draining.delete(drain);
-        for (const [publication, state] of live.publications) {
-          for (const track of publication.tracks.values()) track.forget(state);
-        }
-      });
-      draining.add(drain);
-    }
     return next;
   };
 
@@ -589,16 +606,6 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       current = undefined;
       for (const state of live.publications.values()) state.ended = true;
       unbindAll(live);
-      // A connection given up for a lost publication is still open: close it, draining in the background.
-      if (live.faulted) {
-        const closing = closeLive(live);
-        if (closing) {
-          const drain: Promise<void> = closing.then(() => {
-            draining.delete(drain);
-          });
-          draining.add(drain);
-        }
-      }
       settleEnded(live);
       // Already reported if the connection ended while a rotation's replacement was connecting.
       if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
@@ -688,6 +695,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
             state.ended = true;
             ends.push(state.publisher.close().catch(() => {}));
           }
+          // A connection a rotation or a lost root gave up still drains this publication's groups.
+          for (const [live, drain] of draining) if (live.publications.has(publication)) ends.push(drain);
           await Promise.all(ends);
         })();
         return closing;

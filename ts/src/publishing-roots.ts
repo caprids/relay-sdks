@@ -457,8 +457,9 @@ export interface PublishingRootsDependencies {
   hold(connection: PublishingRootsConnection): () => void;
   onClosed(): void;
   /**
-   * Whether a namespace is the supervisor's own publishing: never reported. The relay hides a connection's own
-   * announcements from it, but not those of the connection a rotation is replacing or bringing up.
+   * Whether a namespace is the supervisor's own publishing: its announcement is never reported. The relay hides a
+   * connection's own announcements from it, but not those of the connection a rotation is replacing or bringing up.
+   * Withdrawals still count, so a root seen before the supervisor published it leaves when it is withdrawn.
    */
   hides?(namespace: readonly string[]): boolean;
 }
@@ -522,9 +523,7 @@ export function openPublishingRoots(
         onAnnounced: (namespace) => {
           if (!deps.hides?.(namespace)) feed({ kind: 'namespace', source, type: 'announced', namespace });
         },
-        onUnannounced: (namespace) => {
-          if (!deps.hides?.(namespace)) feed({ kind: 'namespace', source, type: 'unannounced', namespace });
-        },
+        onUnannounced: (namespace) => feed({ kind: 'namespace', source, type: 'unannounced', namespace }),
         onLoaded: () => feed({ kind: 'loaded', source }),
         onEnded: (error) => feed({ kind: 'ended', source, error }),
       });

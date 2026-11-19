@@ -187,6 +187,7 @@ export async function superviseRelay(
     rotate() {
       supervisor.rotate();
     },
-    close: () => supervisor.stop({}),
+    // A throwing onStatus reporting `closed` rejects the promise rather than throwing from the call.
+    close: async () => supervisor.stop({}),
   };
 }

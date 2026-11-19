@@ -183,6 +183,7 @@ export async function superviseRelayPublisher(
     closed: supervisor.closed,
     registerTrack: (trackOptions: RegisterTrackOptions): RelayTrackWriter => publication.registerTrack(trackOptions),
     rotate: () => supervisor.rotate(),
-    close: () => supervisor.stop({}),
+    // A throwing onStatus reporting `closed` rejects the promise rather than throwing from the call.
+    close: async () => supervisor.stop({}),
   };
 }

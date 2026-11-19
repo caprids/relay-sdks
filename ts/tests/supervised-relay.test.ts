@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { RelaySession } from '../src/relay-session.js';
+import { superviseRelayPublisher } from '../src/supervised-publisher.js';
 import { superviseRelay } from '../src/supervised-relay.js';
-import { deferred, type FakeSession, fakeSession, until } from './helpers/supervision-fakes.js';
+import { deferred, type FakeSession, fakePublisher, fakeSession, until } from './helpers/supervision-fakes.js';
 
 const fast = { initialDelayMs: 0, maxDelayMs: 0 };
 const cleanup: (() => unknown)[] = [];
@@ -213,5 +214,118 @@ describe('connectSupervisedRelay publishing roots', () => {
     discovery.push({ type: 'loaded' });
     await until(() => changes.length > 0 && changes.at(-1)!.includes('bob'), 'bob listed');
     expect(changes.flat()).not.toContain('alice');
+  });
+});
+
+describe('Codex pass 1 on #529', () => {
+  const options = { url: 'https://relay.example.com/moq', reconnect: fast };
+
+  it('close closes a session faulted while its replacement is connecting', async () => {
+    const old = fakeSession();
+    let attempts = 0;
+    let closes = 0;
+    const close = old.close.bind(old);
+    old.close = async () => {
+      closes++;
+      await close();
+    };
+    const relay = await superviseRelay(async ({ signal }) => {
+      if (++attempts === 1) return old as unknown as RelaySession;
+      await new Promise((_, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+      throw new Error('unreachable');
+    }, options);
+    relay.publish(['alice']);
+    relay.publish(['host']);
+    relay.rotate();
+    await until(() => attempts === 2);
+    old.publications
+      .values()
+      .next()
+      .value!.end(new RelayError('NAMESPACE_ENDED', 'withdrawn', 'connection'));
+    await until(() => relay.status === 'reconnecting');
+    await relay.close();
+    try {
+      expect(closes).toBe(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it('publication.close waits for its groups on an already draining generation', async () => {
+    const old = fakeSession();
+    const next = fakeSession();
+    const drain = deferred();
+    let draining = false;
+    let drained = false;
+    let attempts = 0;
+    const close = old.close.bind(old);
+    old.close = async () => {
+      draining = true;
+      for (const publication of old.publications.values()) {
+        for (const track of publication.tracks.values()) track.writer.close();
+      }
+      await drain.promise;
+      drained = true;
+      await close();
+    };
+    const relay = await superviseRelay(async () => (++attempts === 1 ? old : next) as unknown as RelaySession, options);
+    const publication = relay.publish(['alice']);
+    const writer = publication.registerTrack({ track: 'video' });
+    const group = await writer.openGroup({ payload: new Uint8Array([1]) });
+    await group.close();
+    relay.rotate();
+    await until(() => draining);
+    let publicationClosed = false;
+    const closing = publication.close().then(() => {
+      publicationClosed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(drained).toBe(false);
+      expect(publicationClosed).toBe(false);
+    } finally {
+      drain.resolve();
+      await closing;
+      await relay.close();
+    }
+  });
+
+  it('removes a previously discovered root when it becomes an own root', async () => {
+    const session = fakeSession();
+    const relay = await superviseRelay(async () => session as unknown as RelaySession, options);
+    const view = relay.publishingRoots({ prefix: ['room'] });
+    await until(() => session.discoveries.length === 1);
+    const discovery = session.discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: ['room', 'alice', 'old-generation'] });
+    discovery.push({ type: 'loaded' });
+    await until(() => view.loaded && view.present.has('alice'));
+    relay.publish(['room', 'alice']);
+    discovery.push({ type: 'unannounced', namespace: ['room', 'alice', 'old-generation'] });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    try {
+      expect(view.present.has('alice')).toBe(false);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it('publisher close rejects instead of throwing when its closed callback fails during reconnect', async () => {
+    const old = fakePublisher(['alice', 'generation']);
+    const failure = new Error('status callback failed');
+    const publisher = await superviseRelayPublisher(async () => old, {
+      url: options.url,
+      namespace: ['alice'],
+      reconnect: { initialDelayMs: 10_000, maxDelayMs: 10_000 },
+      onStatus(status) {
+        if (status === 'closed') throw failure;
+      },
+    });
+    old.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+    await until(() => publisher.status === 'reconnecting');
+    let closing: Promise<void> | undefined;
+    expect(() => {
+      closing = publisher.close();
+    }).not.toThrow();
+    await expect(closing).rejects.toBe(failure);
   });
 });
