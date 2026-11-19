@@ -454,6 +454,46 @@ describe('Codex pass 1 on #529', () => {
     expect(closes).toBe(1);
   });
 
+  it('Codex pass 3 on #536: a close made inside a session close is the same stop', async () => {
+    const old = fakeSession();
+    const next = fakeSession();
+    const drain = deferred();
+    let inner: Promise<void> | undefined;
+    const closeOld = old.close.bind(old);
+    old.close = (() => {
+      inner ??= relay.close();
+      return drain.promise.then(closeOld);
+    }) as never;
+    let nextCloses = 0;
+    const closeNext = next.close.bind(next);
+    next.close = async () => {
+      nextCloses++;
+      await closeNext();
+    };
+    const replacement = deferred<RelaySession>();
+    let attempts = 0;
+    const relay = await superviseRelay(
+      async () => (++attempts === 1 ? (old as unknown as RelaySession) : replacement.promise),
+      options,
+    );
+    relay.rotate();
+    await until(() => attempts === 2, 'replacement attempted');
+    const outer = relay.close();
+    replacement.resolve(next as unknown as RelaySession);
+    let innerDone = false;
+    void inner!.then(() => {
+      innerDone = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(innerDone).toBe(false);
+    } finally {
+      drain.resolve();
+      await Promise.all([outer, inner]);
+    }
+    expect(nextCloses).toBe(1);
+  });
+
   it('publication.close waits for its groups on an already draining generation', async () => {
     const old = fakeSession();
     const next = fakeSession();

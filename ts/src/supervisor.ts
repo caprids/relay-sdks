@@ -260,6 +260,14 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const stop = (result: { error?: unknown }): Promise<void> => {
     if (shutdown) return shutdown;
     stopped = true;
+    // Set first: a `close()` made while this one runs (from a session's close, or onStatus) is the same stop, keeps
+    // this one's result, and waits for what this one waits for.
+    let settle!: { resolve(): void; reject(error: unknown): void };
+    shutdown = new Promise<void>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    // A throwing onStatus fails `close()` for the caller that made it; a stop nobody awaits leaves it observed.
+    shutdown.catch(() => {});
     const reason = result.error ?? closedError();
     lifetime.abort(reason);
     attemptInProgress?.abort(reason);
@@ -307,21 +315,17 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     };
     if (pending.length === 0) {
       // Nothing drains: report `closed` now, so a throwing onStatus reaches the caller of `close()` as it runs.
-      // Set first: a `close()` from inside onStatus is then the same stop, and keeps this one's result.
-      shutdown = Promise.resolve();
       try {
         finish();
       } catch (error) {
         // Every later `close()` reports the same failure.
-        shutdown = Promise.reject(error);
-        shutdown.catch(() => {});
+        settle.reject(error);
         throw error;
       }
+      settle.resolve();
       return shutdown;
     }
-    shutdown = Promise.all(pending).then(finish);
-    // A throwing onStatus fails `close()` for the caller that made it; a stop nobody awaits leaves it observed.
-    shutdown.catch(() => {});
+    Promise.all(pending).then(finish).then(settle.resolve, settle.reject);
     return shutdown;
   };
   /** Stop from a place with no caller to tell: a throwing onStatus reporting `closed` settles `closed` regardless. */

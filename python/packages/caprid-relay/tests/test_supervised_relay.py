@@ -585,6 +585,44 @@ async def test_a_connection_that_ended_is_closed_once_also_when_its_close_stops_
     assert closes == 1
 
 
+@pytest.mark.parametrize("path", ["reconnect", "rotation"])
+async def test_a_connection_whose_publish_stops_the_relay_is_closed(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    old, nxt = FakeSession(), FakeSession()
+    closes = 0
+    close, publish = nxt.close, nxt.publish
+    stopping: list[asyncio.Future[None]] = []
+
+    async def counted() -> None:
+        nonlocal closes
+        closes += 1
+        await close()
+
+    def stop_then_publish(namespace: Any) -> Any:
+        if not stopping:
+            stopping.append(relay._supervisor.stop())
+        return publish(namespace)
+
+    monkeypatch.setattr(nxt, "close", counted)
+    monkeypatch.setattr(nxt, "publish", stop_then_publish)
+    attempts = 0
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        nonlocal attempts
+        attempts += 1
+        return old if attempts == 1 else nxt
+
+    relay = await _supervise_relay(connect, reconnect=FAST)
+    relay.publish(["alice"])
+    if path == "reconnect":
+        old.end(lost())
+    else:
+        relay.rotate()
+    await until(lambda: bool(stopping), "stopped from publish")
+    await asyncio.wait_for(stopping[0], 1)
+    assert closes == 1
+    assert relay.status == "closed"
+
+
 async def test_wants_leave_a_connection_given_up_for_a_lost_root_without_waiting_for_its_drain(
     monkeypatch: pytest.MonkeyPatch, cleanup: list[Callable[[], object]]
 ) -> None:

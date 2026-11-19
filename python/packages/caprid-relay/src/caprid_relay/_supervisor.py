@@ -696,12 +696,15 @@ class Supervisor:
         # Checked again just before taking it: an application callback above may have stopped the loop.
         if self.stopped:
             return None
-        self._connecting = None
         moved = [
             handed
             for publication in list(self._publications)
             for handed in self._attach(nxt, publication, hand_over=True)
         ]
+        # A session's publish() may have stopped the loop: stop() closed this connection, still in `_connecting`.
+        if self.stopped:
+            return None
+        self._connecting = None
         self._enter(_Serving(nxt, retiring=live))
         self._report(nxt)
         self._wake_waiters()
@@ -845,9 +848,13 @@ class Supervisor:
                 # stop() may have run while the helper's result was on its way here: it closed this connection.
                 if live is None or self.stopped:
                     return
-                self._connecting = None
                 for publication in list(self._publications):
                     self._attach(live, publication, hand_over=False)
+                # A session's publish() may have stopped the loop: stop() closed this connection, still in
+                # `_connecting`.
+                if self.stopped:
+                    return
+                self._connecting = None
                 self._enter(_Serving(live))
                 first, self._first = self._first, None
                 if first is not None:
