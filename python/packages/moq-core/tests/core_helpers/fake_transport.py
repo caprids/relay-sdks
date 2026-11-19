@@ -248,6 +248,16 @@ class FakeTransport:
         asyncio.get_running_loop().create_task(write_and_close())
         return client_to_server
 
+    def open_controlled_incoming_request(self) -> tuple[ControlledDataStream, ReceiveStream]:
+        """Open a server-initiated bidirectional stream the test writes to and never FINs.
+
+        Returns the server's sending direction and the client's response direction, unread.
+        """
+        server_to_client = self._pipe()
+        client_to_server = self._pipe()
+        self._incoming_bidi.push(BidirectionalStream(readable=server_to_client, writable=client_to_server))
+        return ControlledDataStream(server_to_client), client_to_server
+
     def drop_transport(self) -> None:
         """Simulate a transport-side drop (peer/network close, not a local ``close()``)."""
         self._finish()

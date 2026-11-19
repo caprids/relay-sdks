@@ -524,6 +524,52 @@ class TestSubscribeDriverTeardown:
             await wait_for(response.done)
             assert isinstance(response.exception(), StreamClosedError)
 
+    @pytest.mark.parametrize("arrives", ["before teardown", "after teardown"])
+    async def test_drops_an_incoming_request_whose_message_is_still_arriving_at_teardown(self, arrives: str) -> None:
+        async with subscribe_session() as (fake, session, _):
+            if arrives == "after teardown":
+                session.destroy()
+
+            request, response = fake.open_controlled_incoming_request()
+            try:
+                await request.write(
+                    encode_publish(Publish(request_id=1, track_namespace=NAMESPACE, track_name="video", track_alias=9))[
+                        :2
+                    ]
+                )
+            except StreamClosedError:
+                pass
+            await settle()
+
+            session.destroy()
+
+            assert await stopped(request.write)
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(response), 1)
+
+    @pytest.mark.parametrize(
+        ("opens", "first_bytes"),
+        [
+            pytest.param("before teardown", b"", id="its type still to come"),
+            pytest.param("after teardown", fetch_header(7)[:-1], id="a fetch header's request id still to come"),
+        ],
+    )
+    async def test_stops_reading_a_data_stream_still_arriving_at_teardown(self, opens: str, first_bytes: bytes) -> None:
+        async with subscribe_session() as (fake, session, _):
+            if opens == "after teardown":
+                session.destroy()
+
+            data = fake.open_controlled_data_stream()
+            try:
+                await data.write(first_bytes)
+            except StreamClosedError:
+                pass
+            await settle()
+
+            session.destroy()
+
+            assert await stopped(data.write)
+
     async def test_reports_nothing_from_the_rest_of_a_read_after_a_cancel_from_on_ok(self) -> None:
         order: list[str] = []
         fetch: FetchHandle | None = None
@@ -891,3 +937,104 @@ class TestPublishDriverTeardown:
 
             await wait_for(response.done)
             assert isinstance(response.exception(), StreamClosedError)
+
+    async def test_reports_no_subscription_whose_acceptance_lands_as_the_close_begins(self) -> None:
+        subscribes: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_subscribe=subscribes.append)) as (pair, session, _):
+            # Nothing reads the response yet, so the SUBSCRIBE_OK write waits.
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(
+                encode_subscribe(Subscribe(request_id=3, track_namespace=NAMESPACE, track_name="video"))
+            )
+            await settle()
+
+            session.close()
+            # Landed in the same turn, before the drain's first beat ends its subscriptions.
+            await stream.readable.read()
+            await settle()
+
+            assert subscribes == []
+
+    @pytest.mark.parametrize(
+        "request_message",
+        [
+            pytest.param(
+                encode_subscribe_namespace(SubscribeNamespace(request_id=5, track_namespace_prefix=["live"])),
+                id="SUBSCRIBE_NAMESPACE",
+            ),
+            pytest.param(
+                encode_track_status(TrackStatus(request_id=5, track_namespace=NAMESPACE, track_name="video")),
+                id="TRACK_STATUS",
+            ),
+            pytest.param(
+                encode_publish(Publish(request_id=5, track_namespace=NAMESPACE, track_name="video", track_alias=9)),
+                id="PUBLISH",
+            ),
+        ],
+    )
+    async def test_resets_a_response_still_being_written_when_it_ends(self, request_message: bytes) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            _,
+        ):
+            # Nothing reads the response, so its write waits across the close.
+            stream = await pair.server.create_bidirectional_stream()
+            await stream.writable.write(request_message)
+            await settle()
+
+            session.close()
+            await wait_for(lambda: closed)
+
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(stream.readable), 1)
+
+    async def test_drops_a_request_whose_message_arrives_after_it_ends(self) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            _,
+        ):
+            session.close()
+            await wait_for(lambda: closed)
+
+            stream = await pair.server.create_bidirectional_stream()
+            try:
+                await stream.writable.write(
+                    encode_subscribe(Subscribe(request_id=5, track_namespace=NAMESPACE, track_name="video"))[:2]
+                )
+            except StreamClosedError:
+                pass
+            await settle()
+
+            assert await stopped(stream.writable.write)
+            with pytest.raises(StreamClosedError):
+                await asyncio.wait_for(read_to_end(stream.readable), 1)
+
+    @pytest.mark.parametrize("opens", ["before it ends", "after it ends"])
+    async def test_stops_reading_a_unidirectional_stream_whose_type_has_not_arrived_when_it_ends(
+        self, opens: str
+    ) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            session,
+            _,
+        ):
+            if opens == "after it ends":
+                session.close()
+                await wait_for(lambda: closed)
+
+            stream = await pair.server.create_unidirectional_stream()
+            await settle()
+
+            session.close()
+            await wait_for(lambda: closed)
+
+            assert await stopped(stream.write)
