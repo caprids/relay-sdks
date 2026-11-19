@@ -356,4 +356,51 @@ describe('Codex pass 1 on #529', () => {
       await stopping;
     }
   });
+
+  it('Codex pass 3: wants leave a connection given up for a lost root without waiting for its drain', async () => {
+    const old = fakeSession();
+    const drain = deferred();
+    const close = old.close.bind(old);
+    old.close = async () => {
+      await drain.promise;
+      await close();
+    };
+    const connections: FakeSession[] = [];
+    const relay = await superviseRelay(async () => {
+      if (connections.length === 0) {
+        connections.push(old);
+        return old as unknown as RelaySession;
+      }
+      const next = fakeSession();
+      connections.push(next);
+      return next as unknown as RelaySession;
+    }, options);
+    relay.publish(['alice']);
+    relay.want('bob', { namespace: ['bob'], track: 'video', retry: fast });
+    await until(() => old.subscriptions.length === 1, 'subscribe');
+    old.subscriptions[0]!.accept();
+    [...old.publications.values()][0]!.end(new RelayError('NAMESPACE_ENDED', 'withdrawn', 'connection'));
+    try {
+      await until(() => connections[1]?.subscriptions.length === 1, 'want moved before the drain ends');
+    } finally {
+      drain.resolve();
+    }
+  });
+
+  it('Codex pass 3: every close() rejects after onStatus threw reporting closed', async () => {
+    const old = fakePublisher(['alice', 'generation']);
+    const failure = new Error('status callback failed');
+    const publisher = await superviseRelayPublisher(async () => old, {
+      url: options.url,
+      namespace: ['alice'],
+      reconnect: { initialDelayMs: 10_000, maxDelayMs: 10_000 },
+      onStatus(status) {
+        if (status === 'closed') throw failure;
+      },
+    });
+    old.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+    await until(() => publisher.status === 'reconnecting');
+    await expect(publisher.close()).rejects.toBe(failure);
+    await expect(publisher.close()).rejects.toBe(failure);
+  });
 });

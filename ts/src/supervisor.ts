@@ -272,8 +272,15 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     };
     if (pending.length === 0) {
       // Nothing drains: report `closed` now, so a throwing onStatus reaches the caller of `close()` as it runs.
+      try {
+        finish();
+      } catch (error) {
+        // Every later `close()` reports the same failure.
+        shutdown = Promise.reject(error);
+        shutdown.catch(() => {});
+        throw error;
+      }
       shutdown = Promise.resolve();
-      finish();
       return shutdown;
     }
     shutdown = Promise.all(pending).then(finish);
@@ -367,8 +374,9 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     // progress sees it and falls back to reconnecting.
     void live.over.then(() => {
       ended.abort();
-      // Given up for a lost publication while the session is still open, whichever path was serving it: close it.
-      if (live.faulted && !stopped) drainLive(live);
+      // Given up for a lost publication while the session is still open, whichever path was serving it: close it. Its
+      // wants move to the next connection once that is up, as on a rotation (`run`).
+      if (live.faulted && !stopped) drainLive(live, () => settleEnded(live));
       for (const publication of live.publications.values()) {
         publication.ended = true;
         // The connection's end closed its groups under the application, which may never close them itself.
@@ -571,6 +579,11 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     let attempt = 0;
     /** A connection a rotation already brought up, reported and moved everything to. */
     let next: Live | undefined;
+    /**
+     * A connection given up for a lost root, still draining: its wants are still subscribed there, and move to the next
+     * connection once it is up, make-before-break, rather than wait out the drain.
+     */
+    let givenUp: Live | undefined;
     while (!stopped) {
       let live = next;
       next = undefined;
@@ -602,6 +615,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         first?.resolve();
         first = undefined;
         wakeWaiters();
+        givenUp?.retire.abort();
+        givenUp = undefined;
       }
 
       const outcome = await serve(live);
@@ -614,7 +629,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       current = undefined;
       for (const state of live.publications.values()) state.ended = true;
       unbindAll(live);
-      settleEnded(live);
+      if (live.faulted) givenUp = live;
+      else settleEnded(live);
       // Already reported if the connection ended while a rotation's replacement was connecting.
       if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
       // A connection that stayed up longer than the longest delay was a success: start the backoff over.
