@@ -305,7 +305,7 @@ class _SubscriberStream:
     finished: bool = False
     """The subscription is ending or over; no new data stream may open on its alias."""
     writer_closed: bool = False
-    """Our direction of the request stream was FINed (after PUBLISH_DONE); it is never reset afterwards."""
+    """The transport took our direction's FIN, after PUBLISH_DONE; it is never reset afterwards."""
     stream_count: int = 0
     """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§9.9)."""
     data_streams: set[_DataStream] = field(default_factory=set)
@@ -329,6 +329,7 @@ class _SubscriberStream:
 
     def cancel(self) -> None:
         self.finished = True
+        self.reset_data_streams()
 
         # A request stream whose PUBLISH_DONE and FIN were handed over is complete: resetting it now
         # (a send stream's abort resets until the FIN is acknowledged) would destroy that end.
@@ -482,12 +483,13 @@ class MoqtPublishSession:
         self._close_error: BaseException | None = None
         self._destroyed = False
         self._end_acknowledgements: dict[asyncio.Task[None], _SubscriberStream] = {}
-        """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet, with its
-        subscription, which the end of the session cancels even after it has left its track."""
+        """One task per subscription end still in flight, with its subscription, which the end of the session cancels
+        even after it has left its track: PUBLISH_DONE and FIN until the peer acknowledges them, or a cancelled
+        subscription's FIN until the transport takes it."""
         self._incoming_streams: dict[StreamReader, SendStream | None] = {}
         """Every incoming stream still being read but the control stream, from its first read on, with the response
-        direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it over,
-        None for a unidirectional stream."""
+        direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it
+        over, and again once the carrier is over; None for a unidirectional stream."""
 
         spawn(self._start())
 
@@ -870,18 +872,14 @@ class MoqtPublishSession:
         """
         subscriber.finished = True
 
-        fin_written = False
-
         async def end() -> None:
-            nonlocal fin_written
             if subscriber.opening:
                 await asyncio.wait(set(subscriber.opening))
 
             subscriber.reset_data_streams()
             await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
-            subscriber.writer_closed = True
             await subscriber.writer.close()
-            fin_written = True
+            subscriber.writer_closed = True
 
         ended = spawn(_swallow(end()))
         track.pending_ends.append(ended)
@@ -895,12 +893,15 @@ class MoqtPublishSession:
         async def acknowledged() -> None:
             await ended
 
-            if fin_written:
+            if subscriber.writer_closed:
                 await wait_acknowledged(subscriber.writer)
 
-        acknowledging = spawn(_swallow(acknowledged()))
-        self._end_acknowledgements[acknowledging] = subscriber
-        acknowledging.add_done_callback(lambda done: self._end_acknowledgements.pop(done, None))
+        self._hold_end(spawn(_swallow(acknowledged())), subscriber)
+
+    def _hold_end(self, ending: asyncio.Task[None], subscriber: _SubscriberStream) -> None:
+        """Keep ``subscriber`` within reach of the end of the session until ``ending`` settles."""
+        self._end_acknowledgements[ending] = subscriber
+        ending.add_done_callback(lambda done: self._end_acknowledgements.pop(done, None))
 
     async def wait_ends_acknowledged(self) -> None:
         """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
@@ -1178,7 +1179,7 @@ class MoqtPublishSession:
 
         # The close began during the write: the accepted solicitation ends empty, with nothing announced on it.
         if not self._serving():
-            spawn(_swallow(writer.close()))
+            await _swallow(writer.close())
             reader.cancel()
             return
 
@@ -1215,13 +1216,6 @@ class MoqtPublishSession:
                                 parameters=message.parameters,
                             ),
                         )
-                    spawn(
-                        _swallow(
-                            writer.write(
-                                encode_request_error(REQUEST_ERROR_CODE.NOT_SUPPORTED, "namespace update not supported")
-                            )
-                        )
-                    )
                     failed_update = True
                     break
                 else:
@@ -1243,10 +1237,16 @@ class MoqtPublishSession:
         if record in self._namespace_streams:
             self._namespace_streams.remove(record)
 
-        spawn(_swallow(writer.close()))
-
         if len(record.announced) > 0:
             self._report_announce_loss(cause)
+
+        # No longer a carrier, the stream is the end of the session's to reset until the transport takes its FIN.
+        self._incoming_streams[reader] = writer
+        if failed_update:
+            await _swallow(
+                writer.write(encode_request_error(REQUEST_ERROR_CODE.NOT_SUPPORTED, "namespace update not supported"))
+            )
+        await _swallow(writer.close())
 
     async def _handle_track_status(
         self, stream: BidirectionalStream, reader: StreamReader, request: TrackStatus
@@ -1479,7 +1479,7 @@ class MoqtPublishSession:
                 # unclosed response direction would leak a half-open stream per cancelled request
                 # until the transport closes. An already-aborted writer fails harmlessly. A
                 # subscription this side ended closes its writer after PUBLISH_DONE instead.
-                spawn(_swallow(writer.close()))
+                self._hold_end(spawn(_swallow(writer.close())), subscriber)
 
             if not self._destroyed and subscriber.reported:
                 _call(self._callbacks.on_subscribe_end, subscribe.request_id)
