@@ -1250,6 +1250,26 @@ class TestPublishDriverTeardown:
             assert solicitation.ended()
             assert isinstance(solicitation.failure(), StreamClosedError)
 
+    async def test_stops_reading_a_solicitation_whose_update_it_refused(self) -> None:
+        closed: list[object] = []
+
+        async with publish_session(MoqtPublishSessionCallbacks(on_closed=closed.append), hold_open=True) as (
+            pair,
+            _,
+            control,
+        ):
+            solicitation = await solicit_namespace(pair.server, ["live"])
+            await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
+
+            await solicitation.send(encode_request_update(3))
+            await wait_for(lambda: solicitation.ended())
+            await control.write(UNKNOWN_MESSAGE)
+            await wait_for(lambda: closed)
+            await settle()
+
+            assert solicitation.kinds() == ["request-ok", "namespace", "request-error"]
+            assert await solicitation.stopped()
+
     @pytest.mark.parametrize("ending", ["reset", "malformed follow-up"])
     async def test_resets_a_subscriptions_response_whose_fin_is_still_held_when_it_ends(self, ending: str) -> None:
         closed: list[object] = []
