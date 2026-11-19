@@ -272,6 +272,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     };
     if (pending.length === 0) {
       // Nothing drains: report `closed` now, so a throwing onStatus reaches the caller of `close()` as it runs.
+      // Set first: a `close()` from inside onStatus is then the same stop, and keeps this one's result.
+      shutdown = Promise.resolve();
       try {
         finish();
       } catch (error) {
@@ -280,7 +282,6 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         shutdown.catch(() => {});
         throw error;
       }
-      shutdown = Promise.resolve();
       return shutdown;
     }
     shutdown = Promise.all(pending).then(finish);

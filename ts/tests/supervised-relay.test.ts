@@ -403,4 +403,21 @@ describe('Codex pass 1 on #529', () => {
     await expect(publisher.close()).rejects.toBe(failure);
     await expect(publisher.close()).rejects.toBe(failure);
   });
+
+  it('Codex pass 4: a close() from onStatus reporting closed keeps the abort reason', async () => {
+    const { superviseRelaySubscriber } = await import('../src/supervised-subscriber.js');
+    const { fakeSubscriber } = await import('./helpers/supervision-fakes.js');
+    const controller = new AbortController();
+    const reason = new Error('cancelled');
+    let subscriber: Awaited<ReturnType<typeof superviseRelaySubscriber>> | undefined;
+    subscriber = await superviseRelaySubscriber(async () => fakeSubscriber(), {
+      url: options.url,
+      signal: controller.signal,
+      onStatus(status) {
+        if (status === 'closed') subscriber?.close();
+      },
+    });
+    controller.abort(reason);
+    expect(await subscriber.closed).toEqual({ error: reason });
+  });
 });
