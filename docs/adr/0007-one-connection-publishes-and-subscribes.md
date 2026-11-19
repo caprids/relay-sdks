@@ -70,5 +70,7 @@ We decided (#525):
   The planned supervised `connectRelay` makes one connection one generation: every namespace it announces carries
   that generation, a reconnect brings everything back together as the next generation, and a rotation moves the
   publications and the wants to the new connection before the old one closes.
-- **Python doesn't have it yet.** The Python core has the same two drivers. `spec/vocabulary.md` lists
-  `connect_relay` as not built yet.
+- **Python has it too, unsupervised.** `connect_relay` and `create_moqt_duplex_session` port the same
+  design over the Python core's two drivers, and passed the same ord check (`spec/behavior.md`). A
+  Python `RelaySession` is not a `RelaySubscriber` instance, because its `close()` is a coroutine and a
+  subscriber's is not. The supervised Python counterpart is not built yet.

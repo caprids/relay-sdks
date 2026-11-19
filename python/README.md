@@ -976,7 +976,9 @@ loads empty, because every generation is three fields below it.
 ## Publishing lifecycle
 
 A publisher connection serves one namespace with any number of tracks. It uses a separate transport
-from subscriber connections. Publishing needs no camera, microphone, catalog, or timestamps.
+from subscriber connections. Publishing needs no camera, microphone, catalog, or timestamps. To
+publish and subscribe on one connection, use
+[`connect_relay`](#publish-and-subscribe-on-one-connection): its publications behave as described here.
 
 Publishing follows Relay's announce-and-serve flow. `register_track()` registers the track and sends
 nothing. `write()` waits for the relay to subscribe upstream, which is called demand, before it sends
@@ -1086,6 +1088,42 @@ timeouts, roughly 0.3 s against a relay 50 ms away. Because `close()` waits for 
 exits right after `close()` leaves no UDP socket open and sees no `ResourceWarning`. TypeScript
 returns sooner because the browser keeps its closing period to itself. A track name cannot be reused
 on the same publisher connection, even after its writer closes.
+
+### Publish and subscribe on one connection
+
+`connect_relay` opens one connection that subscribes as `connect_relay_subscriber` does and publishes
+any number of namespaces. A participant in a room needs one connection and one token for both
+directions:
+
+```python
+from caprid_relay import RelaySubscriptionHandlers, connect_relay
+
+async with await connect_relay(get_token=get_token) as session:
+    me = session.publish(["room", "p", my_id])
+    video = me.register_track("video")
+
+    session.subscribe(["room", "p", their_id], "video", RelaySubscriptionHandlers(on_object=render))
+    async with session.namespace_events(["room", "p"]) as events:
+        async for event in events:
+            ...  # Everyone else under the prefix: the relay never reports this connection's own namespaces.
+```
+
+`publish()` returns a `RelayPublication`. Its tracks work as on a publisher connection, and
+`announced` settles the same way. Publish another namespace with another `publish()` call. The token
+must grant every namespace the connection publishes and every one it subscribes to.
+
+- `await publication.close()` ends that namespace's tracks, waits for their last groups, and withdraws
+  the namespace. The connection stays open. The namespace stays taken on this connection, so
+  publishing it again raises `ValueError`.
+- If the relay stops soliciting a namespace, only its publication ends: `await publication.closed`
+  returns `Closed` with a `NAMESPACE_ENDED` error, and its writes and registrations raise it. A
+  publisher connection would end instead.
+- The relay does not route the connection's own announcements back to it. Its discovery leaves them
+  out, and subscribing to one of its own tracks is refused with request error 16.
+- `await session.close()` closes every publication, then the connection. Unlike
+  `RelaySubscriber.close()`, it is a coroutine, because it waits for the publications' groups as
+  `RelayPublisher.close()` does. A `RelaySession` has every `RelaySubscriber` method and property, but
+  it is not a `RelaySubscriber` instance.
 
 ### Advanced media groups
 
@@ -1527,6 +1565,7 @@ The observable behavior is the same. The spelling follows Python conventions:
 | TypeScript | Python |
 | --- | --- |
 | `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
+| `connectRelay(options)` returns a `RelaySession` that extends `RelaySubscriber`; `session.close()` returns a promise | `connect_relay(url, ...)` returns a `RelaySession` with every `RelaySubscriber` method, not a subclass; `await session.close()` |
 | `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
 | `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`. `NamespaceEvent.namespace` is `tuple[str, ...] \| None`. It is `None` only on a `loaded` event, which marks the end of the relay's initial snapshot, so check `type` before you read it. A prefix that overlaps one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP`. |
 | `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
@@ -1554,7 +1593,7 @@ The observable behavior is the same. The spelling follows Python conventions:
 
 The SDK subscribes to tracks over reliable streams, updates and cancels subscriptions, discovers
 namespaces with `namespace_events` ([discovery contract](../spec/behavior.md#discovery)), and publishes
-on a dedicated connection. The supervised connections add reconnection, resubscription, and token
+on a dedicated connection or on one that also subscribes (`connect_relay`). The supervised connections add reconnection, resubscription, and token
 rotation. The generic core also exposes FETCH and TRACK_STATUS. The SDK offers `moqt-22`, then
 `moqt-20` as a fallback, and speaks whichever the relay selects.
 

@@ -193,7 +193,7 @@ connection state, because it depends on the connection's registry.
 
 | Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
 | --- | --- | --- | --- | --- |
-| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. A discovery prefix follows the same rule. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe`; the prefix of `namespaceEvents` / `namespace_events` |
+| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. A discovery prefix follows the same rule. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `publish` on a connection that publishes and subscribes; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe`; the prefix of `namespaceEvents` / `namespace_events` |
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
 | Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-22 §10.4 and §10.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-22 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. Or no endpoint at all (`undefined` in TypeScript, `None` in Python), when the token roots it (Token root). | not a string, including `null` in TypeScript; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
@@ -1241,8 +1241,8 @@ and every publishing-roots view.
 
 ### One connection that publishes and subscribes
 
-`connectRelay` opens one connection that does everything a subscriber connection does and also
-publishes. MOQT gives a session no fixed role, and moq-relay serves both directions on one session
+`connectRelay` / `connect_relay` opens one connection that does everything a subscriber connection
+does and also publishes. MOQT gives a session no fixed role, and moq-relay serves both directions on one session
 when the token grants both: it solicits the session's announces from the token's publish grant
 whatever the session sends in SETUP, and routes its subscriptions as for any subscriber.
 
@@ -1267,9 +1267,11 @@ whatever the session sends in SETUP, and routes its subscriptions as for any sub
   discovery does not report the namespaces it publishes, and a subscribe to one of its own tracks is
   refused: request error 16 on moq-relay.
 - **Shutdown.** `close()` ends every publication's tracks, waits for their groups, retracts every
-  announce, then closes the connection and every request on it.
+  announce, then closes the connection and every request on it. In Python it is a coroutine, where
+  `RelaySubscriber.close()` returns at once, so a `RelaySession` has every `RelaySubscriber` method
+  and property without being a `RelaySubscriber` instance.
 - **Supervision.** `connectSupervisedRelay` reconnects and rotates such a connection
-  ([supervised relay](#supervised-relay)).
+  ([supervised relay](#supervised-relay)). Python has no supervised counterpart yet.
 
 Measured on 2026-11-18 against ord.relay.mux.global, TypeScript SDK on Node over native QUIC
 (`ts/scripts/probe-relay-session.mjs`), 3 of 3 runs: two peers each opened one connection, announced
@@ -1278,6 +1280,12 @@ objects on all four. Each peer's discovery reported only the other's two namespa
 subscribe was refused with request error 16. moq-relay 0.17.2's source agrees: the session's
 publish and subscribe halves are both derived from the token, and routes announced by a session are
 hidden from it.
+
+The Python SDK passed the same check on 2026-11-19 against ord.relay.mux.global over aioquic
+(`python/scripts/probe_relay_session.py`, `mise run python:probe:relay-session`), 3 of 3 runs. Every
+one of the four cross subscriptions received 30 of the 30 objects written and then the track's
+end-of-track status object, each peer's discovery reported only the other's two namespaces, and the
+loopback subscribe was refused with request error 16.
 
 ### Delivery timeouts
 
