@@ -515,6 +515,8 @@ interface FetchRecord extends RequestRecordBase {
   requestId: number;
   handlers: FetchHandlers;
   groupOrder: 'ascending' | 'descending';
+  /** The data stream being read, so a cancel stops it at once rather than at the next entry. */
+  reader?: StreamReader | undefined;
   /** The data stream ended or reset. The session forgets the fetch once its request is answered too (#419). */
   dataEnded?: boolean;
 }
@@ -1392,6 +1394,7 @@ class MoqtSessionImpl implements MoqtSession {
     record.pendingCancelReason = reason;
     this.#settleRequest(record);
     record.stream?.cancel(reason);
+    void record.reader?.cancel(reason).catch(() => {});
     this.#fetches.delete(record.requestId);
   }
 
@@ -1588,6 +1591,8 @@ class MoqtSessionImpl implements MoqtSession {
       return;
     }
 
+    record.reader = reader;
+
     try {
       for await (const entry of readFetchEntries(reader, record.groupOrder)) {
         if (record.cancelled || this.#destroyed) {
@@ -1598,9 +1603,11 @@ class MoqtSessionImpl implements MoqtSession {
         record.handlers.onEntry?.(entry);
       }
 
-      // Teardown's cancel of this reader reads as a clean end.
-      if (!this.#destroyed) record.handlers.onEnd?.();
+      // Teardown's or the fetch's own cancel of this reader reads as a clean end.
+      if (this.#destroyed || record.cancelled) return;
+      record.handlers.onEnd?.();
     } catch (error) {
+      if (record.cancelled) return;
       if (isMoqtProtocolError(error)) throw error;
 
       // A reset mid-replay means entries may be missing — never report it
@@ -1611,6 +1618,7 @@ class MoqtSessionImpl implements MoqtSession {
       // then (#419): kept, the record's handlers held everything they had collected for the session's life. Data can
       // beat the response; until the response, or the request timeout, the record stays for teardown to fail.
       record.dataEnded = true;
+      record.reader = undefined;
       if (record.settled) this.#fetches.delete(requestId);
     }
   }

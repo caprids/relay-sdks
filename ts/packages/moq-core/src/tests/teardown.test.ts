@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ByteWriter } from '../protocol/bytes.js';
 import {
+  encodeFetchOk,
   encodeGoaway,
   encodeNamespace,
   encodePublish,
@@ -31,6 +32,7 @@ import {
 import type { BidirectionalStreamLike } from '../protocol/request-stream.js';
 import {
   createMoqtSession,
+  type FetchHandle,
   type MoqtSessionCallbacks,
   type MoqtSessionConfig,
   type MoqtTransport,
@@ -370,6 +372,55 @@ describe('subscribe driver teardown', () => {
     await settle();
     expect(order).toEqual(['entry', 'closed']);
     expect(stopped()).toBe(true);
+  });
+
+  describe('a cancelled fetch (#533)', () => {
+    const ends = {
+      FIN: (data: WritableStreamDefaultWriter<Uint8Array>) => data.close(),
+      reset: (data: WritableStreamDefaultWriter<Uint8Array>) => data.abort(new Error('reset')),
+    };
+
+    it.each(
+      (['onOk', 'between entries', 'onEntry'] as const).flatMap((when) =>
+        (['FIN', 'reset'] as const).map((end) => ({ when, end }))
+      )
+    )('stops its data stream on a cancel $when, and reports no end on a $end', async ({ when, end }) => {
+      const order: string[] = [];
+      const { pair, session, requests } = await harness();
+
+      const fetch: FetchHandle = session.fetch(TRACK, {
+        onOk: () => {
+          order.push('ok');
+          if (when === 'onOk') fetch.cancel();
+        },
+        onEntry: () => {
+          order.push('entry');
+          if (when === 'onEntry') fetch.cancel();
+        },
+        onEnd: () => order.push('end'),
+        onReset: () => order.push('reset'),
+      });
+      const request = (await requests.next()).writable.getWriter();
+      const data = (await pair.server.createUnidirectionalStream()).getWriter();
+      const stopped = stoppedFlag(data);
+
+      if (when === 'onOk') {
+        await data.write(encodeFetchHeader(fetch.requestId));
+        await settle();
+        await request.write(encodeFetchOk(false, { group: 4, object: 1 }));
+        await vi.waitFor(() => expect(order).toEqual(['ok']));
+      } else {
+        await request.write(encodeFetchOk(false, { group: 4, object: 1 }));
+        await data.write(concat(encodeFetchHeader(fetch.requestId), fetchEntry(4, 0)));
+        await vi.waitFor(() => expect(order).toEqual(['ok', 'entry']));
+        if (when === 'between entries') fetch.cancel();
+      }
+
+      await vi.waitFor(() => expect(stopped()).toBe(true));
+      await ends[end](data).catch(() => {});
+      await settle();
+      expect(order).toEqual(when === 'onOk' ? ['ok'] : ['ok', 'entry']);
+    });
   });
 
   it('reports no readiness from a SETUP completed after teardown', async () => {
