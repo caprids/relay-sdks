@@ -649,9 +649,7 @@ class Supervisor:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.session.expires_at, nxt.session.expires_at
             if was is not None and (now is None or now <= was):
-                closing = self._close_live(nxt)
-                if closing is not None:
-                    await closing
+                self._drain_live(nxt)
                 return None
         moved = [
             handed

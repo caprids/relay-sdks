@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -448,6 +449,38 @@ async def test_a_publication_closed_after_the_relay_waits_for_the_drain_stop_sta
         drain.set()
         await closing
         await stopping
+
+
+async def test_a_close_waits_for_a_replacement_discarded_for_an_expiry_no_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soon = datetime.now(UTC) + timedelta(seconds=0.1)
+    drain = asyncio.Event()
+    connections: list[FakeSession] = []
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        session = FakeSession(soon)
+        if connections:
+            close = session.close
+
+            async def slow() -> None:
+                await drain.wait()
+                await close()
+
+            monkeypatch.setattr(session, "close", slow)
+        connections.append(session)
+        return session
+
+    relay = await _supervise_relay(connect, reconnect=FAST, rotate_before=60)
+    await until(lambda: len(connections) == 2, "replacement attempted")
+    stopping = asyncio.ensure_future(relay.close())
+    await asyncio.sleep(0.02)
+    try:
+        assert not stopping.done()
+    finally:
+        drain.set()
+        await stopping
+    assert connections[1].closed.done()
 
 
 async def test_wants_leave_a_connection_given_up_for_a_lost_root_without_waiting_for_its_drain(
