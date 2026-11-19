@@ -777,3 +777,50 @@ async def test_over_real_connections_a_close_after_a_goaway_waits_for_the_ended_
         assert servers[0].ended
     finally:
         await relay.close()
+
+
+@pytest.mark.parametrize("kind", ["publisher", "subscriber", "relay"])
+@pytest.mark.parametrize("lose_first", [False, True], ids=["serving", "reconnecting"])
+async def test_a_shared_cancellation_runs_every_callback_when_on_status_raises_reporting_closed(
+    kind: str, lose_first: bool
+) -> None:
+    """#512: a raising ``on_status("closed")`` stays inside the supervisor; it neither escapes ``cancel()`` nor
+    keeps later callbacks on the same token from running."""
+    shared = CancellationToken()
+    reason = RuntimeError("owner done")
+    failure = RuntimeError("status callback failed")
+    sessions: list[Any] = []
+
+    async def connect(*_args: Any) -> Any:
+        session = {"publisher": FakePublisher(["alice", "generation"]), "subscriber": FakeSubscriber()}.get(
+            kind, FakeSession()
+        )
+        sessions.append(session)
+        return session
+
+    def supervise(on_status: Callable[[str, BaseException | None], None]) -> Awaitable[Any]:
+        options: dict[str, Any] = {"reconnect": SLOW, "cancellation": shared, "on_status": on_status}
+        if kind == "publisher":
+            return _supervise_relay_publisher(connect, ["alice"], **options)
+        if kind == "subscriber":
+            return _supervise_relay_subscriber(connect, **options)
+        return _supervise_relay(connect, **options)
+
+    first = await supervise(raising_on_closed(failure))
+    second = await supervise(lambda _status, _error: None)
+    if lose_first:
+        sessions[0].end(lost())
+        await until(lambda: first.status == "reconnecting")
+    probe: list[BaseException] = []
+    shared.add_callback(probe.append)
+
+    shared.cancel(reason)
+
+    assert probe == [reason]
+    assert await first.closed == Closed(reason)
+    assert await second.closed == Closed(reason)
+    if kind != "subscriber":
+        # The failure is not lost: a close that can be awaited still raises it.
+        with pytest.raises(RuntimeError) as raised:
+            await first.close()
+        assert raised.value is failure
