@@ -251,6 +251,111 @@ describe('Codex pass 1 on #529', () => {
     }
   });
 
+  it('close waits for a connection that ended at GOAWAY to finish draining', async () => {
+    const old = fakeSession();
+    const drain = deferred();
+    let drained = false;
+    let attempts = 0;
+    const close = old.close.bind(old);
+    // As a duplex session after GOAWAY: `closed` settles at once, and closing still drains its publisher.
+    old.close = async () => {
+      await drain.promise;
+      drained = true;
+      await close();
+    };
+    const relay = await superviseRelay(
+      async ({ signal }) => {
+        if (++attempts === 1) return old as unknown as RelaySession;
+        throw signal!.reason ?? new RelayError('TRANSPORT_ERROR', 'unreachable', 'connection');
+      },
+      { ...options, reconnect: { initialDelayMs: 10_000, maxDelayMs: 10_000 } },
+    );
+    relay.publish(['alice']);
+    old.end(new RelayError('GOAWAY', 'going away', 'connection'));
+    await until(() => relay.status === 'reconnecting');
+    let stopped = false;
+    const stopping = relay.close().then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(drained).toBe(false);
+      expect(stopped).toBe(false);
+    } finally {
+      drain.resolve();
+      await stopping;
+    }
+    expect(drained).toBe(true);
+  });
+
+  it('close waits for a replacement discarded for an expiry no later than the live one', async () => {
+    const soon = new Date(Date.now() + 100);
+    const drain = deferred();
+    const connections: FakeSession[] = [];
+    const relay = await superviseRelay(
+      async () => {
+        const session = fakeSession(soon);
+        if (connections.length > 0) {
+          const close = session.close.bind(session);
+          session.close = async () => {
+            await drain.promise;
+            await close();
+          };
+        }
+        connections.push(session);
+        return session as unknown as RelaySession;
+      },
+      { ...options, rotateBeforeMs: 60 },
+    );
+    await until(() => connections.length === 2, 'replacement attempted');
+    let stopped = false;
+    const stopping = relay.close().then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      expect(stopped).toBe(false);
+    } finally {
+      drain.resolve();
+      await stopping;
+    }
+  });
+
+  it('close waits for a replacement whose connection was on its way back as close ran', async () => {
+    // Closed at each turn of the hand-back: the attempt settling, connectOnce returning, the rotation taking it.
+    for (let turns = 0; turns < 8; turns++) {
+      const old = fakeSession();
+      const next = fakeSession();
+      const replacement = deferred<RelaySession>();
+      const drain = deferred();
+      const close = next.close.bind(next);
+      next.close = async () => {
+        await drain.promise;
+        await close();
+      };
+      let attempts = 0;
+      const relay = await superviseRelay(
+        async () => (++attempts === 1 ? (old as unknown as RelaySession) : replacement.promise),
+        options,
+      );
+      relay.rotate();
+      await until(() => attempts === 2, 'replacement attempted');
+      replacement.resolve(next as unknown as RelaySession);
+      for (let turn = 0; turn < turns; turn++) await Promise.resolve();
+      let stopped = false;
+      const stopping = relay.close().then(() => {
+        stopped = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        expect(stopped, `close after ${turns} turns`).toBe(false);
+      } finally {
+        drain.resolve();
+        await stopping;
+      }
+    }
+  });
+
   it('publication.close waits for its groups on an already draining generation', async () => {
     const old = fakeSession();
     const next = fakeSession();

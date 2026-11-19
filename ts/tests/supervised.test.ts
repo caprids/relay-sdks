@@ -902,8 +902,9 @@ describe('callback failures and progress (#272)', () => {
       expect(publisher.status).toBe('closed');
       expect(publisher.generation).toBeUndefined();
       await new Promise((resolve) => setTimeout(resolve, 10));
-      // Nothing reconnects after the stop, and a generation the callback threw on is closed.
-      expect(connections.at(-1)!.closeCalls).toBe(connections.length - 1);
+      // Nothing reconnects after the stop, a generation the callback threw on is closed, and so is the one that ended
+      // (closing it waits for whatever it still drains).
+      expect(connections.map((connection) => connection.closeCalls)).toEqual(connections.map(() => 1));
     }
   });
 
