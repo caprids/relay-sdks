@@ -79,7 +79,7 @@ from .object_stream import (
     read_subgroup_header,
     read_subgroup_objects,
 )
-from .request_stream import RequestStream, RequestStreamHandlers, open_request_stream, read_request
+from .request_stream import RequestStream, RequestStreamHandlers, open_request_stream
 from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 
 # ============================================================================
@@ -724,11 +724,8 @@ class MoqtSession:
         for stream in list(self._request_streams):
             stream.cancel(error)
 
-        for reader, response in list(self._incoming_streams.items()):
-            reader.cancel(error)
-            if response is not None:
-                response.abort()
-        self._incoming_streams.clear()
+        for reader in list(self._incoming_streams):
+            self._drop_incoming(reader, error)
 
         for record in list(self._subscriptions.values()):
             self._remove_subscription(record)
@@ -1118,6 +1115,16 @@ class MoqtSession:
         if record.cancelled:
             record.stream.cancel(record.pending_cancel_reason)
 
+    def _drop_incoming(self, reader: StreamReader, reason: object = None) -> None:
+        """Stop reading an incoming stream still registered, and abort its response direction."""
+        if reader not in self._incoming_streams:
+            return
+
+        response = self._incoming_streams.pop(reader)
+        reader.cancel(reason)
+        if response is not None:
+            response.abort()
+
     def _live(self, record: _RequestRecord) -> bool:
         """Whether ``record``'s handlers may still be called: not after its cancel, and not after ``on_closed``."""
         return not record.cancelled and not self._destroyed
@@ -1377,8 +1384,11 @@ class MoqtSession:
                 reader.cancel()
                 return
 
-            reader.cancel()
             raise MoqtProtocolError(f"unknown unidirectional stream type 0x{stream_type:x}")
+        except BaseException:
+            # A protocol error closes the session only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
+            raise
         finally:
             self._incoming_streams.pop(reader, None)
 
@@ -1551,11 +1561,12 @@ class MoqtSession:
         self._incoming_streams[reader] = stream.writable
 
         try:
-            message = await read_request(
-                stream, reader, lambda message_type: self._read_control_frame(reader, message_type)
-            )
+            message_type = await reader.read_varint()
+            message = await self._read_control_frame(reader, message_type)
         except BaseException:
-            self._incoming_streams.pop(reader, None)
+            # Ended or reset before a whole message, there is no request to answer. A protocol error closes the session
+            # only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
             raise
 
         # Teardown dropped the request while its message was arriving.

@@ -78,7 +78,6 @@ from .control_messages import (
 )
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import STREAM_TYPE, is_subgroup_header_type
-from .request_stream import read_request
 from .session import Closed, _call, _describe
 from .transport import (
     BidirectionalStream,
@@ -482,8 +481,9 @@ class MoqtPublishSession:
         self._closing = False
         self._close_error: BaseException | None = None
         self._destroyed = False
-        self._end_acknowledgements: set[asyncio.Task[None]] = set()
-        """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet."""
+        self._end_acknowledgements: dict[asyncio.Task[None], _SubscriberStream] = {}
+        """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet, with its
+        subscription, which the end of the session cancels even after it has left its track."""
         self._incoming_streams: dict[StreamReader, SendStream | None] = {}
         """Every incoming stream still being read but the control stream, from its first read on, with the response
         direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it over,
@@ -563,11 +563,11 @@ class MoqtPublishSession:
             for subscriber in track.subscribers:
                 subscriber.cancel()
 
-        for reader, response in list(self._incoming_streams.items()):
-            reader.cancel()
-            if response is not None:
-                response.abort()
-        self._incoming_streams.clear()
+        for subscriber in self._end_acknowledgements.values():
+            subscriber.cancel()
+
+        for reader in list(self._incoming_streams):
+            self._drop_incoming(reader)
 
         self._tracks.clear()
         self._namespace_streams.clear()
@@ -672,6 +672,16 @@ class MoqtPublishSession:
     def destroy(self, error: BaseException | None = None) -> None:
         """Drain outgoing streams, preserving an optional local closure error."""
         self._close(SESSION_ERROR.NO_ERROR, "", error)
+
+    def _drop_incoming(self, reader: StreamReader) -> None:
+        """Stop reading an incoming stream still registered, and abort its response direction."""
+        if reader not in self._incoming_streams:
+            return
+
+        response = self._incoming_streams.pop(reader)
+        reader.cancel()
+        if response is not None:
+            response.abort()
 
     def _serving(self) -> bool:
         """Whether the session takes new work. Once closing it takes none and reports only ends."""
@@ -889,8 +899,8 @@ class MoqtPublishSession:
                 await wait_acknowledged(subscriber.writer)
 
         acknowledging = spawn(_swallow(acknowledged()))
-        self._end_acknowledgements.add(acknowledging)
-        acknowledging.add_done_callback(self._end_acknowledgements.discard)
+        self._end_acknowledgements[acknowledging] = subscriber
+        acknowledging.add_done_callback(lambda done: self._end_acknowledgements.pop(done, None))
 
     async def wait_ends_acknowledged(self) -> None:
         """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
@@ -968,6 +978,9 @@ class MoqtPublishSession:
 
         try:
             stream_type = await reader.read_varint()
+        except BaseException:
+            self._drop_incoming(reader)
+            raise
         finally:
             self._incoming_streams.pop(reader, None)
 
@@ -1046,13 +1059,16 @@ class MoqtPublishSession:
 
         try:
             await self._serve_request(stream, reader)
+        except BaseException:
+            # A protocol error closes the session only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
+            raise
         finally:
             self._incoming_streams.pop(reader, None)
 
     async def _serve_request(self, stream: BidirectionalStream, reader: StreamReader) -> None:
-        message = await read_request(
-            stream, reader, lambda message_type: self._read_control_frame(reader, message_type)
-        )
+        message_type = await reader.read_varint()
+        message = await self._read_control_frame(reader, message_type)
 
         # Reserve the request ID for EVERY request-initiating kind: the uniqueness invariant is
         # session-wide, so an ID burned on a rejected PUBLISH or FETCH must not be reusable by a later

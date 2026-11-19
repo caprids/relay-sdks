@@ -12,11 +12,10 @@ Callback-shaped: the session driver binds this to its own bookkeeping.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ._tasks import spawn
-from .bytes import StreamReader
 from .control_messages import (
     MOQT_PROTOCOL_ID,
     ControlMessage,
@@ -191,23 +190,4 @@ def open_request_stream(
     return RequestStream(stream, request_message, handlers, protocol)
 
 
-async def read_request(
-    stream: BidirectionalStream, reader: StreamReader, read_frame: Callable[[int], Awaitable[ControlMessage]]
-) -> ControlMessage:
-    """Read the message that opens an incoming request stream.
-
-    A stream that ends or resets before a whole message has no request to answer, so both directions are dropped:
-    left alone, the response direction would stay open until the session ends. A protocol error is the caller's to
-    close the session on.
-    """
-    try:
-        return await read_frame(await reader.read_varint())
-    except MoqtProtocolError:
-        raise
-    except Exception:
-        reader.cancel()
-        stream.writable.abort()
-        raise
-
-
-__all__ = ["RequestStream", "RequestStreamHandlers", "open_request_stream", "read_request"]
+__all__ = ["RequestStream", "RequestStreamHandlers", "open_request_stream"]
