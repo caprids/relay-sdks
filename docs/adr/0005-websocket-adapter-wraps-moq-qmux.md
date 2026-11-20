@@ -11,10 +11,10 @@ A browser on a network that blocks UDP, or without a WebTransport that can negot
 the relay over WebTransport. Both fleets already serve MOQT on QMux over WebSocket on TCP 443 (moq-relay's
 `[web]` listener, `rs/moq-relay/src/websocket.rs`). For #321 we decided, with Adam on 2026-10-17:
 
-- **QMux comes from `@moq/qmux`**, pinned to an exact version (0.3.3), and the adapter wraps it to the transport
-  adapter contract (`spec/transport-adapter.md`). It is about 3,500 lines (MIT or Apache-2.0) by the author of
-  moq-relay's own QMux crate, so the two ends are developed together, and it already has the W3C `WebTransport` shape
-  the seam resembles.
+- **QMux comes from `@moq/qmux`**, pinned to an exact version (0.3.3 when this was decided; 0.3.5 since its
+  flow-control credit fix), and the adapter wraps it to the transport adapter contract (`spec/transport-adapter.md`).
+  It is about 3,500 lines (MIT or Apache-2.0) by the author of moq-relay's own QMux crate, so the two ends are
+  developed together, and it already has the W3C `WebTransport` shape the seam resembles.
 - **It ships as its own package, `@mux/relay-websocket`**, exporting `createWebSocketTransport()` and
   `withWebSocketFallback()`. `@mux/relay` gains no dependency, and stays the package with the core alone; the
   application passes the adapter as `createTransport`, as it does `@mux/relay-quic`'s.

@@ -30,7 +30,7 @@ assert.deepEqual(quic.dependencies, { [core.name]: 'workspace:*' }, 'The native 
 // wrapped to the transport adapter contract. The SDK never imports it; the application passes its factory.
 assert.deepEqual(
   websocket.dependencies,
-  { '@moq/qmux': '0.3.3', [core.name]: 'workspace:*' },
+  { '@moq/qmux': '0.3.5', [core.name]: 'workspace:*' },
   'The WebSocket adapter depends on the core and an exact @moq/qmux only',
 );
 // `@caprid/relay/node` loads the adapter when it is installed (#196): an optional peer, never a dependency.
