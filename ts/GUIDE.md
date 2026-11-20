@@ -1,7 +1,12 @@
 # Relay JavaScript SDK
 
-Publish and subscribe to arbitrary track objects through Relay without Video.js, a media catalog,
-or a player. `@caprid/relay` runs in a browser page, and its default transport is **browser
+Publish and subscribe to arbitrary track objects through Relay from a browser page or Node, or to
+live video and audio with WebCodecs and the headless players in `@caprid/moq-media`. A track of data
+needs no Video.js, media catalog, or player. For media, go to [publishing media](#publishing-media)
+and [subscribing to media](#subscribing-to-media), which covers [playing audio](#playing-audio) and
+[playing video](#playing-video).
+
+`@caprid/relay` runs in a browser page, and its default transport is **browser
 WebTransport in a secure context** (HTTPS or localhost). In Node 24 or later, import from
 `@caprid/relay/node`, which connects over native QUIC through the optional `@caprid/relay-quic`
 package (see the [README's Node section](README.md#node)). Other runtimes must supply a compatible

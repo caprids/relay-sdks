@@ -1,8 +1,12 @@
-# MoQ media formats
+# MoQ media formats and players
 
-`@caprid/moq-media` holds pure format helpers for LOC (`draft-ietf-moq-loc-04`) and independent MSF
-(`draft-ietf-moq-msf-01`) catalogs, plus the clocks, frame sequencer, and audio and video players that sit on top of them. It
-depends only on `@caprid/moq-core`. It needs no encoder, transport library, or Relay connection.
+`@caprid/moq-media` has headless audio and video players for the browser, playout clocks, a frame
+sequencer, and the LOC and MSF formats they read.
+
+The formats are LOC (`draft-ietf-moq-loc-04`) and independent MSF (`draft-ietf-moq-msf-01`) catalogs,
+with pure helpers that map WebCodecs chunks and configs to them. [Audio playout](#audio-playout) and
+[video playout](#video-playout) decode and play a subscribed track with no UI. The package depends
+only on `@caprid/moq-core`. It needs no encoder, transport library, or Relay connection.
 
 ```sh
 npm install @caprid/moq-media

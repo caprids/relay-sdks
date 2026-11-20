@@ -1,8 +1,14 @@
 # @caprid/relay
 
-The Relay TypeScript SDK. `connectRelaySubscriber` subscribes to track objects and
-`connectRelayPublisher` publishes them, through Relay, Caprid's Media over QUIC (MoQ) relay service.
-The SDK does not interpret payloads, so you need no player, media catalog, or Video.js.
+`@caprid/relay` is the Relay TypeScript SDK for browsers and Node. With `@caprid/moq-media` it also
+plays live video and audio in a browser page, with no UI.
+
+`connectRelaySubscriber` subscribes to track objects and `connectRelayPublisher` publishes them,
+through Relay, Caprid's Media over QUIC (MoQ) relay service. The connections do not interpret
+payloads, so a track of data needs no media catalog or player. For live media,
+[`@caprid/moq-media`](packages/moq-media/README.md) maps WebCodecs chunks to LOC, reads and writes MSF
+catalogs, and has audio and video players that need no Video.js or media engine
+([publishing media](GUIDE.md#publishing-media), [subscribing to media](GUIDE.md#subscribing-to-media)).
 
 ## Requirements
 
