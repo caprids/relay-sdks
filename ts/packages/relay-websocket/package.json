@@ -24,7 +24,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@moq/qmux": "0.3.3",
+    "@moq/qmux": "0.3.5",
     "@caprid/moq-core": "workspace:*"
   },
   "engines": {

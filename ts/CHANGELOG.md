@@ -5,6 +5,16 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay-websocket`: `@moq/qmux` 0.3.3 to 0.3.5, which fixes a connection flow-control leak. In 0.3.3, a
+  receive stream cancelled with data still in flight was forgotten at once, so the data that arrived after the
+  cancel, and the gap up to a RESET_STREAM's final size, were never credited back to the connection's window
+  (MAX_DATA). Each mid-group unsubscribe leaked its in-flight bytes, and once about one window had leaked, the
+  relay could send nothing more on that WebSocket connection, with the session still open and no error. 0.3.5 keeps
+  a cancelled stream registered until FIN or RESET and credits both. It is the same bug moq-relay 0.17.17 fixed on
+  the relay's side (qmux 0.5.4). Nothing to change in an application.
+
 ## 0.5.0
 
 - `@caprid/moq-core`: after a session's `onClosed`, none of its callbacks run (#527). A subscribe session that has ended
