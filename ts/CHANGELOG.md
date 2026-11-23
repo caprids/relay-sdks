@@ -155,7 +155,7 @@ each section says what changed and what to do about it. How to cut a release is 
   when the 10 s overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
 - `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
   left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
-  ([Test recovery by dropping the transport](GUIDE.md#test-recovery-by-dropping-the-transport)), instead of
+  ([Test recovery by dropping the transport](../docs/guides/errors-and-recovery.md#test-recovery-by-dropping-the-transport)), instead of
   re-implementing it. The wrapper keeps the default's `TRANSPORT_UNAVAILABLE` checks and needs no casts.
 - `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
   passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
@@ -177,7 +177,7 @@ each section says what changed and what to do about it. How to cut a release is 
     re-subscribed about three times a second, receiving the track's last object again each time.
   - A plain subscription is unchanged: it reports the done (`onPublisherDone`) and never subscribes again.
 - Docs only, no code change:
-  - [GUIDE.md](GUIDE.md#content-security-policy) lists the Content Security Policy a page needs (#385): `connect-src`
+  - [Connecting & authentication](../docs/guides/connecting.md#content-security-policy) lists the Content Security Policy a page needs (#385): `connect-src`
     for each relay's `https:` and `wss:` origins, and `blob:` and `'wasm-unsafe-eval'` in `script-src`. Without
     `'wasm-unsafe-eval'` the audio player loses Opus loss concealment with no error; only
     `player.joinPhases.opusLoadedUs === null` shows it.

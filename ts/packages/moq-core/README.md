@@ -63,8 +63,8 @@ The implementation and its regression tests come from Video.js, under Apache-2.0
 revision, the original file hashes, and every change made since, and `NOTICE` carries the attribution. Video.js still
 has its own copy of these modules. Moving Video.js onto this package is a separate step.
 
-For Relay application usage and local installation, start with the
-[JavaScript quickstart](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#first-round-trip).
+For Relay application usage and installation, start with the
+[Quickstart](https://www.caprid.com/docs/getting-started/quickstart/).
 
 ## Stability
 

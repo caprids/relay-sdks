@@ -1,5 +1,7 @@
 # Relay Python SDK
 
+> **Note:** The published task-oriented Relay and media guides now live in [`../docs/guides/`](../docs/guides/connecting.md) and at [caprid.com/docs](https://www.caprid.com/docs/). This file is retained for local reference and repo-checkout walkthroughs.
+
 The Python SDK for Relay. It connects to a Relay endpoint from any Python 3.11+ asyncio program,
 publishes data, and subscribes to track objects. No browser is involved. The SDK speaks MOQT
 directly on QUIC (native QUIC) through aioquic.

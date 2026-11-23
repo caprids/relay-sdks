@@ -1,17 +1,18 @@
 # caprid-relay
 
-The Relay Python SDK. `connect_relay_subscriber` subscribes to track objects and
-`connect_relay_publisher` publishes them, through Relay, Caprid's Media over QUIC (MoQ) relay service.
-Payloads are bytes the SDK does not interpret. You need no browser, player, or media catalog.
+The Relay Python SDK. `connect_supervised_publisher` and `connect_supervised_subscriber` publish
+and subscribe to track objects through Relay, Caprid's Media over QUIC (MoQ) relay service, with
+automatic reconnection and credential rotation. Payloads are raw bytes—you need no browser, player,
+or media catalog.
 
 ## Requirements
 
-- Python 3.11 or later, and asyncio.
+- Python 3.11 or later, and `asyncio`.
 - Network access to the relay over QUIC on UDP. The default transport is native QUIC (MOQT directly
-  on QUIC) through aioquic, which installs as a dependency. To use another transport, pass
-  `create_transport`.
-- A short-lived Relay JWT authorized for the namespace you use, and the endpoint of any relay other
-  than the hosted one. The SDK uses tokens but does not issue them.
+  on QUIC) through `aioquic`, which installs as a dependency. Pass `create_transport` to supply a
+  custom transport.
+- A short-lived Relay JWT authorized for the namespace you use (and an explicit `url` only for a
+  relay other than the hosted one). The SDK consumes tokens; it does not issue them.
 
 ## Install
 
@@ -19,8 +20,14 @@ Payloads are bytes the SDK does not interpret. You need no browser, player, or m
 uv add caprid-relay
 ```
 
-`pip install caprid-relay` works too. It installs `caprid-moq-core` as a dependency. For media
-publishing and reading, add `caprid-moq-media`.
+`pip install caprid-relay` works too. Optional companion packages (install matching versions):
+
+| Package | When to add it |
+| --- | --- |
+| `caprid-relay` | Relay client (`connect_supervised_*`, `connect_relay_*`, `caprid_relay.media`) |
+| `caprid-moq-media` | LOC framing, MSF catalogs, playout clock, frame sequencer |
+| `caprid-moq-media[opus]` | Opus encoding and decoding via PyAV for voice bots |
+| `caprid-moq-core` | Low-level MOQT wire codec (installed automatically by `caprid-relay`) |
 
 ## Publish and subscribe
 
@@ -29,9 +36,9 @@ import asyncio
 
 from caprid_relay import (
     MoqtObject,
-    RelaySubscriptionHandlers,
-    connect_relay_publisher,
-    connect_relay_subscriber,
+    RelayWantHandlers,
+    connect_supervised_publisher,
+    connect_supervised_subscriber,
     read_text,
 )
 
@@ -45,24 +52,27 @@ async def main(token: str) -> None:
             arrived.set_result(read_text(obj))
 
     async with (
-        await connect_relay_publisher(namespace=namespace, get_token=lambda: token) as publisher,
-        await connect_relay_subscriber(get_token=lambda: token) as subscriber,
+        await connect_supervised_publisher(namespace=namespace, get_token=lambda: token) as publisher,
+        await connect_supervised_subscriber(get_token=lambda: token) as subscriber,
     ):
         ticker = publisher.register_track("ticker")
-        await publisher.announced
-        subscription = subscriber.subscribe(namespace, "ticker", RelaySubscriptionHandlers(on_object=on_object))
-        await subscription.subscribed  # a fresh namespace can briefly reject this with error 16; retry it
-        await ticker.write_text("hello from caprid-relay")  # waits for the subscriber's demand
+        subscriber.want(
+            "ticker",
+            namespace,
+            "ticker",
+            RelayWantHandlers(on_object=on_object),
+            generations=True,
+        )
+        await ticker.write_text("hello from caprid-relay")
         print(await arrived)
 ```
 
-With no `url`, each connection dials the hosted Relay, `https://relay.mux.global`, with the token's
-root as the path, so namespaces are relative to that root. Pass `url` first for another relay,
-region or room; `room_endpoint` builds one.
-
-The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/python/README.md#run-the-full-demo-from-a-checkout)
-runs the complete version of this, with credential handling, the subscribe retry, a deadline, and
-cleanup on failure.
+With no `url`, each connection dials the hosted Relay (`https://relay.mux.global`) rooted at the
+token's root, so namespaces are relative to that root. Pass `url` for another relay, region, or
+room (`room_endpoint` builds one). See
+[Connecting & authentication](https://www.caprid.com/docs/relay/connecting/) and
+[Low-level connections](https://www.caprid.com/docs/relay/low-level/) for single-shot
+`connect_relay_publisher` / `connect_relay_subscriber` usage.
 
 ## Stability
 
@@ -75,13 +85,11 @@ later.
 
 ## Documentation
 
-- [Python guide](https://github.com/caprids/relay-sdks/blob/main/python/README.md): the quickstart,
-  subscription and publishing lifecycles, async consumption, supervised connections, the aioquic
-  transport, and the media examples.
-- API reference: in a checkout of the repository, run `mise run python:docs` to build it from the
-  source.
-- [Errors and recovery](https://github.com/caprids/relay-sdks/blob/main/python/README.md#errors-and-recovery):
-  stable `RelayError.code` and `phase` values, the exception subclasses, preserved transport causes,
-  and how to recover without assuming delivery or a safe replay.
-- [Shared specification](https://github.com/caprids/relay-sdks/blob/main/spec/README.md): the
-  protocol pins, behavior contract, and test vectors every Relay SDK implements.
+- [Quickstart](https://www.caprid.com/docs/getting-started/quickstart/) and
+  [Relay guides](https://www.caprid.com/docs/relay/connecting/): connecting, pub/sub, discovery,
+  switching tracks, control & telemetry, errors & recovery, and Python media.
+- [Python API reference](https://www.caprid.com/docs/reference/python/caprid_relay/): generated from the source.
+- [Shared specification](https://www.caprid.com/docs/spec/): protocol pins, behavior contract, and
+  test vectors every Relay SDK implements.
+- **AI agents**: machine-readable docs at [llms.txt](https://www.caprid.com/llms.txt) and the
+  installable Caprid skill at [SKILL.md](https://www.caprid.com/docs/agents/SKILL.md).

@@ -9,15 +9,15 @@ can break the API.
 
 | Directory | Contents | Status |
 | --- | --- | --- |
+| `docs/guides/` | Unified TypeScript + Python task guides synced to [caprid.com/docs](https://www.caprid.com/docs/) | Source of truth |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
 | `ts/` | TypeScript SDK `@caprid/relay`, the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, the optional `@caprid/moq-mediabunny` file-input adapter, and the `@caprid/relay-quic` and `@caprid/relay-websocket` transport adapters, as a pnpm workspace | Working. Live-tested against Caprid's relays |
 | `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Live-tested against Caprid's relays. What it does not have yet is marked "TypeScript only" in [spec/vocabulary.md](spec/vocabulary.md) |
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
-Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (Node; browsers use WebTransport) or
-[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one installs the
-published packages into a new project and runs a short publish and subscribe round trip. Each guide
-then runs the repository's fuller demo from a checkout.
+Start with the [Quickstart](https://www.caprid.com/docs/getting-started/quickstart/) or the unified
+[Relay guides](docs/guides/connecting.md) (TypeScript + Python side by side). For working from a
+local checkout of this repository, see [ts/GUIDE.md](ts/GUIDE.md) and [python/README.md](python/README.md).
 
 ## Development
 

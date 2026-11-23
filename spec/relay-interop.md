@@ -889,8 +889,8 @@ in the same pull request that changes both cores.
 ## Browser QUIC limits
 
 These are limits of the browser's QUIC stack, not of moq-relay, recorded here with the other
-transport findings. The TypeScript guide's
-[browser transport limits](../ts/GUIDE.md#browser-transport-limits) gives the application-facing
+transport findings. The
+[browser transport limits](../docs/guides/errors-and-recovery.md#browser-transport-limits) guide gives the application-facing
 rules. Observed in Chromium 147 (2026-09); they may change between versions, and other browsers are
 untested.
 
