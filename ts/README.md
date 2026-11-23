@@ -3,28 +3,25 @@
 `@caprid/relay` is the Relay TypeScript SDK for browsers and Node. With `@caprid/moq-media` it also
 plays live video and audio in a browser page, with no UI.
 
-`connectRelaySubscriber` subscribes to track objects and `connectRelayPublisher` publishes them,
-through Relay, Caprid's Media over QUIC (MoQ) relay service. The connections do not interpret
-payloads, so a track of data needs no media catalog or player. For live media,
-[`@caprid/moq-media`](packages/moq-media/README.md) maps WebCodecs chunks to LOC, reads and writes MSF
-catalogs, and has audio and video players that need no Video.js or media engine
-([publishing media](GUIDE.md#publishing-media), [subscribing to media](GUIDE.md#subscribing-to-media)).
+`connectSupervisedPublisher` and `connectSupervisedSubscriber` publish and subscribe to track objects
+through Relay, Caprid's Media over QUIC (MoQ) relay service, with automatic reconnection and
+credential rotation. Payloads are raw bytes, so a data track needs no media catalog or player. For
+live media, [`@caprid/moq-media`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/moq-media/README.md)
+maps WebCodecs chunks to LOC, reads and writes MSF catalogs, and provides headless audio and video
+players ([browser audio & video](https://www.caprid.com/docs/media/browser/)).
 
 ## Requirements
 
-- Browser WebTransport in a secure context (HTTPS or localhost). This is the default transport.
-  It needs WebTransport protocol negotiation, which the live tests verify against the Relay in
-  Chromium and in Firefox 155 or later (Playwright's builds). WebKit cannot open a WebTransport
-  session to the Relay yet.
-- Node 24 or later: import from `@caprid/relay/node`, which connects over native QUIC through
-  `@caprid/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
-  factory.
-- Where UDP is blocked, or the browser has no usable WebTransport (Safari), pass
-  [`@caprid/relay-websocket`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
-  `createWebSocketTransport()` as `createTransport`. The connection then runs QMux over WebSocket on
-  TCP 443 ([networks without UDP](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#networks-without-udp-qmux-over-websocket)).
-- A short-lived Relay JWT authorized for the namespace you use, and the endpoint of any relay other
-  than the hosted one. The SDK consumes tokens. It does not issue them.
+- **Browsers**: WebTransport in a secure context (HTTPS or localhost) is the default transport
+  (verified in Chromium and Firefox 155+).
+- **Node 24+**: import from `@caprid/relay/node`, which connects over native QUIC through
+  `@caprid/relay-quic` ([Node](#node)).
+- **Networks without UDP / Safari**: pass
+  [`@caprid/relay-websocket`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-websocket/README.md)'s
+  `withWebSocketFallback()` or `createWebSocketTransport()` as `createTransport` to run QMux over
+  WebSocket on TCP 443 ([networks without UDP](https://www.caprid.com/docs/relay/connecting/#networks-without-udp-typescript)).
+- **Credentials**: a short-lived Relay JWT authorized for the namespace you use (and an explicit
+  `url` only for a relay other than the hosted one). The SDK consumes tokens; it does not issue them.
 
 ## Install
 
@@ -32,49 +29,47 @@ catalogs, and has audio and video players that need no Video.js or media engine
 npm install @caprid/relay
 ```
 
-Add `@caprid/relay-quic` for Node ([Node](#node)), `@caprid/relay-websocket` for networks without
-UDP, and `@caprid/moq-media` to publish or play media. To build the packages from a checkout of this
-repository instead, see
-[Use the local packages in your application](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#use-the-local-packages-in-your-application).
+Optional companion packages (install matching versions):
+
+| Package | When to add it |
+| --- | --- |
+| `@caprid/relay-quic` | Node 24+ native QUIC transport (`@caprid/relay/node`) |
+| `@caprid/relay-websocket` | Fallback over TCP 443 for Safari or UDP-blocked networks |
+| `@caprid/moq-media` | Live browser audio/video players, LOC framing, MSF catalogs |
+| `@caprid/moq-mediabunny` | Publish existing media files with Mediabunny |
 
 ## Publish and subscribe
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText } from '@caprid/relay';
+import { connectSupervisedPublisher, connectSupervisedSubscriber, readText } from '@caprid/relay';
 
-const getToken = () => token; // a Relay JWT allowed to publish and subscribe under its root
+const getToken = () => token; // short-lived Relay JWT
 const namespace = ['quickstart', 'unique-run']; // relative to the token's root
 
-const publisher = await connectRelayPublisher({ namespace, getToken });
+const publisher = await connectSupervisedPublisher({ namespace, getToken });
 const ticker = publisher.registerTrack({ track: 'ticker' });
-await publisher.announced;
 
-const subscriber = await connectRelaySubscriber({ getToken });
-let received: (text: string) => void;
-const arrived = new Promise<string>((resolve) => { received = resolve; });
-const subscription = subscriber.subscribe(
-  { namespace, track: 'ticker' },
-  { onObject: (object) => { if (object.status === 'normal') received(readText(object)); } },
-);
-await subscription.subscribed; // a fresh namespace can briefly reject this with error 16; retry it
+const subscriber = await connectSupervisedSubscriber({ getToken });
+const arrived = new Promise<string>((resolve) => {
+  subscriber.want(
+    'ticker',
+    { namespace, track: 'ticker', generations: true },
+    { onObject: (object) => { if (object.status === 'normal') resolve(readText(object)); } },
+  );
+});
 
-await ticker.writeText('hello from @caprid/relay'); // waits for the subscriber's demand
+await ticker.writeText('hello from @caprid/relay');
 console.log(await arrived);
 subscriber.close();
 await publisher.close();
 ```
 
-With no `url`, each connection dials the hosted Relay, `https://relay.mux.global`, with the
-token's root as the path, so namespaces are relative to that root. Pass `url` for another relay,
-region or room; `roomEndpoint` builds one
-([endpoint and credentials](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#endpoint-and-credentials)).
-
-The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#run-the-full-demo-from-a-checkout) runs the complete version of this, with
-credential handling, the subscribe retry, a deadline, and cleanup on failure.
-
-These connections never reconnect. For a live application, `connectSupervisedPublisher` and
-`connectSupervisedSubscriber` reconnect with backoff. They keep tracks registered and subscribed
-across connections and publisher restarts ([stay connected](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#stay-connected-supervised-connections)).
+With no `url`, each connection dials the hosted Relay (`https://relay.mux.global`) rooted at the
+token's root, so namespaces are relative to that root. Pass `url` (or build one with
+`roomEndpoint`) for another relay, region, or room. See
+[Connecting & authentication](https://www.caprid.com/docs/relay/connecting/) and
+[Low-level connections](https://www.caprid.com/docs/relay/low-level/) for single-shot
+`connectRelayPublisher` / `connectRelaySubscriber` usage.
 
 ## Node
 
@@ -174,12 +169,12 @@ install matching versions. A release supports:
 
 ## Documentation
 
-- [TypeScript guide](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md): the quickstart, subscription and publishing lifecycles, async
-  consumption, supervised connections, publishing media, the audio and video players, and control
-  and telemetry tracks.
-- API reference: run `mise run ts:docs` from a checkout to build it from the source into
-  `ts/docs-api/`.
-- [Errors and recovery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#errors-and-recovery): stable `RelayError` codes and phases, and
-  how to recover without assuming delivery or safe replay.
-- [Shared specification](https://github.com/caprids/relay-sdks/blob/main/spec/README.md): the protocol pins, behavior contract, and test vectors
-  every Relay SDK implements.
+- [Quickstart](https://www.caprid.com/docs/getting-started/quickstart/) and
+  [Relay guides](https://www.caprid.com/docs/relay/connecting/): connecting, pub/sub, discovery,
+  switching tracks, control & telemetry, errors & recovery, and browser media.
+- [TypeScript API reference](https://www.caprid.com/docs/reference/typescript/): generated from the
+  source with TypeDoc.
+- [Shared specification](https://www.caprid.com/docs/spec/): protocol pins, behavior contract, and
+  test vectors every Relay SDK implements.
+- **AI agents**: machine-readable docs at [llms.txt](https://www.caprid.com/llms.txt) and the
+  installable Caprid skill at [SKILL.md](https://www.caprid.com/docs/agents/SKILL.md).

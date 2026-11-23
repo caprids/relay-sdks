@@ -1,5 +1,7 @@
 # Relay JavaScript SDK
 
+> **Note:** The published task-oriented Relay and media guides now live in [`../docs/guides/`](../docs/guides/connecting.md) and at [caprid.com/docs](https://www.caprid.com/docs/). This file is retained for local reference and repo-checkout walkthroughs.
+
 Publish and subscribe to arbitrary track objects through Relay from a browser page or Node, or to
 live video and audio with WebCodecs and the headless players in `@caprid/moq-media`. A track of data
 needs no Video.js, media catalog, or player. For media, go to [publishing media](#publishing-media)

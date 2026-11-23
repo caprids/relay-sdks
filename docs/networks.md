@@ -28,14 +28,14 @@ matters, this page names the release.
 MOQT runs over QUIC. Browsers use WebTransport, and Node and Python use native QUIC. QUIC detects
 lost packets, resends their data, and runs congestion control. A web page cannot configure either,
 because the browser's QUIC stack owns the connection
-([browser transport limits](../ts/GUIDE.md#browser-transport-limits)).
+([browser transport limits](guides/errors-and-recovery.md#browser-transport-limits)).
 
 Resending does not guarantee delivery. When a [delivery timeout](#lateness-drop-instead-of-stall)
 resets a stream, or the connection drops, the unsent data is gone. A write that completed can still
 be lost without an error. The publisher keeps nothing to replay, and a reconnect restores
 subscriptions, not missing objects ([publishing](../spec/behavior.md#publishing)). Where every
 message matters, number the messages and have the receiver reply
-([control and telemetry](../ts/GUIDE.md#control-and-telemetry)).
+([control and telemetry](guides/control-telemetry.md)).
 
 Each group travels on its own QUIC stream. A packet lost from one group's stream holds up only that
 group. Later groups keep arriving, so a viewer can receive them out of order. The SDK's
@@ -44,7 +44,7 @@ are too late.
 
 On a network that blocks UDP, the TypeScript SDK can carry MOQT on QMux over a WebSocket instead, if
 you opt in with the `@caprid/relay-websocket` package
-([networks without UDP](../ts/GUIDE.md#networks-without-udp-qmux-over-websocket)). The Python SDK has
+([networks without UDP](guides/connecting.md#networks-without-udp-typescript)). The Python SDK has
 no equivalent. A WebSocket runs over TCP, which also resends, but every track shares one ordered byte
 stream, so one lost packet holds up all of them until TCP resends it. The publisher also cannot see
 the relay's acknowledgements over WebSocket, so its delivery timeouts cannot stop TCP from resending
@@ -67,14 +67,14 @@ backlog:
 - The sequencer drops a video frame later than the clock's target latency, with the rest of its
   group, and resumes at a later keyframe. It drops an audio frame later than `lateDropUs` (40 ms by
   default), and the player conceals the gap
-  ([subscribing to media](../ts/GUIDE.md#subscribing-to-media)).
+  ([subscribing to media](guides/browser-media.md#subscribing-and-sequencing-frames)).
 - When the delay rises and stays up, the clock re-anchors (a `resync`) instead of staying behind.
 - A supervised subscriber's `catchUp(key)` / `catch_up(key)` replaces a subscription that keeps
   delivering late with a new one at the live edge, which drops the relay's backlog. In TypeScript,
   the sequencer's `catchUpAfterUs` decides when.
 - For data that is not media, such as telemetry, a latest-value reader drops superseded values, and
   its `late` predicate decides when to catch up
-  ([latest-wins values](../ts/GUIDE.md#latest-wins-values)).
+  ([latest-wins values](guides/control-telemetry.md#latest-wins-values)).
 
 A relay that supports the MoQ Timestamp extension's max age drops, for each viewer, any group that
 a newer group superseded more than the viewer's `maxAge` ago. The SDK sends `maxAge` only to a relay
@@ -95,7 +95,7 @@ The publisher raises the audio timeout to 1 to 2 s, so its transport keeps resen
 The receiver drops nothing as late (`lateDropUs: Infinity`) and waits for a missing group at least as
 long as that timeout (`reorderWindowUs`), because a resent group can arrive after the groups that
 follow it. These sequencer options are TypeScript only
-([voice: delivery per direction](../ts/GUIDE.md#voice-delivery-per-direction)).
+([voice: delivery per direction](guides/voice.md#delivery-policy-per-direction)).
 
 ## Prioritization
 
@@ -104,7 +104,7 @@ When there is not enough bandwidth for everything, audio should go first.
 - **Viewer downlink.** The relay orders what it sends each viewer by that viewer's subscriber
   priority. `mediaSubscribeParameters('audio' | 'video')` sets 16 for audio and 96 for video. In a
   live test on a capped downlink, audio's p99 latency fell from 255 ms to 74 ms
-  ([subscribing to media](../ts/GUIDE.md#subscribing-to-media)).
+  ([subscribing to media](guides/browser-media.md#subscribing-and-sequencing-frames)).
 - **Publisher uplink.** `mediaTrackProperties` gives tracks the same publisher priorities, and the
   TypeScript publisher turns them into stream send order. Firefox 155 and later, Node
   (`@caprid/relay-quic`), and the WebSocket transport follow it. Chromium's WebTransport and the
@@ -136,7 +136,7 @@ video group, or the viewer drops it as late and resumes at the next keyframe.
 
 ## Audio concealment and jitter buffer
 
-The TypeScript audio player (`createAudioPlayer`, [playing audio](../ts/GUIDE.md#playing-audio))
+The TypeScript audio player (`createAudioPlayer`, [playing audio](guides/browser-media.md#playing-audio))
 fills what is missing instead of playing silence.
 
 - **Loss concealment.** libopus's packet loss concealment synthesizes a gap of up to 120 ms that FEC
@@ -163,7 +163,7 @@ On the publisher, a frame writer (`createFrameWriter`) reports congestion.
   Each `write()` resolves to what happened to the frame (`'sent'`, `'dropped'`, `'stale'`, and
   others), and `writer.backlog` counts the frames waiting.
 - After a drop, a failure, or a change in demand, `onKeyframeNeeded` asks for a keyframe, so viewers
-  resume at a keyframe ([publishing lifecycle](../ts/GUIDE.md#publishing-lifecycle)).
+  resume at a keyframe ([publishing media](guides/browser-media.md#publishing-media-with-webcodecs)).
 - The writer skips frames that no viewer has asked for, and `track.hasDemand` tells you when to pause
   the encoder because nobody is watching.
 
@@ -181,7 +181,7 @@ rendition. `subscribeSwitchable` with `switchTo` moves a viewer between renditio
 It subscribes to the new track while the old one keeps playing, and cuts over on the first object of
 the new track that passes your `until` test. Write a test that compares your media timestamps with
 what was already shown. The default, the first object, can be a stale cached group or can skip media,
-and group IDs do not line up across tracks ([switching tracks](../ts/GUIDE.md#switching-tracks)). A
+and group IDs do not line up across tracks ([switching tracks](guides/switching-tracks.md)). A
 supervised subscriber's `want()` switches the same way, with the same `until`, when you want a key
 again with another track. Your application decides when to switch. The frame sequencer's `stats`
 (late frames, skipped groups, resyncs) and the audio player's underruns are signals to switch on.
@@ -193,11 +193,11 @@ need.
 
 - **Supervised connections.** `connectSupervisedPublisher` and `connectSupervisedSubscriber`
   reconnect with backoff, register your tracks again on each new connection, and resubscribe what you
-  asked for ([stay connected](../ts/GUIDE.md#stay-connected-supervised-connections)). `staleAfterMs`
+  asked for ([stay connected](guides/connecting.md#token-expiry-and-proactive-rotation)). `staleAfterMs`
   resubscribes a track that went silent.
 - **Browser limits.** Chromium 147 closed a QUIC connection that heard nothing for about 5 s with
   data outstanding, even after the network came back. Other browsers are untested
-  ([browser transport limits](../ts/GUIDE.md#browser-transport-limits)). A longer outage needs a new
+  ([browser transport limits](guides/errors-and-recovery.md#browser-transport-limits)). A longer outage needs a new
   connection, and a supervised connection opens one for you
   ([publisher recovery](../spec/publisher-recovery.md)).
 - **Networks without UDP.** In TypeScript, opt in with `withWebSocketFallback()` from

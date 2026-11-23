@@ -163,9 +163,9 @@ than assuming that the relay rescaled to microseconds.
 `createFrameSequencer({ clock })` turns one subscribed track's objects into frames in decode order. Objects can arrive
 out of order across group streams, and the sequencer drops what is too late against the playout clock.
 `createFrameReader` in `@caprid/relay/media` drives it from a subscription (see
-[subscribing to media](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs`, and
+[subscribing and sequencing frames](https://www.caprid.com/docs/media/browser/#subscribing-and-sequencing-frames)). Per track, `lateDropUs`, `reorderWindowUs`, and
 `catchUpAfterUs` tune audio delivery for a listener or for speech-to-text. `missingGroups` on a frame names the groups
-skipped before it (see [voice delivery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#voice-delivery-per-direction)).
+skipped before it (see [voice delivery](https://www.caprid.com/docs/media/voice/#delivery-policy-per-direction)).
 
 ## Media timeline
 
@@ -223,7 +223,7 @@ Give an audio-only broadcast's playout clock `AUDIO_ONLY_TARGET_LATENCY_US` (500
 default waits for keyframe intervals.
 
 The player takes structural Web Audio types, so it imports no DOM library. Its tests run under a fake context that runs
-the real worklet. See [playing audio](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#playing-audio) and
+the real worklet. See [playing audio](https://www.caprid.com/docs/media/browser/#playing-audio) and
 [audio player](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#audio-player).
 
 ## Video playout
@@ -257,7 +257,7 @@ subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribePara
 - `player.stats` counts frames decoded, shown, dropped by the clock, and skipped before a keyframe. `player.joinPhases`
   records when the first frame was pushed, decoded, and shown.
 
-See [playing video](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#playing-video) and
+See [playing video](https://www.caprid.com/docs/media/browser/#playing-video) and
 [video player](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#video-player).
 
 ## Stability

@@ -30,12 +30,12 @@ against that file.
   to disk. Tooling redacts the supplied token from browser diagnostics it forwards. The browser
   itself is outside that guarantee: Chromium can log the full authenticated WebTransport URL on
   handshake failure. Applications must sanitize captured diagnostics before storing or forwarding
-  them. See `ts/GUIDE.md`, "Browser token exposure".
+  them. See [browser token exposure](../docs/guides/connecting.md#browser-token-exposure).
 - Connecting has one deadline that covers token resolution and both handshakes, transport and
   MOQT setup.
 - The browser transport may end a silent connection after about 5 s while data is outstanding.
   The SDK reports it as `TRANSPORT_ERROR` in phase `connection` and cannot tell it apart from other
-  losses. See [browser transport limits](../ts/GUIDE.md#browser-transport-limits).
+  losses. See [browser transport limits](../docs/guides/errors-and-recovery.md#browser-transport-limits).
 
 ### Transport fallback
 
@@ -119,7 +119,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
 | `RECONNECTING` | A [supervised publisher](#supervised-publisher) had no live generation for the operation, or the connection under it ended (phase `connection`). Nothing is replayed: write the next object once the publisher is live again. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
-| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../ts/GUIDE.md#browser-transport-limits)). |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../docs/guides/errors-and-recovery.md#browser-transport-limits)). |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without a WebTransport that can negotiate protocols; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR`. |
 
