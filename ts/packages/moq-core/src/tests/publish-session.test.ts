@@ -425,7 +425,7 @@ describe('createMoqtPublishSession', () => {
       // Duplicate on moq-lite-rs.
       expect(video.aliases).toEqual([videoRequestId]);
       expect(subscribes.map((s) => s.trackName)).toEqual(['video']);
-      expect(bindings).toEqual([{ trackName: 'video', trackAlias: videoRequestId }]);
+      expect(bindings).toEqual([{ trackNamespace: NAMESPACE, trackName: 'video', trackAlias: videoRequestId }]);
     });
 
     // The ack lands as the driver's update completion (`onUpdateOk` sits
@@ -2172,7 +2172,7 @@ describe('TRACK_STATUS on the publish session', () => {
     await vi.waitFor(() => {
       expect(subscribe.received).toHaveLength(1);
     });
-    expect(bindings).toEqual([{ trackName: 'video', trackAlias: 91 }]);
+    expect(bindings).toEqual([{ trackNamespace: NAMESPACE, trackName: 'video', trackAlias: 91 }]);
 
     track.objectPublished({ group: 5, object: 2 });
     const status = await rawTrackStatus(pair.server, 'video', 93, protocol);
@@ -2186,7 +2186,7 @@ describe('TRACK_STATUS on the publish session', () => {
       parameters: { largestObject: { group: 5, object: 2 } },
     });
 
-    expect(bindings).toEqual([{ trackName: 'video', trackAlias: 91 }]);
+    expect(bindings).toEqual([{ trackNamespace: NAMESPACE, trackName: 'video', trackAlias: 91 }]);
     expect(ends).toEqual([]);
     expect(subscribe.ended()).toBe(false);
     await expect(session.openUniStream(91)).resolves.toBeDefined();

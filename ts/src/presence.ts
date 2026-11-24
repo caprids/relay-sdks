@@ -1,0 +1,754 @@
+import { createDocumentService } from './document-service.js';
+import type { PublishingRoot, PublishingRootsChange } from './publishing-roots.js';
+import { synchronousCallback } from './subscription.js';
+import type { SupervisedPublisher } from './supervised-publisher.js';
+import type { RestartReason, SupervisedSubscriber } from './supervised-subscriber.js';
+import { DEFAULT_PUBLISHER_PRIORITY, payloadBytes, trackName } from './validation.js';
+
+/** The presence track's default name. */
+export const PRESENCE_TRACK = 'presence';
+
+/**
+ * How often a presence publisher resends an unchanged document by default. A view calls a member stale after three
+ * heartbeats with nothing new (6 s), before the relay withdraws a crashed publisher at its idle timeout (about 10 s).
+ */
+export const PRESENCE_HEARTBEAT_MS = 2000;
+
+/**
+ * Presence's Default Publisher Priority and SUBSCRIBER_PRIORITY: between audio (16) and video (96), so heartbeats do
+ * not queue behind video on a congested link and turn congestion into false stale reports.
+ */
+const PRESENCE_PRIORITY = 32;
+/** How long a view's first report waits for the documents of the roots publishing when `publishingRoots()` loaded. */
+const PRESENCE_LOAD_LIMIT_MS = 1000;
+const STALE_HEARTBEATS = 3;
+const MIN_HEARTBEAT_MS = 100;
+/** Three heartbeats, the stale window, must fit a timer. */
+const MAX_HEARTBEAT_MS = 715_827_882;
+
+/** Options for {@link publishPresence}. */
+export interface PublishPresenceOptions {
+  /** The track name. Default {@link PRESENCE_TRACK}; listeners use the same. */
+  track?: string;
+  /**
+   * Resend an unchanged document this long after the last change or resend, in milliseconds: an integer from 100 to
+   * 715827882.
+   * Default {@link PRESENCE_HEARTBEAT_MS}; listeners use the same.
+   */
+  heartbeatMs?: number;
+}
+
+/** This participant's presence document, served on its supervised publisher. It lasts as long as the publisher. */
+export interface PresencePublisher<T> {
+  /** The latest document given. */
+  readonly document: T;
+  /**
+   * Replace the document. It is encoded at once, and a `TypeError` or `RangeError` leaves the current one in place;
+   * it is sent only if its JSON differs. Returns at once.
+   */
+  update(document: T): void;
+}
+
+/**
+ * Publish this participant's presence: register `track` on the supervised publisher and serve `document` as compact
+ * UTF-8 JSON, one group per send, on every relay subscription, on every change, and again `heartbeatMs` after the last
+ * change or resend, which keeps listeners from calling it stale. A heartbeat with nobody subscribed sends nothing. Presence ends
+ * with the publisher: close the publisher to leave. Arguments are checked at once, and a document `JSON.stringify`
+ * cannot encode is a `TypeError`, and one over the 16 MiB object limit a `RangeError`, before anything is registered.
+ *
+ * ```ts
+ * const me = publishPresence(publisher, { name: 'Ada', joinedAt: Date.now() });
+ * me.update({ ...me.document, name: 'Ada L.' });
+ * ```
+ */
+export function publishPresence<T>(
+  publisher: Pick<SupervisedPublisher, 'registerTrack' | 'closed'>,
+  document: T,
+  options: PublishPresenceOptions = {},
+): PresencePublisher<T> {
+  if (typeof options !== 'object' || options === null) throw new TypeError('options must be an object');
+  const track = trackName(options.track ?? PRESENCE_TRACK);
+  const heartbeatMs = heartbeatOption(options.heartbeatMs);
+  let current = document;
+  let bytes = presenceBytes(document);
+  const service = createDocumentService(
+    publisher.registerTrack({
+      track,
+      trackProperties: [{ type: DEFAULT_PUBLISHER_PRIORITY, value: PRESENCE_PRIORITY }],
+    }),
+    bytes,
+  );
+  // The service ends with the track, and the track with the publisher.
+  void service.serve().catch(() => {});
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const beat = () => {
+    clearTimeout(timer);
+    if (stopped) return;
+    timer = setTimeout(() => {
+      service.update(bytes);
+      beat();
+    }, heartbeatMs);
+  };
+  beat();
+  void publisher.closed.then(() => {
+    stopped = true;
+    clearTimeout(timer);
+  });
+  return {
+    get document() {
+      return current;
+    },
+    update(next) {
+      const encoded = presenceBytes(next);
+      current = next;
+      if (sameBytes(encoded, bytes)) return;
+      bytes = encoded;
+      service.update(bytes);
+      beat();
+    },
+  };
+}
+
+/** One member with a presence document, as a view reports it. Replaced, never changed, when anything in it changes. */
+export interface PresenceMember<T> extends PublishingRoot {
+  /** The newest document read from the member. */
+  readonly document: T;
+  /** `Date.now()` when the view first read the member's document; kept across updates, staleness and rotations. */
+  readonly since: number;
+  /**
+   * No new document for three heartbeats. The count pauses only while the view's own connection is down (the member's
+   * want restarted for `connection`), and the next subscription starts a full window; any other restart leaves it
+   * running. The member is still announced; most UIs hide it.
+   */
+  readonly stale: boolean;
+}
+
+/** What `onChanged` receives: what changed since the last call, and who is present now. */
+export interface PresenceChange<T> {
+  /** Members whose first document arrived. On the first call (`initial`), everyone with one at the load. */
+  readonly joined: readonly PresenceMember<T>[];
+  /** Reported members that left, as last reported. A member that never had a document leaves unreported. */
+  readonly left: readonly PresenceMember<T>[];
+  /**
+   * Members whose document bytes changed and parsed, even when `parse` returned a value equal to the old one. A stale
+   * member with a changed document is in `resumed` too.
+   */
+  readonly updated: readonly PresenceMember<T>[];
+  /**
+   * Members that went stale. On the first call, the members in `joined` that are stale at the load, so a member is
+   * always in `stale` before it is in `resumed`.
+   */
+  readonly stale: readonly PresenceMember<T>[];
+  /** Stale members with a new document. */
+  readonly resumed: readonly PresenceMember<T>[];
+  /**
+   * Every reported member after this change, by id, in the order `publishingRoots()` reported them. The same map as
+   * `present`.
+   */
+  readonly present: ReadonlyMap<string, PresenceMember<T>>;
+  /** True on the first call only: the view has just loaded. */
+  readonly initial: boolean;
+}
+
+/** What a presence view follows. */
+export interface PresenceViewOptions<T> {
+  /**
+   * The prefix whose members to follow, as for `publishingRoots()`: each member is a root, whose supervised publisher
+   * serves `<prefix>/<id>`.
+   */
+  prefix: readonly string[];
+  /** The track name. Default {@link PRESENCE_TRACK}. */
+  track?: string;
+  /**
+   * The publishers' heartbeat, in milliseconds: an integer from 100 to 715827882. Default
+   * {@link PRESENCE_HEARTBEAT_MS}. A member is stale after three heartbeats with no new document.
+   */
+  heartbeatMs?: number;
+  /**
+   * Check a peer's parsed JSON and return its document, or throw. A throw skips that document: the member keeps the
+   * one it had, or stays unreported. The view reports refusals nowhere, so log inside `parse` to see them. Without it,
+   * documents are the parsed JSON, typed `unknown`.
+   */
+  parse?(value: unknown): T;
+}
+
+/** The callbacks a presence view delivers to. Like `PublishingRootsHandlers`, they must be synchronous. */
+export interface PresenceViewHandlers<T> {
+  /**
+   * The view loaded, or a member joined, left, changed its document, went stale or resumed. The first call is the
+   * load and runs once, after every member present at `publishingRoots()`'s load has a document or after 1 s; every
+   * later call names at least one member. One input calls it at most once, with everything that input changed. A
+   * member's publisher rotating with the same document, the relay repeating a document, and the subscriber's
+   * reconnects and rotations call nothing.
+   */
+  onChanged?(change: PresenceChange<T>): void;
+  /**
+   * The publishing-roots view failed in a way no wait fixes, as `PublishingRootsHandlers.onError` describes. The view
+   * is closed. A prefix outside the token's grant is not one: the roster loads empty and this is never called.
+   */
+  onError?(error: unknown): void;
+}
+
+/** A live roster: the members under a prefix with a presence document. Create one with {@link createPresenceView}. */
+export interface PresenceView<T> {
+  /** False until the first `onChanged`. Stays true across reconnects. */
+  readonly loaded: boolean;
+  /**
+   * Reported members by id; empty until loaded. The same map until the next `onChanged`, so a UI can compare it by
+   * identity.
+   */
+  readonly present: ReadonlyMap<string, PresenceMember<T>>;
+  /**
+   * Stop: unwant every member's presence track and close the publishing-roots view. Idempotent; nothing is delivered
+   * after it, even when called from `onChanged`. The view also stops on its own, reporting nothing, once the subscriber closes.
+   */
+  close(): void;
+}
+
+/**
+ * Follow the presence documents of everyone under a prefix: `subscriber.publishingRoots({ prefix })` plus one want per
+ * root that follows the member's supervised publisher to its newest generation. A member is reported once its first
+ * readable document arrives, and goes stale after three heartbeats with nothing new (see `PresenceMember.stale`). The
+ * view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on. Throws a
+ * `RelayError` with code `CLOSED` when the subscriber is already closed.
+ *
+ * ```ts
+ * const room = createPresenceView(subscriber, { prefix: ['room', id], parse: parseProfile }, {
+ *   onChanged: ({ present }) => render([...present.values()].filter((member) => !member.stale)),
+ * });
+ * ```
+ */
+export function createPresenceView(
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
+  options: PresenceViewOptions<unknown> & { parse?: undefined },
+  handlers?: PresenceViewHandlers<unknown>,
+): PresenceView<unknown>;
+export function createPresenceView<T>(
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
+  options: PresenceViewOptions<T> & { parse(value: unknown): T },
+  handlers?: PresenceViewHandlers<T>,
+): PresenceView<T>;
+export function createPresenceView<T>(
+  subscriber: Pick<SupervisedSubscriber, 'publishingRoots' | 'want' | 'unwant' | 'status' | 'closed'>,
+  options: PresenceViewOptions<T>,
+  handlers: PresenceViewHandlers<T> = {},
+): PresenceView<T> {
+  if (typeof options !== 'object' || options === null) throw new TypeError('options must be an object');
+  const track = trackName(options.track ?? PRESENCE_TRACK);
+  const heartbeatMs = heartbeatOption(options.heartbeatMs);
+  const { parse } = options;
+  if (parse !== undefined && typeof parse !== 'function') throw new TypeError('parse must be a function');
+  if (typeof handlers !== 'object' || handlers === null)
+    throw new TypeError('presence view handlers must be an object');
+  const onChanged = handler('onChanged', handlers.onChanged, handlers);
+  const onError = handler('onError', handlers.onError, handlers);
+  const ctx: PresenceContext<T> = { staleAfterMs: STALE_HEARTBEATS * heartbeatMs, decode: decoder(parse) };
+
+  const view = ++views;
+  let joins = 0;
+  let phase: ViewPhase<T> = { kind: 'loading' };
+  const inbox: PresenceInput[] = [];
+  let draining = false;
+  const wants = new Map<string, string>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let armedFor: number | undefined;
+  /** Set by `close()` at once, so a step that `parse` closed from inside delivers nothing either. */
+  let closing = false;
+  /** The subscriber's `close()` reaches `status` at once and `closed` only a microtask later. */
+  const ended = () => closing || subscriber.status === 'closed';
+  /** What `onChanged` last delivered; `undefined` until the first. */
+  let shown: ReadonlyMap<string, PresenceMember<T>> | undefined;
+
+  const arm = () => {
+    const due = deadline(phase);
+    if (due === armedFor) return;
+    clearTimeout(timer);
+    armedFor = due;
+    if (due === undefined) return;
+    timer = setTimeout(
+      () => {
+        armedFor = undefined;
+        feed({ kind: 'tick', at: performance.now() });
+      },
+      Math.max(0, due - performance.now()),
+    );
+  };
+
+  const feed = (input: PresenceInput, first = false) => {
+    if (first) inbox.unshift(input);
+    else inbox.push(input);
+    if (draining) return;
+    draining = true;
+    try {
+      for (let next = inbox.shift(); next; next = inbox.shift()) {
+        const step = transition(phase, next, ctx);
+        phase = step.phase;
+        for (const effect of step.effects) run(effect);
+      }
+    } finally {
+      draining = false;
+      arm();
+    }
+  };
+
+  const open = (member: PublishingRoot) => {
+    const { id } = member;
+    const key = `\0presence:${view}:${++joins}:${id}`;
+    wants.set(id, key);
+    // A late callback from the want of a member that left, even one that has joined again, is not this want's.
+    const from = (input: PresenceInput) => {
+      if (wants.get(id) === key) feed(input);
+    };
+    subscriber.want(
+      key,
+      { namespace: member.namespace, track, generations: true, parameters: { subscriberPriority: PRESENCE_PRIORITY } },
+      {
+        onSubscribed: (_, { namespace }) =>
+          from({ kind: 'subscribed', id, generation: generationOf(namespace), at: performance.now() }),
+        onSwitched: ({ to }) => from({ kind: 'switched', id, generation: generationOf(to.namespace) }),
+        onRestarted: ({ reason }) => from({ kind: 'restarted', id, reason }),
+        onObject: ({ status, groupId, payload }) => {
+          if (status !== 'normal') return;
+          from({ kind: 'object', id, group: groupId, payload, at: performance.now(), date: Date.now() });
+        },
+      },
+    );
+  };
+
+  const run = (effect: PresenceEffect<T>) => {
+    switch (effect.kind) {
+      case 'want':
+        if (!ended()) open(effect.member);
+        return;
+      case 'unwant': {
+        const key = wants.get(effect.id);
+        wants.delete(effect.id);
+        if (key !== undefined) subscriber.unwant(key);
+        return;
+      }
+      case 'emit':
+        if (ended()) return;
+        shown = effect.change.present;
+        deliver('onChanged', () => onChanged?.(effect.change));
+        return;
+      case 'error':
+        if (!ended()) deliver('onError', () => onError?.(effect.error));
+        return;
+      case 'close-roots':
+        roots.close();
+        return;
+    }
+  };
+
+  const roots = subscriber.publishingRoots(
+    { prefix: options.prefix },
+    {
+      onChanged: (change) => feed({ kind: 'roots', change, at: performance.now() }),
+      onError: (error) => feed({ kind: 'roots-error', error }),
+    },
+  );
+  // The supervisor closes the publishing-roots view and drops the wants without calling either, so the view ends
+  // itself.
+  let unsubscribe = () => {};
+  const stop = () => {
+    closing = true;
+    unsubscribe();
+    feed({ kind: 'close' }, true);
+  };
+  unsubscribe = whenClosed(subscriber, stop);
+  return {
+    get loaded() {
+      return shown !== undefined;
+    },
+    get present() {
+      return shown ?? NOBODY;
+    },
+    close: stop,
+  };
+}
+
+let views = 0;
+
+/** One `closed` listener per subscriber, so a closed view is not kept alive until its subscriber closes. */
+const stops = new WeakMap<object, Set<() => void>>();
+
+function whenClosed(subscriber: Pick<SupervisedSubscriber, 'closed'>, stop: () => void): () => void {
+  const pending = stops.get(subscriber) ?? listen(subscriber);
+  pending.add(stop);
+  return () => pending.delete(stop);
+}
+
+/** Its own function, so the listener's closure holds the set and no view's `stop`. */
+function listen(subscriber: Pick<SupervisedSubscriber, 'closed'>): Set<() => void> {
+  const pending = new Set<() => void>();
+  stops.set(subscriber, pending);
+  void subscriber.closed.then(() => {
+    for (const stop of [...pending]) stop();
+  });
+  return pending;
+}
+
+function handler<A extends unknown[]>(
+  name: string,
+  callback: ((...args: A) => void) | undefined,
+  receiver: unknown,
+): ((...args: A) => void) | undefined {
+  if (callback === undefined) return undefined;
+  if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
+  return synchronousCallback(name, callback, receiver);
+}
+
+function deliver(name: string, call: () => void): void {
+  try {
+    call();
+  } catch (error) {
+    // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+    console.error(new Error(`${name} threw; the presence view carries on`, { cause: error }));
+  }
+}
+
+function heartbeatOption(value: unknown): number {
+  if (value === undefined) return PRESENCE_HEARTBEAT_MS;
+  if (typeof value !== 'number') throw new TypeError('heartbeatMs must be a number of milliseconds');
+  if (!Number.isInteger(value) || value < MIN_HEARTBEAT_MS || value > MAX_HEARTBEAT_MS)
+    throw new RangeError(`heartbeatMs must be an integer from ${MIN_HEARTBEAT_MS} to ${MAX_HEARTBEAT_MS} milliseconds`);
+  return value;
+}
+
+const ENCODER = new TextEncoder();
+const DECODER = new TextDecoder('utf-8', { fatal: true });
+
+function presenceBytes(document: unknown): Uint8Array {
+  const json: unknown = JSON.stringify(document);
+  if (typeof json !== 'string') throw new TypeError('A presence document must be a value JSON.stringify can encode');
+  return payloadBytes(ENCODER.encode(json));
+}
+
+function decoder<T>(parse: ((value: unknown) => T) | undefined): PresenceContext<T>['decode'] {
+  return (payload) => {
+    try {
+      const value: unknown = JSON.parse(DECODER.decode(payload));
+      return { document: parse ? parse(value) : (value as T) };
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+
+function generationOf(namespace: readonly string[]): string {
+  return namespace[namespace.length - 1] as string;
+}
+
+/** Where an object sits in a member's history: its publisher generation, then its group. */
+interface ObjectKey {
+  readonly generation: string;
+  readonly group: number;
+}
+
+/** A live member's stale clock: due at a time, or stopped while the view's own subscription is down. */
+type Clock = { readonly kind: 'running'; readonly dueAt: number } | { readonly kind: 'paused' };
+
+/**
+ * One root `publishingRoots()` reports. `route` is the generation of the want's current subscription, which keys every
+ * object; `last` is the key of the newest object counted.
+ */
+type MemberState<T> =
+  /** No readable document yet: never reported. */
+  | {
+      readonly kind: 'awaiting';
+      readonly member: PublishingRoot;
+      readonly route: string | undefined;
+      readonly last: ObjectKey | undefined;
+    }
+  /** Reported, and heard from within the stale window. */
+  | {
+      readonly kind: 'live';
+      readonly route: string | undefined;
+      readonly last: ObjectKey;
+      readonly bytes: Uint8Array;
+      readonly entry: PresenceMember<T>;
+      readonly clock: Clock;
+    }
+  /** Reported as stale: only a fresh object brings it back. */
+  | {
+      readonly kind: 'stale';
+      readonly route: string | undefined;
+      readonly last: ObjectKey;
+      readonly bytes: Uint8Array;
+      readonly entry: PresenceMember<T>;
+    };
+
+type States<T> = ReadonlyMap<string, MemberState<T>>;
+
+type ViewPhase<T> =
+  /** `publishingRoots()` has not loaded. */
+  | { readonly kind: 'loading' }
+  /**
+   * `publishingRoots()` loaded; the first report waits for `waiting` (present at that load, no document yet) or
+   * `loadBy`.
+   */
+  | {
+      readonly kind: 'gathering';
+      readonly states: States<T>;
+      readonly waiting: ReadonlySet<string>;
+      readonly loadBy: number;
+    }
+  | { readonly kind: 'live'; readonly states: States<T> }
+  | { readonly kind: 'closed' };
+
+/** What reaches the reducer. `at` is `performance.now()`; `date` is `Date.now()`. */
+type PresenceInput =
+  | { readonly kind: 'roots'; readonly change: PublishingRootsChange; readonly at: number }
+  | { readonly kind: 'roots-error'; readonly error: unknown }
+  | { readonly kind: 'subscribed'; readonly id: string; readonly generation: string; readonly at: number }
+  | { readonly kind: 'switched'; readonly id: string; readonly generation: string }
+  | { readonly kind: 'restarted'; readonly id: string; readonly reason: RestartReason }
+  | {
+      readonly kind: 'object';
+      readonly id: string;
+      readonly group: number;
+      readonly payload: Uint8Array;
+      readonly at: number;
+      readonly date: number;
+    }
+  | { readonly kind: 'tick'; readonly at: number }
+  | { readonly kind: 'close' };
+
+type PresenceEffect<T> =
+  | { readonly kind: 'want'; readonly member: PublishingRoot }
+  | { readonly kind: 'unwant'; readonly id: string }
+  | { readonly kind: 'emit'; readonly change: PresenceChange<T> }
+  | { readonly kind: 'error'; readonly error: unknown }
+  | { readonly kind: 'close-roots' };
+
+interface PresenceContext<T> {
+  readonly staleAfterMs: number;
+  /** The document in a payload, or `undefined` when it is not one. */
+  decode(payload: Uint8Array): { readonly document: T } | undefined;
+}
+
+type Step<T> = { phase: ViewPhase<T>; effects: PresenceEffect<T>[] };
+type Event = 'joined' | 'left' | 'updated' | 'stale' | 'resumed';
+type Report<T> = { readonly event: Event; readonly member: PresenceMember<T> };
+type MemberStep<T> = { state: MemberState<T>; reports: Report<T>[] };
+type MemberInput = Extract<PresenceInput, { kind: 'subscribed' | 'switched' | 'restarted' | 'object' }>;
+
+const NOBODY: ReadonlyMap<string, never> = new Map<string, never>();
+const PAUSED: Clock = { kind: 'paused' };
+
+const stay = <T>(phase: ViewPhase<T>): Step<T> => ({ phase, effects: [] });
+const quiet = <T>(state: MemberState<T>): MemberStep<T> => ({ state, reports: [] });
+
+function entryOf<T>(member: PublishingRoot, document: T, since: number, stale: boolean): PresenceMember<T> {
+  return Object.freeze({ id: member.id, namespace: member.namespace, document, since, stale });
+}
+
+/**
+ * The key of an object in group `group` of the current subscription, when it is newer than what `state` counted. A
+ * replay repeats the last key and an out-of-order group is smaller, so neither counts. Generations compare as strings,
+ * which sort by start time: a live member ignores an older, retiring generation so its document never regresses, and a
+ * stale member takes any other generation, since its publisher came back, even on a clock behind.
+ */
+function freshKey<T>(state: MemberState<T>, group: number): ObjectKey | undefined {
+  const { route, last } = state;
+  if (route === undefined) return undefined;
+  const key = { generation: route, group };
+  if (!last) return key;
+  if (route === last.generation) return group > last.group ? key : undefined;
+  return state.kind === 'stale' || route > last.generation ? key : undefined;
+}
+
+function heard<T>(
+  state: MemberState<T>,
+  input: Extract<PresenceInput, { kind: 'object' }>,
+  ctx: PresenceContext<T>,
+): MemberStep<T> {
+  const last = freshKey(state, input.group);
+  if (!last) return quiet(state);
+  const clock: Clock = { kind: 'running', dueAt: input.at + ctx.staleAfterMs };
+  if (state.kind === 'awaiting') {
+    const read = ctx.decode(input.payload);
+    if (!read) return quiet({ ...state, last });
+    const entry = entryOf(state.member, read.document, input.date, false);
+    return {
+      state: { kind: 'live', route: state.route, last, bytes: input.payload, entry, clock },
+      reports: [{ event: 'joined', member: entry }],
+    };
+  }
+  const read = sameBytes(state.bytes, input.payload) ? undefined : ctx.decode(input.payload);
+  if (state.kind === 'live' && !read) return quiet({ ...state, last, clock });
+  const { entry: was } = state;
+  const entry = entryOf(was, read ? read.document : was.document, was.since, false);
+  const events: Event[] = state.kind === 'stale' ? ['resumed'] : [];
+  if (read) events.push('updated');
+  return {
+    state: { kind: 'live', route: state.route, last, bytes: read ? input.payload : state.bytes, entry, clock },
+    reports: events.map((event) => ({ event, member: entry })),
+  };
+}
+
+function memberStep<T>(state: MemberState<T>, input: MemberInput, ctx: PresenceContext<T>): MemberStep<T> {
+  switch (input.kind) {
+    case 'subscribed': {
+      const routed = { ...state, route: input.generation };
+      if (routed.kind !== 'live' || routed.clock.kind === 'running') return quiet(routed);
+      return quiet({ ...routed, clock: { kind: 'running', dueAt: input.at + ctx.staleAfterMs } });
+    }
+    case 'switched':
+      return quiet({ ...state, route: input.generation });
+    case 'restarted':
+      if (state.kind !== 'live' || input.reason !== 'connection') return quiet(state);
+      return quiet({ ...state, clock: PAUSED });
+    case 'object':
+      return heard(state, input, ctx);
+  }
+}
+
+function due<T>(state: MemberState<T>, at: number): MemberStep<T> {
+  if (state.kind !== 'live' || state.clock.kind !== 'running' || at < state.clock.dueAt) return quiet(state);
+  const { route, last, bytes, entry: was } = state;
+  const entry = entryOf(was, was.document, was.since, true);
+  return { state: { kind: 'stale', route, last, bytes, entry }, reports: [{ event: 'stale', member: entry }] };
+}
+
+type Applied<T> = { states: States<T>; reports: Report<T>[]; effects: PresenceEffect<T>[] };
+
+function follow<T>(states: States<T>, change: PublishingRootsChange): Applied<T> {
+  const next = new Map(states);
+  const reports: Report<T>[] = [];
+  const effects: PresenceEffect<T>[] = [];
+  for (const { id } of change.removed) {
+    const state = next.get(id);
+    if (!state) continue;
+    next.delete(id);
+    effects.push({ kind: 'unwant', id });
+    if (state.kind !== 'awaiting') reports.push({ event: 'left', member: state.entry });
+  }
+  for (const member of change.added) {
+    if (next.has(member.id)) continue;
+    next.set(member.id, { kind: 'awaiting', member, route: undefined, last: undefined });
+    effects.push({ kind: 'want', member });
+  }
+  return { states: next, reports, effects };
+}
+
+function apply<T>(
+  states: States<T>,
+  input: Exclude<PresenceInput, { kind: 'close' | 'roots-error' }>,
+  ctx: PresenceContext<T>,
+): Applied<T> {
+  if (input.kind === 'roots') return follow(states, input.change);
+  if (input.kind === 'tick') {
+    const next = new Map(states);
+    const reports: Report<T>[] = [];
+    for (const [id, state] of states) {
+      const step = due(state, input.at);
+      next.set(id, step.state);
+      reports.push(...step.reports);
+    }
+    return { states: reports.length > 0 ? next : states, reports, effects: [] };
+  }
+  const state = states.get(input.id);
+  if (!state) return { states, reports: [], effects: [] };
+  const step = memberStep(state, input, ctx);
+  if (step.state === state) return { states, reports: [], effects: [] };
+  return { states: new Map(states).set(input.id, step.state), reports: step.reports, effects: [] };
+}
+
+function reported<T>(states: States<T>): ReadonlyMap<string, PresenceMember<T>> {
+  const present = new Map<string, PresenceMember<T>>();
+  for (const [id, state] of states) if (state.kind !== 'awaiting') present.set(id, state.entry);
+  return present;
+}
+
+function changeOf<T>(
+  reports: readonly Report<T>[],
+  present: ReadonlyMap<string, PresenceMember<T>>,
+  initial: boolean,
+): PresenceChange<T> {
+  const of = (event: Event) => reports.filter((report) => report.event === event).map((report) => report.member);
+  return {
+    joined: of('joined'),
+    left: of('left'),
+    updated: of('updated'),
+    stale: of('stale'),
+    resumed: of('resumed'),
+    present,
+    initial,
+  };
+}
+
+function gather<T>(
+  phase: Extract<ViewPhase<T>, { kind: 'gathering' }>,
+  states: States<T>,
+  at: number | undefined,
+  effects: PresenceEffect<T>[],
+): Step<T> {
+  const waiting = new Set([...phase.waiting].filter((id) => states.get(id)?.kind === 'awaiting'));
+  if (waiting.size > 0 && (at === undefined || at < phase.loadBy)) {
+    return { phase: { ...phase, states, waiting }, effects };
+  }
+  const present = reported(states);
+  const reports = [...present.values()].flatMap((member): Report<T>[] => [
+    { event: 'joined', member },
+    ...(member.stale ? [{ event: 'stale' as const, member }] : []),
+  ]);
+  const loaded = changeOf(reports, present, true);
+  return { phase: { kind: 'live', states }, effects: [...effects, { kind: 'emit', change: loaded }] };
+}
+
+/**
+ * The view's transition. Pure: times arrive on inputs and effects leave as data. The emit comes last so a `close()`
+ * from `onChanged` follows every other effect of the step.
+ */
+function transition<T>(phase: ViewPhase<T>, input: PresenceInput, ctx: PresenceContext<T>): Step<T> {
+  if (phase.kind === 'closed') return stay(phase);
+  if (input.kind === 'close' || input.kind === 'roots-error') {
+    const states = phase.kind === 'loading' ? NOBODY : phase.states;
+    return {
+      phase: { kind: 'closed' },
+      effects: [
+        ...[...states.keys()].map((id): PresenceEffect<T> => ({ kind: 'unwant', id })),
+        { kind: 'close-roots' },
+        ...(input.kind === 'roots-error' ? [{ kind: 'error' as const, error: input.error }] : []),
+      ],
+    };
+  }
+  if (phase.kind === 'loading') {
+    if (input.kind !== 'roots' || !input.change.initial) return stay(phase);
+    const { states, effects } = follow<T>(NOBODY, input.change);
+    const gathering = {
+      kind: 'gathering',
+      states,
+      waiting: new Set(states.keys()),
+      loadBy: input.at + PRESENCE_LOAD_LIMIT_MS,
+    } as const;
+    return gather(gathering, states, undefined, effects);
+  }
+  const { states, reports, effects } = apply(phase.states, input, ctx);
+  if (phase.kind === 'gathering') {
+    if (states === phase.states && input.kind !== 'tick') return stay(phase);
+    return gather(phase, states, input.kind === 'tick' ? input.at : undefined, effects);
+  }
+  if (reports.length === 0) return states === phase.states ? stay(phase) : { phase: { ...phase, states }, effects };
+  return {
+    phase: { kind: 'live', states },
+    effects: [...effects, { kind: 'emit', change: changeOf(reports, reported(states), false) }],
+  };
+}
+
+/** When the view's timer is next due: the load limit while gathering, and every running stale clock. */
+function deadline<T>(phase: ViewPhase<T>): number | undefined {
+  if (phase.kind !== 'gathering' && phase.kind !== 'live') return undefined;
+  let next = phase.kind === 'gathering' ? phase.loadBy : undefined;
+  for (const state of phase.states.values()) {
+    if (state.kind !== 'live' || state.clock.kind !== 'running') continue;
+    if (next === undefined || state.clock.dueAt < next) next = state.clock.dueAt;
+  }
+  return next;
+}

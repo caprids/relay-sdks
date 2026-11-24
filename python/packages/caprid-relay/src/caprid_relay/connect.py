@@ -64,6 +64,20 @@ from .switchable import SwitchableHandlers, SwitchableSubscription, snapshot_swi
 
 IMPLEMENTATION_NAME = "caprid-relay (Python)"
 
+SUBSCRIBER_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1), KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1))
+"""The setup options a subscriber connection adds to the endpoint's.
+
+Namespaces arrive only on a namespace_events request, never pushed unasked, and a relay with MoQ Active
+Count marks where each request's snapshot ends (spec/behavior.md, "Discovery").
+"""
+
+SESSION_SETUP_OPTIONS = (KeyValuePair(SETUP_OPTION.SOLICIT, 1),)
+"""The setup options a connection that publishes and subscribes adds to the endpoint's, which is SOLICIT alone.
+
+It leaves out ACTIVE_COUNT, which would oblige its publishing side to count the NAMESPACE entries it answers the
+relay's solicitations with. The publish session does not count them.
+"""
+
 
 @dataclass(slots=True, kw_only=True)
 class RelaySubscriptionHandlers:
@@ -111,7 +125,9 @@ class RelaySubscriptionHandlers:
     later. Back off, and do not resubscribe to a track the publisher ended. A done that follows this
     subscription's own ``update()`` is different: moq-relay ends the subscription on any update, the
     track is still live, and resubscribing is how to apply the change. After a publisher crash the
-    done arrives only at the relay's QUIC idle timeout, about 11 s later on moq-relay 0.17.0. See
+    done arrives only at the relay's QUIC idle timeout, as status 0 about 11 s later (10.8-13.1 s
+    through relay.mux.global, moq-relay 0.17.9); a clean close arrives as status 2 within about
+    0.1 s. To follow a publisher that restarts, use the supervised subscriber's ``want()``. See
     spec/relay-interop.md, "Publisher restarts".
     """
     on_update_ok: Callable[[], None] | None = None
@@ -214,10 +230,10 @@ class _BorrowedTrackSource:
         self._lifetime.session.track_status(options, handlers)
 
 
-class RelaySubscriber:
-    """A connection that can only subscribe. Create one with :func:`connect_relay_subscriber`.
+class _Subscribing:
+    """What every connection that subscribes offers, over its subscribe driver ``lifetime.session``.
 
-    Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
+    :class:`RelaySubscriber` and :class:`RelaySession` share it, and each adds its own ``close()``.
     """
 
     __slots__ = ("_closed", "_lifetime", "_prefixes", "_track_source")
@@ -373,12 +389,14 @@ class RelaySubscriber:
 
         Same ownership rules as :meth:`subscribe_events`: the iterator owns one SUBSCRIBE_NAMESPACE
         request, and ``close()``, leaving ``async with`` or ``cancellation`` cancels it. It first yields
-        ``announced`` for each namespace already announced, then one event per announce and
-        withdrawal; the relay sends no marker between the two. A relay rejection ends it with
-        :class:`SubscriptionRequestError`, the connection ending with
+        ``announced`` for each namespace already announced, then ``loaded`` once, then one event per
+        announce and withdrawal. A relay that negotiated MoQ Active Count marks where its snapshot
+        ends; against one that did not, ``loaded`` is the SDK's estimate (see :data:`SNAPSHOT_QUIET`
+        and :data:`SNAPSHOT_LIMIT`), so an announce that lands meanwhile can come before it. A relay
+        rejection ends it with :class:`SubscriptionRequestError`, the connection ending with
         :class:`SubscriptionConnectionClosedError`, a full queue with
-        :class:`SubscriptionOverflowError`; a relay that finishes the request ends it cleanly, after
-        the queued events and an ``unannounced`` for each namespace still announced. See
+        :class:`SubscriptionOverflowError`, with no withdrawals; a relay that finishes the request ends
+        it cleanly, after the queued events and an ``unannounced`` for each namespace still announced. See
         spec/behavior.md, "Discovery", for the timing. ``prefix`` follows the namespace rules; one that
         equals, contains or falls under a prefix this connection is already discovering raises a
         ``RelayError`` with code ``PREFIX_OVERLAP`` before anything is sent.
@@ -399,12 +417,22 @@ class RelaySubscriber:
             cancellation=cancellation,
         )
 
+    async def __aenter__(self) -> Self:
+        return self
+
+
+class RelaySubscriber(_Subscribing):
+    """A connection that can only subscribe. Create one with :func:`connect_relay_subscriber`.
+
+    Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
+    :func:`connect_relay` opens one connection that does both.
+    """
+
+    __slots__ = ()
+
     def close(self) -> None:
         """Close this connection and all requests on it. Idempotent."""
         self._lifetime.close()
-
-    async def __aenter__(self) -> Self:
-        return self
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
@@ -428,7 +456,7 @@ async def connect_relay_subscriber(
     precedence over ``get_token``, matching the Relay authentication convention; an empty one is a
     ``ValueError``. With no ``url``, the connection dials ``DEFAULT_ENDPOINT`` rooted at the token's
     ``root`` claim, which ``get_token`` must then supply. Publishing uses a separate connection; see
-    :func:`connect_relay_publisher`.
+    :func:`connect_relay_publisher`, or :func:`connect_relay` for one connection that does both.
     """
     # The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
     # the rest before anything connects.
@@ -448,9 +476,7 @@ async def connect_relay_subscriber(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
-                # Namespaces arrive only on a namespace_events request, never pushed unasked
-                # (spec/behavior.md, "Discovery").
-                setup_options=[*setup_options, KeyValuePair(SETUP_OPTION.SOLICIT, 1)],
+                setup_options=[*setup_options, *SUBSCRIBER_SETUP_OPTIONS],
                 request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),

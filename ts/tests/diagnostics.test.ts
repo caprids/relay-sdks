@@ -10,7 +10,10 @@ import {
   publishDiagnostics,
 } from '../src/diagnostics.js';
 import type { RegisterTrackOptions, WantHandlers, WantOptions } from '../src/index.js';
+import type { RelaySession } from '../src/relay-session.js';
+import { superviseRelay } from '../src/supervised-relay.js';
 import { type RecordedGroup, settle, slotTrack } from './helpers/slot-track.js';
+import { type FakeSession, fakeSession, until } from './helpers/supervision-fakes.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -324,5 +327,63 @@ describe('followDiagnostics', () => {
     }
     expect(kinds).toEqual(['link', 'want']);
     await publication.close();
+  });
+  it('publishes on a supervised relay’s publication and follows on another supervised relay', async () => {
+    const fast = { initialDelayMs: 0, maxDelayMs: 0 };
+    const relay = async () => {
+      const connections: FakeSession[] = [];
+      const supervised = await superviseRelay(
+        async () => {
+          const session = fakeSession();
+          connections.push(session);
+          return session as unknown as RelaySession;
+        },
+        { url: 'https://relay.example.com/moq', reconnect: fast },
+      );
+      return { supervised, connections };
+    };
+    const alice = await relay();
+    const bob = await relay();
+    try {
+      const diagnostics = createDiagnostics();
+      diagnostics.event('link', { link: 'relay', status: 'live' });
+      const publication = publishDiagnostics(diagnostics, alice.supervised.publish(['p', 'alice']));
+      const generation = alice.supervised.generation!;
+      const served = alice.connections[0]!.publications.get(`p/alice/${generation}`)!;
+      expect([...served.tracks.keys()]).toEqual([DIAGNOSTICS_TRACKS.events, DIAGNOSTICS_TRACKS.stats]);
+      served.tracks.get(DIAGNOSTICS_TRACKS.events)!.setDemand(true);
+      await until(() => served.tracks.get(DIAGNOSTICS_TRACKS.events)!.writes.length === 1, 'the replay');
+      diagnostics.event('want', { want: 'p/bob/audio', what: 'subscribed' });
+      await until(() => served.tracks.get(DIAGNOSTICS_TRACKS.events)!.writes.length === 2, 'the live event');
+
+      const kinds: string[] = [];
+      const unfollow = followDiagnostics(
+        bob.supervised,
+        { namespace: ['p', 'alice'], generations: true },
+        { onEvents: (events) => kinds.push(...events.map((event) => event.kind)) },
+      );
+      // generations: true discovers the newest generation under the root before it subscribes.
+      await until(() => bob.connections[0]!.discoveries.length > 0, 'discovery');
+      for (const discovery of bob.connections[0]!.discoveries) {
+        discovery.push({ type: 'announced', namespace: ['p', 'alice', generation] } as never);
+      }
+      await until(() => bob.connections[0]!.subscriptions.length === 2, 'both tracks wanted');
+      const subscription = bob.connections[0]!.subscriptions.find(
+        (sub) => sub.options.track === DIAGNOSTICS_TRACKS.events,
+      )!;
+      expect(subscription.options.namespace).toEqual(['p', 'alice', generation]);
+      subscription.accept();
+      // Deliver what alice wrote twice, as a replacement subscription's replay would: each event arrives once.
+      const writes = served.tracks.get(DIAGNOSTICS_TRACKS.events)!.writes;
+      for (const [groupId, payload] of [...writes, ...writes].entries()) {
+        subscription.handlers.onObject?.({ groupId, objectId: 0, status: 'normal', payload } as MoqtObject);
+      }
+      expect(kinds).toEqual(['link', 'want']);
+      unfollow();
+      await publication.close();
+    } finally {
+      await alice.supervised.close();
+      await bob.supervised.close();
+    }
   });
 });

@@ -898,6 +898,23 @@ class TestSettlingGroups:
             await group.close()
         assert shared.size == SETTLING_GROUP_LIMIT + 1  # the count can exceed the limit by the open groups
 
+    async def test_publications_share_the_connections_limit_and_each_drains_only_its_own_groups(self) -> None:
+        connection = SettlingGroups(limit=1)
+        first, second = (Harness(acknowledge=False, settling_groups=connection.subset()) for _ in range(2))
+        for h in (first, second):
+            h.writer._bind(1)
+        await first.writer.write(b"\x01")
+        assert (connection.size, first.settling_groups.size, second.settling_groups.size) == (1, 1, 0)
+
+        writing = await started(second.writer.write(b"\x02"))
+        never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        await asyncio.wait_for(second.settling_groups.drain(10, never), SHORT)
+        assert not writing.done()
+
+        first.opened[0].acknowledge()
+        await writing
+        assert (connection.size, first.settling_groups.size, second.settling_groups.size) == (1, 0, 1)
+
     async def test_a_subscription_change_or_track_close_never_resets_a_settling_group(self) -> None:
         h = Harness(acknowledge=False)
         h.writer._bind(1)

@@ -292,7 +292,7 @@ congested uplink the publisher's own transport sends audio before video, and bot
 and request streams.
 **Evidence:** a browser's `WebTransport` takes `sendOrder` itself (W3C WebTransport,
 `WebTransportSendOptions`): Firefox 155 schedules by it, and Chromium 153 ignores it (see
-[Known deviations](#known-deviations)). `@moq/qmux` 0.3.3 schedules stream data
+[Known deviations](#known-deviations)). `@moq/qmux` 0.3.5 schedules stream data
 highest `sendOrder` first, round-robin among equals (`scheduler.d.ts`). quinn 0.11's
 `SendStream::set_priority` takes an `i32`, higher sent first and 0 by default; `@caprid/relay-quic`
 clamps the send order to that range.
@@ -415,7 +415,7 @@ adapters MUST NOT copy them.
 
 ### QMux over WebSocket (`@caprid/relay-websocket`)
 
-The adapter wraps `@moq/qmux` 0.3.3 (ADR 0005). It meets every other rule. The conformance suite
+The adapter wraps `@moq/qmux` 0.3.5 (ADR 0005). It meets every other rule. The conformance suite
 runs it in Node, Chromium, Firefox and WebKit (`conformance/targets/websocket.js`).
 
 - **No acknowledgement (TA-15, and TA-16 while close waits).** QMux runs over TCP and acknowledges

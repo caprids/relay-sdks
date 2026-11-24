@@ -4,6 +4,7 @@ import {
   type MessageParameters,
   type MoqTrackSource,
   type MoqtObject,
+  type MoqtProtocolId,
   type MoqtSession,
   type MoqtSubscribeOptions,
   type PublishDone,
@@ -40,6 +41,7 @@ export type {
   RelayCredential,
   RelayTransportFactory,
 } from './connect-session.js';
+export { webTransport } from './connect-session.js';
 
 /** Which track to subscribe to, and how: what {@link RelaySubscriber.subscribe} and `subscribeEvents` take. */
 export interface RelayTrackOptions {
@@ -94,8 +96,10 @@ export interface RelaySubscriptionHandlers {
    * resubscribe to a track the publisher ended. A done that follows this subscription's own
    * `update()` is different: moq-relay ends the subscription on any update, the track is still live,
    * and resubscribing is how to apply the change. After a publisher crash the done arrives only at
-   * the relay's QUIC idle timeout, about 11 s later on moq-relay 0.17.0. See spec/relay-interop.md,
-   * "Publisher restarts".
+   * the relay's QUIC idle timeout, as status 0 about 11 s later (10.8-13.1 s through relay.mux.global,
+   * moq-relay 0.17.9); a clean close arrives as status 2 within about 0.1 s. To follow a publisher
+   * that restarts, use the supervised subscriber's `want()`. See spec/relay-interop.md, "Publisher
+   * restarts".
    */
   onPublisherDone?(info: PublishDone): void;
   /**
@@ -142,10 +146,14 @@ export interface RelaySubscriber {
    * Discover which namespaces under a prefix are announced, as bounded async events with the same
    * ownership rules as `subscribeEvents`: the iterator owns one SUBSCRIBE_NAMESPACE request, and
    * break/return, `close()` or the signal cancels it. It first yields `announced` for each namespace
-   * already announced, then one event per announce and withdrawal. The relay sends no marker between
-   * the two. A relay rejection ends it with `SubscriptionRequestError`, the connection ending with
-   * `SubscriptionConnectionClosedError`, a full queue with `SubscriptionOverflowError`; a relay that
-   * finishes the request ends it cleanly. See spec/behavior.md, "Discovery", for the timing.
+   * already announced, then `loaded` once, then one event per announce and withdrawal. A relay that
+   * negotiated MoQ Active Count marks where its snapshot ends; against one that did not, `loaded` is
+   * the SDK's estimate (see `SNAPSHOT_QUIET_MS` and `SNAPSHOT_LIMIT_MS`), so an announce that lands
+   * meanwhile can come before it. `loaded` takes no `capacity`, so a snapshot that fills the queue
+   * still loads. A relay rejection ends it with `SubscriptionRequestError`, the
+   * connection ending with `SubscriptionConnectionClosedError`, a full queue with
+   * `SubscriptionOverflowError`; a relay that finishes the request ends it cleanly. See
+   * spec/behavior.md, "Discovery", for the timing.
    */
   namespaceEvents(options: NamespaceEventOptions): NamespaceEvents;
   /**
@@ -177,28 +185,50 @@ export interface RelaySubscriber {
   close(): void;
 }
 
+/**
+ * The setup options a connection that subscribes adds to the endpoint's. A connection that also publishes sends only
+ * SOLICIT: ACTIVE_COUNT would oblige its publishing side to count the NAMESPACE entries it answers the relay's
+ * solicitations with, which the publish session does not do.
+ */
+export const SUBSCRIBER_SETUP_OPTIONS = [
+  // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
+  { type: SETUP_OPTION.SOLICIT, value: 1 },
+  { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
+] as const;
+
+/** The setup options of a connection that publishes and subscribes: see {@link SUBSCRIBER_SETUP_OPTIONS}. */
+export const SESSION_SETUP_OPTIONS = [{ type: SETUP_OPTION.SOLICIT, value: 1 }] as const;
+
 /** Open a Relay connection for subscribing to tracks. The caller owns connection shutdown. */
 export async function connectRelaySubscriber(options: ConnectRelaySubscriberOptions): Promise<RelaySubscriber> {
   // The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
   // the rest before anything connects.
   assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
-  const {
-    session: connected,
-    closed,
-    observeClosed,
-    assertOpen,
-    close,
-    protocol,
-    expiresAt,
-  } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
+  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@caprid/relay',
-      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
-      setupOptions: [...setupOptions, { type: SETUP_OPTION.SOLICIT, value: 1 }],
+      setupOptions: [...setupOptions, ...SUBSCRIBER_SETUP_OPTIONS],
       requestTimeoutMs: options.requestTimeoutMs,
       callbacks,
     }),
   );
+  return relaySubscriberOf({ ...lifetime, session: lifetime.session });
+}
+
+/** What {@link relaySubscriberOf} needs from an open connection. */
+export interface SubscribingConnection {
+  session: MoqtSession;
+  closed: Promise<{ error?: unknown }>;
+  observeClosed(observer: (error?: unknown) => void): () => void;
+  assertOpen(): void;
+  close(): void;
+  protocol: MoqtProtocolId;
+  expiresAt: Date | undefined;
+}
+
+/** The {@link RelaySubscriber} surface of a connection whose subscribe driver is `connection.session`. */
+export function relaySubscriberOf(connection: SubscribingConnection): RelaySubscriber {
+  const { session: connected, closed, observeClosed, assertOpen, close, protocol, expiresAt } = connection;
 
   /** Prefixes with a namespace request open on this connection (namespace-events.ts, `claimPrefix`). */
   const prefixes = new Set<readonly string[]>();

@@ -1046,19 +1046,31 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: sub.kinds() == ["subscribe-ok"] and len(bindings) == 1)
         assert bindings[0] == TrackBinding(
-            track_name="video", track_alias=121, object_delivery_timeout=40, subgroup_delivery_timeout=300
+            track_namespace=NAMESPACE,
+            track_name="video",
+            track_alias=121,
+            object_delivery_timeout=40,
+            subgroup_delivery_timeout=300,
         )
 
         await sub.send(encode_request_update(123, MessageParameters(subgroup_delivery_timeout=50)))
         await wait_for(lambda: sub.kinds() == ["subscribe-ok", "request-ok"])
         assert bindings[-1] == TrackBinding(
-            track_name="video", track_alias=121, object_delivery_timeout=40, subgroup_delivery_timeout=50
+            track_namespace=NAMESPACE,
+            track_name="video",
+            track_alias=121,
+            object_delivery_timeout=40,
+            subgroup_delivery_timeout=50,
         )
 
         await sub.send(encode_request_update(125, MessageParameters(object_delivery_timeout=0)))
         await wait_for(lambda: sub.kinds() == ["subscribe-ok", "request-ok", "request-ok"])
         assert bindings[-1] == TrackBinding(
-            track_name="video", track_alias=121, object_delivery_timeout=0, subgroup_delivery_timeout=50
+            track_namespace=NAMESPACE,
+            track_name="video",
+            track_alias=121,
+            object_delivery_timeout=0,
+            subgroup_delivery_timeout=50,
         )
         assert ended_requests == []
         assert not sub.ended()
@@ -1098,7 +1110,7 @@ class TestCreateMoqtPublishSession:
         await raw_subscribe(harness.pair.server, "video", 131)
 
         await wait_for(lambda: len(bindings) == 1)
-        assert bindings[0] == TrackBinding(track_name="video", track_alias=131)
+        assert bindings[0] == TrackBinding(track_namespace=NAMESPACE, track_name="video", track_alias=131)
         harness.destroy()
 
     async def test_teardown_does_not_reset_a_request_stream_that_already_carried_its_publish_done_and_fin(

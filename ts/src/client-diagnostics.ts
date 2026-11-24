@@ -171,7 +171,10 @@ export function createDiagnostics(options: DiagnosticsOptions = {}): Diagnostics
   return view(undefined);
 }
 
-/** What {@link publishDiagnostics} registers its tracks on: a `RelayPublisher` or a `SupervisedPublisher`. */
+/**
+ * What {@link publishDiagnostics} registers its tracks on: a `RelayPublisher`, a `SupervisedPublisher`, or a root
+ * published on a `SupervisedRelay` (the `SupervisedPublication` that `relay.publish(root)` returns).
+ */
 export interface DiagnosticsPublisher {
   /** Register a track on the publisher's broadcast, as `RelayPublisher.registerTrack` does. */
   registerTrack(options: RegisterTrackOptions): RelayTrackWriter;
@@ -221,7 +224,7 @@ const BACKLOG_OBJECTS = 32;
  * after the relay replaces its subscription a few live events can still arrive ahead of the replay, so a follower
  * that needs them in order sorts by `seq`. A
  * snapshot goes on `diag.stats` once a second while it has demand. Track names are unique per publisher connection,
- * so publish one recorder per publisher.
+ * so publish one recorder per publisher (on a `SupervisedRelay`, per published root).
  *
  * ```ts
  * const publication = publishDiagnostics(diagnostics, publisher);
@@ -318,7 +321,7 @@ export interface FollowDiagnosticsHandlers {
 const SEEN_LIMIT = 4 * DEFAULT_KEEP_EVENTS;
 
 /**
- * Follow a client's diagnostics with a supervised subscriber: want its `diag.events` and `diag.stats`, drop events
+ * Follow a client's diagnostics with a supervised subscriber or a `SupervisedRelay`: want its `diag.events` and `diag.stats`, drop events
  * already delivered (a replay repeats them), and skip objects that do not parse. Returns the function that unwants both.
  *
  * ```ts

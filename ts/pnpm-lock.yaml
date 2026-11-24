@@ -28,8 +28,8 @@ importers:
         specifier: workspace:*
         version: link:packages/relay-websocket
       '@moq/qmux':
-        specifier: 0.3.3
-        version: 0.3.3
+        specifier: 0.3.5
+        version: 0.3.5
       '@types/node':
         specifier: 24.12.2
         version: 24.12.2
@@ -92,8 +92,8 @@ importers:
         specifier: workspace:*
         version: link:../moq-core
       '@moq/qmux':
-        specifier: 0.3.3
-        version: 0.3.3
+        specifier: 0.3.5
+        version: 0.3.5
 
 packages:
 
@@ -312,8 +312,8 @@ packages:
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
 
-  '@moq/qmux@0.3.3':
-    resolution: {integrity: sha512-Ez1GCVwpyNGB0eWvhKIXOjXrfRlMdmO0lpJ7gqInZFzsOsYTyML0WRgh24Itczp9Kev0CXsUA/K+XrGs1dRKUA==}
+  '@moq/qmux@0.3.5':
+    resolution: {integrity: sha512-3cPnK8nR8gooXo/kGDUSoZJjTozJBavXFYkggwpPB7RFRSOaXpGmEhpqt04obX508w7ZEzvbaaB5iw0wNSRDGA==}
 
   '@moq/web-socket-stream@0.1.1':
     resolution: {integrity: sha512-VKi/GE/CLqmbEZlgNbBLbAFk2pQTxT+KUD2DjCSoxqZxbS3KBe5BBZ0m3fila4fEGyll2JT5MmgEyVr4zkZEVA==}
@@ -1549,7 +1549,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.6.0': {}
 
-  '@moq/qmux@0.3.3':
+  '@moq/qmux@0.3.5':
     dependencies:
       '@moq/web-socket-stream': 0.1.1
 

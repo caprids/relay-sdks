@@ -49,7 +49,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+// `server.close()` waits for every connection still open, and ends none of them. Node 24.22's WebSocket (undici 7.30)
+// leaves one TCP connection open after the no-protocol dial's closing handshake, which held the close past the hook's
+// timeout; ending what is left first keeps the teardown independent of how each client closes.
+afterAll(async () => {
+  for (const socket of server.clients) socket.terminate();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 async function nextAccepted(): Promise<Accepted> {
   await vi.waitFor(() => expect(accepted.length).toBeGreaterThan(0));

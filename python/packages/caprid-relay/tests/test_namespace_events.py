@@ -11,6 +11,8 @@ from core_helpers.fake_transport import FakeTransport, create_fake_transport
 from core_helpers.waiting import settle
 
 from caprid_relay import (
+    SNAPSHOT_LIMIT,
+    SNAPSHOT_QUIET,
     CancellationToken,
     ConnectingTransport,
     NamespaceEvent,
@@ -21,13 +23,16 @@ from caprid_relay import (
     SubscriptionRequestError,
     connect_relay_publisher,
     connect_relay_subscriber,
+    namespace_events,
 )
+from caprid_relay.namespace_events import _is_stopped, _is_withdrawn_by_end
 from moq_core.bytes import StreamReader
 from moq_core.control_messages import (
     REQUEST_ERROR_CODE,
     SETUP_OPTION,
     ControlMessageFrame,
     KeyValuePair,
+    MessageParameters,
     Setup,
     SubscribeNamespace,
     decode_control_message,
@@ -54,14 +59,22 @@ async def _client_setup_options(fake: FakeTransport) -> list[KeyValuePair]:
     return list(message.options)
 
 
-@pytest.fixture
-async def connected() -> AsyncIterator[tuple[FakeTransport, RelaySubscriber]]:
+async def _connect(
+    *, request_timeout: float = 0.1, server_setup: Sequence[KeyValuePair] = ()
+) -> tuple[FakeTransport, RelaySubscriber]:
     fake = create_fake_transport()
     connecting = asyncio.create_task(
-        connect_relay_subscriber("https://relay.example.com/moq", request_timeout=0.1, create_transport=_factory(fake))
+        connect_relay_subscriber(
+            "https://relay.example.com/moq", request_timeout=request_timeout, create_transport=_factory(fake)
+        )
     )
-    fake.send_server_setup()
-    connection = await connecting
+    fake.send_server_setup(server_setup)
+    return fake, await connecting
+
+
+@pytest.fixture
+async def connected() -> AsyncIterator[tuple[FakeTransport, RelaySubscriber]]:
+    fake, connection = await _connect()
     yield fake, connection
     connection.close()
     await settle()
@@ -322,3 +335,277 @@ async def test_close_after_a_clean_end_discards_what_is_queued(
     events.close()
     with pytest.raises(StopAsyncIteration):
         await anext(events)
+
+
+async def test_withdraws_nothing_when_the_request_stream_fails_the_error_ends_it(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    async with connection.namespace_events(["room"]) as events:
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        assert await anext(events) == NamespaceEvent("announced", ("room", "alice"))
+        request.reset(RuntimeError("gone"))
+        with pytest.raises(SubscriptionRequestError):
+            await anext(events)
+
+
+LOADED = NamespaceEvent("loaded")
+# asyncio runs a timer up to one clock resolution early.
+EARLY = 0.005
+
+
+def _announced(*namespace: str) -> NamespaceEvent:
+    return NamespaceEvent("announced", namespace)
+
+
+class TestLoadedWithoutActiveCount:
+    async def test_yields_loaded_after_the_snapshot_once_the_stream_stays_quiet_and_once_only(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            last_entry = loop.time()
+            assert [await anext(events), await anext(events)] == [
+                _announced("room", "alice"),
+                _announced("room", "bob"),
+            ]
+            assert await anext(events) == LOADED
+            assert loop.time() - last_entry >= SNAPSHOT_QUIET - EARLY
+
+            await request.send(encode_namespace(["carol"]))
+            assert await anext(events) == _announced("room", "carol")
+            later = asyncio.ensure_future(anext(events))
+            await asyncio.sleep(SNAPSHOT_LIMIT)
+            assert not later.done()
+            later.cancel()
+
+    async def test_yields_loaded_alone_on_an_empty_prefix(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            accepted = loop.time()
+            assert await anext(events) == LOADED
+            assert loop.time() - accepted >= SNAPSHOT_QUIET - EARLY
+
+    async def test_yields_no_loaded_before_request_ok(self) -> None:
+        fake, connection = await _connect(request_timeout=10 * SNAPSHOT_LIMIT)
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            first = asyncio.ensure_future(anext(events))
+            await asyncio.sleep(3 * SNAPSHOT_QUIET)
+            assert not first.done()
+            await request.send(encode_request_ok())
+            assert await first == LOADED
+        connection.close()
+
+    async def test_restarts_the_quiet_window_on_each_entry_inside_it(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            await asyncio.sleep(SNAPSHOT_QUIET - 0.02)
+            await request.send(encode_namespace(["alice"]))
+            entry = loop.time()
+            assert await anext(events) == _announced("room", "alice")
+            assert await anext(events) == LOADED
+            assert loop.time() - entry >= SNAPSHOT_QUIET - EARLY
+
+    async def test_yields_loaded_no_later_than_snapshot_limit_after_request_ok_under_steady_churn(
+        self, connected: tuple[FakeTransport, RelaySubscriber], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Widened so a slow test host cannot open a quiet gap between churn steps.
+        quiet, limit, step = 0.2, 0.5, 0.05
+        monkeypatch.setattr(namespace_events, "SNAPSHOT_QUIET", quiet)
+        monkeypatch.setattr(namespace_events, "SNAPSHOT_LIMIT", limit)
+        fake, connection = connected
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"], capacity=1_000) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            accepted = loop.time()
+            seen: list[NamespaceEvent] = []
+
+            async def churn() -> None:
+                announce = True
+                while True:
+                    await request.send(encode_namespace(["alice"]) if announce else encode_namespace_done(["alice"]))
+                    announce = not announce
+                    await asyncio.sleep(step)
+
+            churning = asyncio.ensure_future(churn())
+            try:
+                while LOADED not in seen:
+                    seen.append(await anext(events))
+            finally:
+                churning.cancel()
+            loaded_after = loop.time() - accepted
+            assert len(seen) > 2
+            assert limit - EARLY <= loaded_after < limit + step
+
+    async def test_yields_no_loaded_once_the_stream_fails_inside_the_quiet_window(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            await request.send(encode_namespace(["alice"]))
+            assert await anext(events) == _announced("room", "alice")
+            request.reset(RuntimeError("gone"))
+            with pytest.raises(SubscriptionRequestError):
+                await anext(events)
+
+
+ACTIVE_COUNT = KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1)
+
+
+class TestLoadedWithActiveCount:
+    async def test_yields_loaded_right_after_the_counted_namespace_a_repeat_counted_never_from_a_window(
+        self,
+    ) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=3)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["alice"]))
+            assert await anext(events) == _announced("room", "alice")
+            pending = asyncio.ensure_future(anext(events))
+            await asyncio.sleep(SNAPSHOT_LIMIT + SNAPSHOT_QUIET)
+            assert not pending.done()
+
+            await request.send(encode_namespace(["bob"]))
+            await request.send(encode_namespace(["carol"]))
+            assert [await pending, await anext(events), await anext(events)] == [
+                _announced("room", "bob"),
+                LOADED,
+                _announced("room", "carol"),
+            ]
+        connection.close()
+
+    async def test_yields_loaded_after_a_snapshot_that_fills_the_capacity_and_still_bounds_the_namespaces(
+        self,
+    ) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        async with connection.namespace_events(["room"], capacity=2) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=2)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            await settle()
+            assert [await anext(events), await anext(events), await anext(events)] == [
+                _announced("room", "alice"),
+                _announced("room", "bob"),
+                LOADED,
+            ]
+
+        async with connection.namespace_events(["room"], capacity=2) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=2)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            await request.send(encode_namespace(["carol"]))
+            assert await asyncio.wait_for(request.client_end, 1) == "reset"
+            with pytest.raises(SubscriptionOverflowError):
+                await anext(events)
+        connection.close()
+
+    async def test_yields_loaded_at_once_on_a_count_of_0(self) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=0)))
+            accepted = loop.time()
+            assert await anext(events) == LOADED
+            assert loop.time() - accepted < SNAPSHOT_QUIET
+        connection.close()
+
+
+class TestDiscoveryMarks:
+    async def test_marks_only_the_withdrawals_a_clean_end_yields(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["bob"]))
+            await request.send(encode_namespace_done(["bob"]))
+            await request.send(encode_namespace(["bob"]))
+            await request.fin()
+            await settle()
+            seen = [event async for event in events]
+        assert seen == [
+            _announced("room", "alice"),
+            _announced("room", "bob"),
+            NamespaceEvent("unannounced", ("room", "bob")),
+            _announced("room", "bob"),
+            NamespaceEvent("unannounced", ("room", "alice")),
+            NamespaceEvent("unannounced", ("room", "bob")),
+        ]
+        assert [_is_withdrawn_by_end(events, event) for event in seen] == [False, False, False, False, True, True]
+        assert not _is_withdrawn_by_end(events, NamespaceEvent("unannounced", ("room", "alice")))
+
+    async def test_marks_a_request_whose_stream_failed_or_that_ended_as_stopped_and_a_live_one_not(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        events = connection.namespace_events(["room"])
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        assert await anext(events) == _announced("room", "alice")
+        assert not _is_stopped(events)
+        request.reset(RuntimeError("gone"))
+        with pytest.raises(SubscriptionRequestError):
+            await anext(events)
+        assert _is_stopped(events)
+
+        closed = connection.namespace_events(["room"])
+        await fake.next_request_stream()
+        closed.close()
+        assert _is_stopped(closed)
+
+    async def test_marks_a_request_stopped_in_the_turn_its_connection_ends_before_its_reader_resumes(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        events = connection.namespace_events(["room"])
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        assert await anext(events) == _announced("room", "alice")
+        fake.drop_transport()
+        assert _is_stopped(events)
+        await settle()
+        assert _is_stopped(events)

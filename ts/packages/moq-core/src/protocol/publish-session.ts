@@ -64,7 +64,7 @@ import {
 } from './control-messages.js';
 import { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './errors.js';
 import { encodeFetchHeader, isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
-import type { BidirectionalStreamLike } from './request-stream.js';
+import { type BidirectionalStreamLike, readRequest } from './request-stream.js';
 import type { Goaway, MoqtSendStreamOptions, MoqtTransport } from './session.js';
 import { streamResetReason } from './stream-reset.js';
 import { isSessionError } from './transport-error.js';
@@ -92,16 +92,17 @@ export interface MoqtPublishSessionCallbacks {
   /** GOAWAY (control stream or a request stream): stop initiating, migrate. */
   onGoaway?(goaway: Goaway): void;
   /**
-   * The announced namespace reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation — the peer can now route
-   * SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own; this is the strongest "announced" fact
-   * the transport draft offers.
+   * An announced namespace first reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation — the peer can now
+   * route SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own; this is the strongest "announced"
+   * fact the transport draft offers. Called once per namespace per `announce()`.
    */
   onAnnounced?(info: { namespace: TrackNamespace }): void;
   /**
-   * The solicitation stream carrying the announce ended while the session was still live — the peer rejected the
-   * announce (unauthorized suffix) or withdrew its namespace interest. Either way the ingest path is gone.
+   * The last solicitation stream carrying an announced namespace ended while the session was still live — the peer
+   * rejected the announce (unauthorized suffix) or withdrew its namespace interest. Either way that namespace's ingest
+   * path is gone. Not called for a namespace `withdraw()` removed.
    */
-  onAnnounceEnded?(info: { error?: unknown }): void;
+  onAnnounceEnded?(info: { namespace: TrackNamespace; error?: unknown }): void;
   /** The peer subscribed to a registered track (already answered SUBSCRIBE_OK). */
   onSubscribe?(subscribe: IncomingSubscribe): void;
   /** A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE). */
@@ -111,7 +112,12 @@ export interface MoqtPublishSessionCallbacks {
    * `INTERNAL_ERROR` instead. The track stays registered and the session stays up, but a cause that lies in the track
    * (its properties) fails every subscription to it. `error` is the encoder's failure.
    */
-  onSubscribeFailed?(info: { requestId: number; trackName: string; error: unknown }): void;
+  onSubscribeFailed?(info: {
+    requestId: number;
+    trackNamespace: TrackNamespace;
+    trackName: string;
+    error: unknown;
+  }): void;
   /**
    * A track's effective alias binding changed. The most recent live subscription wins the binding (a replaced one ends
    * with PUBLISH_DONE `TRACK_ENDED` — a clean end for that request, covering the peer's resubscribe races), and only
@@ -119,7 +125,7 @@ export interface MoqtPublishSessionCallbacks {
    * permits data (`forward: 0` subscribes without authorizing it; REQUEST_UPDATE toggles it). `undefined` means no live
    * forwarding subscription, so no data streams may be opened for the track.
    */
-  onTrackBinding?(info: { trackName: string; trackAlias: number | undefined }): void;
+  onTrackBinding?(info: { trackNamespace: TrackNamespace; trackName: string; trackAlias: number | undefined }): void;
   /**
    * REQUEST_UPDATE on an inbound request stream. `requestId` is the request being updated (the stream's SUBSCRIBE or
    * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§6.4.2.1). A subscription
@@ -128,12 +134,22 @@ export interface MoqtPublishSessionCallbacks {
    * answered with REQUEST_ERROR and ends the subscription.
    */
   onRequestUpdate?(info: { requestId: number; updateRequestId: number; parameters: MessageParameters }): void;
-  /** The session ended — transport closed, or a fatal protocol error. */
+  /**
+   * The session ended — transport closed, or a fatal protocol error. It is the last callback. From `close()` or
+   * `destroy()` until it runs, the session takes no new work and reports only ends (`onSubscribeEnd`, an `onTrackBinding`
+   * with no alias): requests are refused with GOING_AWAY, and a GOAWAY or an update is not reported. A track whose
+   * `end({ after })` is still waiting is served as before until that end.
+   */
   onClosed?(info: { error?: unknown }): void;
 }
 
 /** Options for {@link createMoqtPublishSession}. */
 export interface MoqtPublishSessionConfig {
+  /**
+   * The peer's consumed Request IDs (§6.4.2.1). Sessions sharing one transport pass the same set, so an ID one of them
+   * consumed is a reuse to the other; `createMoqtDuplexSession` does. Default: the session's own.
+   */
+  peerRequestIds?: Set<number>;
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§9.1.5). */
@@ -201,14 +217,25 @@ export interface RegisteredTrack {
 export interface MoqtPublishSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
-  /** Whether a current solicitation covers the desired namespace; undefined before any is accepted. */
-  readonly namespaceSolicited: boolean | undefined;
   /**
-   * Announce the namespace on every matching solicitation — current and future. The wire write additionally waits for
-   * the first `registerTrack()`: an announce invites immediate SUBSCRIBEs, and an empty registry would answer them with
-   * a terminal DOES_NOT_EXIST. Result via `onAnnounced` / `onAnnounceEnded`.
+   * Whether a current solicitation covers an announced namespace; undefined before any solicitation is accepted or
+   * while nothing is announced. With several namespaces announced, use {@link isSolicited} for one of them.
+   */
+  readonly namespaceSolicited: boolean | undefined;
+  /** Whether a current solicitation covers `trackNamespace`; undefined before any solicitation is accepted. */
+  isSolicited(trackNamespace: TrackNamespace): boolean | undefined;
+  /**
+   * Announce a namespace on every matching solicitation — current and future. A session announces any number of
+   * namespaces; announcing one already announced does nothing. The wire write additionally waits for the first
+   * `registerTrack()` in that namespace: an announce invites immediate SUBSCRIBEs, and an empty registry would answer
+   * them with a terminal DOES_NOT_EXIST. Result via `onAnnounced` / `onAnnounceEnded`.
    */
   announce(trackNamespace: TrackNamespace): void;
+  /**
+   * Stop announcing a namespace: NAMESPACE_DONE on every solicitation that carried it. Its tracks stay registered and
+   * their subscriptions are untouched; end them first. Withdrawing a namespace not announced does nothing.
+   */
+  withdraw(trackNamespace: TrackNamespace): void;
   /** Register one servable track; the peer's SUBSCRIBEs are answered from this registry. */
   registerTrack(options: RegisterTrackOptions): RegisteredTrack;
   /**
@@ -348,6 +375,10 @@ interface TrackRecord {
   /** The largest object location `objectPublished` recorded: TRACK_STATUS_OK's LARGEST_OBJECT without `getLargestObject`. */
   largestObject: Location | undefined;
   key: string;
+  /** The track's namespace. */
+  namespace: TrackNamespace;
+  /** The track's namespace, as {@link namespaceKey} spells it. */
+  namespaceKey: string;
   trackName: string;
   subscribers: SubscriberStream[];
   done: boolean;
@@ -411,8 +442,21 @@ function readLargestObjectForUpdate(track: TrackRecord): Location | undefined {
   }
 }
 
+/** A namespace as a map key: fields may contain any character, so they are not joined. */
+function namespaceKey(namespace: TrackNamespace): string {
+  return JSON.stringify(namespace);
+}
+
+/** One namespace the session announces. */
+interface AnnounceRecord {
+  namespace: TrackNamespace;
+  /** Whether `onAnnounced` has run for this announce. */
+  fired: boolean;
+}
+
+/** A track as a map key: namespace fields and the name may contain any character, so nothing is joined. */
 function trackKey(namespace: TrackNamespace, name: string): string {
-  return `${namespace.join('/')}--${name}`;
+  return JSON.stringify([namespace, name]);
 }
 
 function isNamespacePrefix(prefix: TrackNamespace, namespace: TrackNamespace): boolean {
@@ -462,10 +506,16 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * request IDs, a reused ID would hand two subscriptions the same alias and make their subgroup streams
    * indistinguishable — session-fatal, per the draft.
    */
-  #peerRequestIds = new Set<number>();
-  #desiredNamespace: TrackNamespace | undefined;
-  #announcedFired = false;
+  #peerRequestIds: Set<number>;
+  /** The namespaces to announce, by {@link namespaceKey}. */
+  #announces = new Map<string, AnnounceRecord>();
+  /** NAMESPACE_DONE writes `withdraw()` started; an orderly close drains them with its own retractions. */
+  #pendingWithdrawals = new Set<Promise<void>>();
+  /** Namespaces with at least one registered track, by {@link namespaceKey}: an announce waits for its first. */
+  #trackNamespaces = new Set<string>();
   #receivedNamespaceSolicitation = false;
+  /** The reader of every incoming request stream still being served: the end of the session stops them all. */
+  #requestReaders = new Set<StreamReader>();
 
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
@@ -482,6 +532,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#transport = transport;
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
+    this.#peerRequestIds = config.peerRequestIds ?? new Set();
     this.#callbacks = config.callbacks ?? {};
     this.ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve;
@@ -493,9 +544,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   get namespaceSolicited(): boolean | undefined {
-    const namespace = this.#desiredNamespace;
-    if (namespace === undefined || !this.#receivedNamespaceSolicitation) return undefined;
-    return [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, namespace));
+    if (this.#announces.size === 0 || !this.#receivedNamespaceSolicitation) return undefined;
+    return [...this.#announces.values()].some(({ namespace }) =>
+      [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, namespace))
+    );
+  }
+
+  isSolicited(trackNamespace: TrackNamespace): boolean | undefined {
+    if (!this.#receivedNamespaceSolicitation) return undefined;
+    return [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, trackNamespace));
   }
 
   // ---------------------------------------------------------------------------
@@ -566,6 +623,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       for (const subscriber of track.subscribers) void subscriber.cancel();
     }
 
+    for (const reader of this.#requestReaders) void reader.cancel().catch(() => {});
+
+    this.#requestReaders.clear();
     this.#tracks.clear();
     this.#namespaceStreams.clear();
     this.#controlWriter = undefined;
@@ -609,7 +669,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#endTrack(track);
     }
 
-    const writes: Promise<unknown>[] = [];
+    const writes: Promise<unknown>[] = [...this.#pendingWithdrawals];
 
     for (const track of this.#tracks.values()) {
       if (track.doneFlushed) writes.push(track.doneFlushed);
@@ -678,6 +738,27 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#close(SESSION_ERROR.NO_ERROR, '', error);
   }
 
+  /**
+   * Whether the session still takes new work for `track`. Once closing it takes none and only reports ends, except for
+   * a track whose `end({ after })` is still waiting, which is served until that end.
+   */
+  #serving(track: TrackRecord): boolean {
+    return !this.#destroyed && (!this.#closing || track.endNow !== undefined);
+  }
+
+  /** The peer is migrating. A session already closing has nothing to move, so its application is not told. */
+  #reportGoaway(goaway: Goaway): void {
+    this.#receivedGoaway = true;
+    if (!this.#closing) this.#callbacks.onGoaway?.(goaway);
+  }
+
+  /** Report `track`'s binding. An unbinding is an end, reported until `onClosed`; a binding is new work. */
+  #reportBinding(track: TrackRecord, trackAlias: number | undefined): void {
+    if (this.#destroyed || (trackAlias !== undefined && !this.#serving(track))) return;
+
+    this.#callbacks.onTrackBinding?.({ trackNamespace: track.namespace, trackName: track.trackName, trackAlias });
+  }
+
   // ---------------------------------------------------------------------------
   // Announcing and the track registry
   // ---------------------------------------------------------------------------
@@ -685,80 +766,142 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   announce(trackNamespace: TrackNamespace): void {
     if (this.#destroyed || this.#closing) return;
 
-    this.#desiredNamespace = trackNamespace;
+    const key = namespaceKey(trackNamespace);
+    if (this.#announces.has(key)) return;
+
+    const record: AnnounceRecord = { namespace: [...trackNamespace], fired: false };
+    this.#announces.set(key, record);
 
     for (const stream of this.#namespaceStreams) {
-      this.#reconcileAnnounce(stream);
+      this.#reconcileAnnounce(stream, record);
+    }
+  }
+
+  withdraw(trackNamespace: TrackNamespace): void {
+    if (this.#destroyed || this.#closing) return;
+
+    const key = namespaceKey(trackNamespace);
+    const record = this.#announces.get(key);
+    if (!record) return;
+
+    this.#announces.delete(key);
+
+    for (const stream of this.#namespaceStreams) {
+      if (!isNamespacePrefix(stream.prefix, record.namespace)) continue;
+
+      const suffix = namespaceKey(record.namespace.slice(stream.prefix.length));
+      const index = stream.announced.findIndex((existing) => namespaceKey(existing) === suffix);
+      if (index === -1) continue;
+
+      const [entry] = stream.announced.splice(index, 1);
+      // A failed write means the carrier is dead: drop it and report what it still carried, as a failed announce does.
+      const write = stream.writer
+        .write(encodeNamespaceDone(entry!))
+        .catch((error: unknown) => this.#dropCarrier(stream, error));
+      this.#pendingWithdrawals.add(write);
+      void write.then(() => this.#pendingWithdrawals.delete(write));
     }
   }
 
   /**
-   * Write the desired namespace onto a solicitation stream whose prefix covers it. Solicitations, `announce()`, and the
-   * first `registerTrack()` arrive in any order — the relay's SUBSCRIBE_NAMESPACE races our post-SETUP setup — so all
-   * three paths funnel here. The announce is deferred until at least one track is registered: an announced namespace
-   * invites immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on moq-lite-rs (the relay aborts
-   * the request rather than retrying), so advertising an empty registry would permanently break the first viewer in the
-   * pre-registration window.
+   * Write announced namespaces onto a solicitation stream whose prefix covers them: every one, or only `only`.
+   * Solicitations, `announce()`, and each namespace's first `registerTrack()` arrive in any order — the relay's
+   * SUBSCRIBE_NAMESPACE races our post-SETUP setup — so all three paths funnel here. A namespace's announce is deferred
+   * until a track in it is registered: an announced namespace invites immediate SUBSCRIBEs, and answering one with
+   * DOES_NOT_EXIST is terminal on moq-lite-rs (the relay aborts the request rather than retrying), so advertising an
+   * empty registry would permanently break the first viewer in the pre-registration window.
    */
-  #reconcileAnnounce(stream: NamespaceStream): void {
-    const namespace = this.#desiredNamespace;
-    if (namespace === undefined || this.#tracks.size === 0) return;
+  #reconcileAnnounce(stream: NamespaceStream, only?: AnnounceRecord): void {
+    for (const record of only ? [only] : [...this.#announces.values()]) {
+      this.#announceOn(stream, record);
+    }
+  }
 
+  #announceOn(stream: NamespaceStream, record: AnnounceRecord): void {
+    const { namespace } = record;
+    if (!this.#trackNamespaces.has(namespaceKey(namespace))) return;
     if (!isNamespacePrefix(stream.prefix, namespace)) return;
 
     const suffix = namespace.slice(stream.prefix.length);
-    if (stream.announced.some((existing) => existing.join('/') === suffix.join('/'))) return;
+    const key = namespaceKey(suffix);
+    if (stream.announced.some((existing) => namespaceKey(existing) === key)) return;
 
     stream.announced.push(suffix);
     stream.writer
       .write(encodeNamespace(suffix))
       .then(() => {
-        if (this.#destroyed || this.#announcedFired) return;
+        if (this.#destroyed || this.#closing || record.fired) return;
+        if (this.#announces.get(namespaceKey(namespace)) !== record) return;
 
-        this.#announcedFired = true;
+        record.fired = true;
         this.#callbacks.onAnnounced?.({ namespace });
       })
-      .catch((error: unknown) => {
-        // The response half died alone (a reset the request half may
-        // never mirror): the entry never reached the peer, no future
-        // write can, and the read loop may stay open forever — the
-        // carrier is dead. Deregister it so the peer's replacement
-        // solicitation is a fresh start rather than a PREFIX_OVERLAP
-        // against a corpse; if another path already swept it, the loss
-        // was reported there.
-        if (!this.#namespaceStreams.delete(stream)) return;
-
-        stream.announced = stream.announced.filter((existing) => existing !== suffix);
-        void stream.writer.close().catch(() => {});
-        void this.#reportAnnounceLoss(error);
-      });
+      .catch((error: unknown) => this.#dropCarrier(stream, error));
   }
 
   /**
-   * Fire `onAnnounceEnded` when no solicitation carries the announce anymore — shared by the read-loop cleanup and the
-   * response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
+   * A write on a solicitation stream failed: the response half died alone (a reset the request half may never mirror),
+   * so no future write can reach the peer and the read loop may stay open forever. Deregister the carrier, so the peer's
+   * replacement solicitation is a fresh start rather than a PREFIX_OVERLAP against a corpse, and report the namespaces
+   * it carried. If another path already swept it, the loss was reported there.
+   */
+  #dropCarrier(stream: NamespaceStream, error: unknown): void {
+    if (!this.#namespaceStreams.delete(stream)) return;
+
+    const lost = this.#carriedBy(stream);
+    stream.announced = [];
+    void stream.writer.close().catch(() => {});
+    void this.#reportAnnounceLoss(error, lost);
+  }
+
+  /** The announced namespaces a solicitation stream carries entries for. */
+  #carriedBy(stream: NamespaceStream): AnnounceRecord[] {
+    const suffixes = new Set(stream.announced.map(namespaceKey));
+    return [...this.#announces.values()].filter(
+      ({ namespace }) =>
+        isNamespacePrefix(stream.prefix, namespace) && suffixes.has(namespaceKey(namespace.slice(stream.prefix.length)))
+    );
+  }
+
+  /**
+   * Fire `onAnnounceEnded` for each of `lost` that no solicitation carries anymore — shared by the read-loop cleanup
+   * and the response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
    * destroyed, or migrating (a GOAWAY makes the peer's streams ending the orderly drain), and once the transport has
    * ended: an ended transport fails every stream as it settles `closed`, and that is connection loss, which
    * `#handleClosed` reports, not a withdrawal. A failure with `source` `'session'` (TA-23) or the settled `closed`
-   * decides, not whether the `closed` handler happened to run first.
+   * decides, not whether the `closed` handler happened to run first. A namespace withdrawn meanwhile is not reported.
    */
-  async #reportAnnounceLoss(cause: unknown): Promise<void> {
-    if (this.#announceLossSilenced() || this.#announceCarried()) return;
+  async #reportAnnounceLoss(cause: unknown, lost: AnnounceRecord[]): Promise<void> {
+    const stillLost = () =>
+      lost.filter(
+        (record) =>
+          this.#announces.get(namespaceKey(record.namespace)) === record && !this.#announceCarried(record.namespace)
+      );
+    if (this.#announceLossSilenced() || stillLost().length === 0) return;
     if (isSessionError(cause) || (await hasSettled(this.#transport.closed))) return;
-    // A replacement solicitation may have picked the announce up during that turn.
-    if (this.#announceLossSilenced() || this.#announceCarried()) return;
+    // A replacement solicitation may have picked an announce up during that turn.
+    if (this.#announceLossSilenced()) return;
 
-    const error = new MoqtProtocolError('the namespace solicitation carrying the announce ended');
-    error.cause = cause;
-    this.#callbacks.onAnnounceEnded?.({ error });
+    for (const record of stillLost()) {
+      // A handler may withdraw another namespace or end the session: check each again before telling it.
+      if (this.#announceLossSilenced() || !stillLost().includes(record)) continue;
+      const { namespace } = record;
+      const error = new MoqtProtocolError('the namespace solicitation carrying the announce ended');
+      error.cause = cause;
+      this.#callbacks.onAnnounceEnded?.({ namespace, error });
+    }
   }
 
   #announceLossSilenced(): boolean {
     return this.#destroyed || this.#closing || this.#receivedGoaway;
   }
 
-  #announceCarried(): boolean {
-    return [...this.#namespaceStreams].some((stream) => stream.announced.length > 0);
+  #announceCarried(namespace: TrackNamespace): boolean {
+    return [...this.#namespaceStreams].some((stream) => {
+      if (!isNamespacePrefix(stream.prefix, namespace)) return false;
+      const suffix = namespaceKey(namespace.slice(stream.prefix.length));
+      return stream.announced.some((existing) => namespaceKey(existing) === suffix);
+    });
   }
 
   registerTrack(options: RegisterTrackOptions): RegisteredTrack {
@@ -773,6 +916,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       getLargestObject: options.getLargestObject,
       largestObject: undefined,
       key: trackKey(options.trackNamespace, options.trackName),
+      namespace: [...options.trackNamespace],
+      namespaceKey: namespaceKey(options.trackNamespace),
       trackName: options.trackName,
       subscribers: [],
       done: false,
@@ -781,11 +926,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     this.#tracks.set(track.key, track);
 
-    // The first registration may be what the deferred announce was
-    // waiting for (see #reconcileAnnounce).
-    if (this.#tracks.size === 1) {
-      for (const stream of this.#namespaceStreams) {
-        this.#reconcileAnnounce(stream);
+    // The namespace's first registration may be what its deferred announce
+    // was waiting for (see #reconcileAnnounce).
+    if (!this.#trackNamespaces.has(track.namespaceKey)) {
+      this.#trackNamespaces.add(track.namespaceKey);
+      const record = this.#announces.get(track.namespaceKey);
+      if (record) {
+        for (const stream of this.#namespaceStreams) {
+          this.#reconcileAnnounce(stream, record);
+        }
       }
     }
 
@@ -848,9 +997,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
     }
 
-    if (hadReported && !this.#destroyed) {
-      this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: undefined });
-    }
+    if (hadReported) this.#reportBinding(track, undefined);
 
     return Promise.all([...track.pendingEnds]).then(() => {});
   }
@@ -1083,6 +1230,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   async #runControlStream(reader: StreamReader): Promise<void> {
     // The stream-type varint (0x2F00) doubles as the first message's type.
     const setup = await this.#readControlFrame(reader, MESSAGE_TYPE.SETUP);
+    if (this.#destroyed) return;
     if (setup.kind !== 'setup') throw new MoqtProtocolError('control stream did not begin with SETUP');
 
     if (this.#receivedServerSetup) {
@@ -1091,11 +1239,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     this.#receivedServerSetup = true;
     this.#resolveReady();
-    this.#callbacks.onReady?.(setup.options);
+    if (!this.#closing) this.#callbacks.onReady?.(setup.options);
 
     while (!(await reader.atEnd())) {
       const type = await reader.readVarint();
       const message = await this.#readControlFrame(reader, type);
+      if (this.#destroyed) return;
       if (message.kind !== 'goaway') throw new MoqtProtocolError(`unexpected ${message.kind} on the control stream`);
 
       if (this.#receivedControlGoaway) {
@@ -1103,8 +1252,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
 
       this.#receivedControlGoaway = true;
-      this.#receivedGoaway = true;
-      this.#callbacks.onGoaway?.(message);
+      this.#reportGoaway(message);
     }
 
     // A closed control stream ends the session (§6.3).
@@ -1138,8 +1286,25 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
   async #handleIncomingRequest(stream: BidirectionalStreamLike): Promise<void> {
     const reader = new StreamReader(stream.readable);
-    const type = await reader.readVarint();
-    const message = await this.#readControlFrame(reader, type);
+
+    this.#requestReaders.add(reader);
+
+    try {
+      await this.#serveRequest(stream, reader);
+    } finally {
+      this.#requestReaders.delete(reader);
+    }
+  }
+
+  async #serveRequest(stream: BidirectionalStreamLike, reader: StreamReader): Promise<void> {
+    const message = await readRequest(stream, reader, (type) => this.#readControlFrame(reader, type));
+
+    // A request still arriving when the session ended is dropped.
+    if (this.#destroyed) {
+      void reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+      return;
+    }
 
     // Reserve the request ID for EVERY request-initiating kind — the
     // uniqueness invariant is session-wide, so an ID burned on a
@@ -1208,6 +1373,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#peerRequestIds.add(requestId);
   }
 
+  /** The next message on a request stream being served: none once the peer has ended it. */
+  async #nextMessage(reader: StreamReader): Promise<ControlMessage | undefined> {
+    if (await reader.atEnd()) return undefined;
+
+    return this.#readControlFrame(reader, await reader.readVarint());
+  }
+
   /**
    * A peer's namespace solicitation — the announce carrier. Accepted with REQUEST_OK, then held open for the session's
    * lifetime: NAMESPACE / NAMESPACE_DONE entries for every announced namespace under the prefix ride this stream. A
@@ -1221,6 +1393,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   ): Promise<void> {
     const writer = stream.writable.getWriter();
     const prefix = subscribeNamespace.trackNamespacePrefix;
+
+    // A carrier accepted now would miss the drain's NAMESPACE_DONE retractions.
+    if (this.#closing) {
+      await refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, 'the session is closing');
+      return;
+    }
 
     // §9.17: a solicitation overlapping an established one (either
     // prefix containing the other) is refused with PREFIX_OVERLAP —
@@ -1266,6 +1444,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       return;
     }
 
+    // The close began during the write: the accepted solicitation ends empty, with nothing announced on it.
+    if (this.#closing || this.#destroyed) {
+      void writer.close().catch(() => {});
+      await reader.cancel().catch(() => {});
+      return;
+    }
+
     const record: NamespaceStream = {
       prefix,
       writer,
@@ -1281,13 +1466,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     let cause: unknown;
 
     try {
-      while (!(await reader.atEnd())) {
-        const type = await reader.readVarint();
-        const message = await this.#readControlFrame(reader, type);
+      for (;;) {
+        const message = await this.#nextMessage(reader);
+        // Checked here, in the turn that dispatches: the session can end between the read and this resumption.
+        if (message === undefined || this.#destroyed) break;
 
         if (message.kind === 'goaway') {
-          this.#receivedGoaway = true;
-          this.#callbacks.onGoaway?.(message);
+          this.#reportGoaway(message);
         } else if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
           // Namespace subscriptions may legally be updated (§9.5). v1
@@ -1295,11 +1480,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
           // entry), so per §9.5.1 the update is answered with an error
           // and the request stream closes below — never session-fatal
           // (only the reused Request ID above is).
-          this.#callbacks.onRequestUpdate?.({
-            requestId: subscribeNamespace.requestId,
-            updateRequestId: message.requestId,
-            parameters: message.parameters,
-          });
+          if (!this.#closing) {
+            this.#callbacks.onRequestUpdate?.({
+              requestId: subscribeNamespace.requestId,
+              updateRequestId: message.requestId,
+              parameters: message.parameters,
+            });
+          }
           void writer
             .write(encodeRequestError(REQUEST_ERROR_CODE.NOT_SUPPORTED, 'namespace update not supported'))
             .catch(() => {});
@@ -1329,7 +1516,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#namespaceStreams.delete(record);
     void writer.close().catch(() => {});
 
-    if (record.announced.length > 0) await this.#reportAnnounceLoss(cause);
+    const lost = this.#carriedBy(record);
+    record.announced = [];
+    if (lost.length > 0) await this.#reportAnnounceLoss(cause, lost);
   }
 
   /**
@@ -1351,6 +1540,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   ): Promise<void> {
     const track = this.#tracks.get(trackKey(request.trackNamespace, request.trackName));
     const writer = stream.writable.getWriter();
+
+    if (this.#closing) {
+      await refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, 'the session is closing');
+      return;
+    }
 
     if (!track || track.done) {
       await refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track');
@@ -1395,6 +1589,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     const track = this.#tracks.get(trackKey(subscribe.trackNamespace, subscribe.trackName));
     const writer = stream.writable.getWriter();
 
+    if (this.#closing) {
+      await refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, 'the session is closing');
+      return;
+    }
+
     if (!track || track.done) {
       await refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track');
       return;
@@ -1424,8 +1623,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // The encoder refused the response; the peer did nothing wrong.
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
 
-      if (!this.#destroyed) {
-        this.#callbacks.onSubscribeFailed?.({ requestId: subscribe.requestId, trackName: track.trackName, error });
+      if (!this.#destroyed && !this.#closing) {
+        this.#callbacks.onSubscribeFailed?.({
+          requestId: subscribe.requestId,
+          trackNamespace: track.namespace,
+          trackName: track.trackName,
+          error,
+        });
       }
       return;
     }
@@ -1481,7 +1685,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // an alias whose stream is already ending, and a subscription that
     // was never live is never reported (`onSubscribeEnd` pairs on the
     // same flag, keeping subscriber counts balanced).
-    if (!subscriber.finished) {
+    if (!subscriber.finished && this.#serving(track)) {
       subscriber.reported = true;
       this.#callbacks.onSubscribe?.(subscribe);
 
@@ -1503,21 +1707,19 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         this.#endSubscription(track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, 'superseded by a newer subscription');
       }
 
-      this.#callbacks.onTrackBinding?.({
-        trackName: track.trackName,
-        trackAlias: subscriber.forwarding ? trackAlias : undefined,
-      });
+      this.#reportBinding(track, subscriber.forwarding ? trackAlias : undefined);
     }
 
-    if (this.#fillRequested(subscriber, subscribe.parameters.fillParameters, largestObject)) {
+    if (this.#serving(track) && this.#fillRequested(subscriber, subscribe.parameters.fillParameters, largestObject)) {
       this.#failFill(subscriber, subscribe.requestId);
     }
 
     // Keep serving the request stream: REQUEST_UPDATEs arrive here.
     try {
-      while (!(await reader.atEnd())) {
-        const type = await reader.readVarint();
-        const message = await this.#readControlFrame(reader, type);
+      for (;;) {
+        const message = await this.#nextMessage(reader);
+        // Checked here, in the turn that dispatches: the session can end between the read and this resumption.
+        if (message === undefined || this.#destroyed) break;
 
         if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
@@ -1540,18 +1742,17 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
             subscriber.forwarding = forward !== 0;
 
             if (!subscriber.finished && subscriber.accepted) {
-              this.#callbacks.onTrackBinding?.({
-                trackName: track.trackName,
-                trackAlias: subscriber.forwarding ? subscriber.trackAlias : undefined,
-              });
+              this.#reportBinding(track, subscriber.forwarding ? subscriber.trackAlias : undefined);
             }
           }
 
-          this.#callbacks.onRequestUpdate?.({
-            requestId: subscribe.requestId,
-            updateRequestId: message.requestId,
-            parameters: message.parameters,
-          });
+          if (this.#serving(track)) {
+            this.#callbacks.onRequestUpdate?.({
+              requestId: subscribe.requestId,
+              updateRequestId: message.requestId,
+              parameters: message.parameters,
+            });
+          }
 
           if (!subscriber.finished) {
             if (Object.keys(unsupported).length > 0) {
@@ -1577,7 +1778,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
                 this.#callbacks.onSubscribeEnd?.({ requestId: subscribe.requestId });
                 const binding = track.subscribers.filter((s) => !s.finished && s.accepted && s.forwarding).at(-1);
 
-                this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: binding?.trackAlias });
+                this.#reportBinding(track, binding?.trackAlias);
               }
             } else {
               // The subscribe driver treats REQUEST_OK as the update's
@@ -1585,20 +1786,19 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // never sends REQUEST_UPDATE (moq-relay 0.15.8 writes nothing
               // after SUBSCRIBE until it cancels) never sees a trailing byte.
               // LARGEST_OBJECT rides it as in SUBSCRIBE_OK (§9.20.17).
-              const largestObject = readLargestObjectForUpdate(track);
+              const largestObject = this.#serving(track) ? readLargestObjectForUpdate(track) : undefined;
 
               void writer
                 .write(encodeRequestOk(largestObject ? { largestObject } : {}, this.#protocol))
                 .catch(() => {});
 
-              if (this.#fillRequested(subscriber, fillParameters, largestObject)) {
+              if (this.#serving(track) && this.#fillRequested(subscriber, fillParameters, largestObject)) {
                 this.#failFill(subscriber, message.requestId);
               }
             }
           }
         } else if (message.kind === 'goaway') {
-          this.#receivedGoaway = true;
-          this.#callbacks.onGoaway?.(message);
+          this.#reportGoaway(message);
         } else {
           throw new MoqtProtocolError(`unexpected ${message.kind} on an incoming subscribe stream`);
         }
@@ -1647,7 +1847,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         // pending one accepts, it emits its own binding.
         const binding = track.subscribers.filter((s) => !s.finished && s.accepted && s.forwarding).at(-1);
 
-        this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: binding?.trackAlias });
+        this.#reportBinding(track, binding?.trackAlias);
       }
     }
   }

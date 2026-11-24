@@ -4,6 +4,150 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## 0.5.0
+
+- `caprid-relay`: `connect_supervised_relay(url, ...)` supervises one connection that publishes and subscribes, as in
+  the TypeScript SDK (#529). It takes `connect_relay`'s options plus `reconnect`, `rotate_before`, `on_generation` and
+  `on_status`, and returns a `SupervisedRelay`. A `SupervisedRelay` has the supervised subscriber's `want`, `unwant`,
+  `catch_up` and `publishing_roots`, plus `generation`, `rotate()` and an awaitable `close()`. Its `publish(root)`
+  returns a `SupervisedPublication` with `root`, `namespace`, `register_track` and `close`, whose track writers
+  outlive the connections. Each connection is one generation, and it serves every root as the root followed by that
+  generation's field, so a reconnect or rotation moves every root, track and want together. If the relay stops
+  soliciting a root, the supervisor replaces the whole connection. `publishing_roots` never reports the supervised
+  relay's own roots. `on_generation` receives the generation field itself, where TypeScript passes `{ generation }`.
+  On ord.relay.mux.global, two peers each published two roots, followed the other's roots and wanted the other's
+  tracks with `generations=True`, and one peer rotated halfway. They passed all eight checks of
+  `mise run python:probe:supervised-relay` in 3 of 3 runs.
+- `caprid-relay`: the supervised publisher and subscriber now run on one supervision loop, which the supervised relay
+  shares, as in the TypeScript SDK. Their API is unchanged. Some timing at the edges changed. `close()` and a
+  cancellation now retire every track and close the open connections in the same turn, and a supervised subscriber's
+  `close()` reports `closed` before it returns. A write between connections raises `RECONNECTING` with the message
+  "The supervisor is between connections". Applications need no change.
+- `caprid-relay`: `connect_relay(url, ...)` opens one connection that publishes and subscribes, as in the TypeScript
+  SDK (#525). It takes `connect_relay_subscriber`'s options and returns a `RelaySession`. A `RelaySession` has every
+  `RelaySubscriber` method and property and an awaitable `close()`. Its `publish(namespace)` announces a namespace and
+  returns a `RelayPublication` with `register_track`, `announced`, `closed` and `close`. A connection announces any
+  number of namespaces with one token. A namespace the relay stops soliciting ends only its publication, with
+  `NAMESPACE_ENDED`. The relay does not route a connection's own announcements back to it. Its discovery leaves them
+  out, and the relay refuses a subscribe to one of the connection's own tracks. The connection does not declare MoQ
+  Active Count, so its `namespace_events` loads by the timing rules. No deployed moq-relay declares that option, so a
+  subscriber connection's discovery loads the same way today. A `RelaySession` is not a `RelaySubscriber` instance,
+  because its `close()` is a coroutine. `connect_relay_publisher` and `connect_relay_subscriber` behave as before. On
+  ord.relay.mux.global, two peers each opened one connection, announced two namespaces and subscribed to the other's
+  two tracks. All four tracks delivered 30 of 30 objects in 3 of 3 runs (`mise run python:probe:relay-session`).
+- `caprid-moq-core`: `create_moqt_duplex_session(transport, config)` runs the subscribe and publish drivers on one
+  transport. `MoqtPublishSession` announces several namespaces. `announce()` now adds a namespace instead of
+  replacing the one announced, `withdraw(namespace)` sends NAMESPACE_DONE, and `is_solicited(namespace)` reports
+  whether a solicitation covers one namespace. The session announces each namespace once a track in it is registered.
+  `on_announced` runs once per namespace, `AnnounceEnded` carries the `namespace` it lost, and `TrackBinding` and
+  `SubscribeFailed` carry `track_namespace`. Code that builds them itself must pass it. Code that called `announce()`
+  twice to move to another namespace must `withdraw()` the first. Both drivers' configs take `peer_request_ids`, the
+  set of the peer's request IDs that two drivers on one transport share.
+- `caprid-moq-core`: after a session's `on_closed`, none of its callbacks run, as in the TypeScript SDK (#530). A
+  subscribe session that has ended starts no request, and at its end it stops every request stream and data stream it
+  was reading, so a fetch reports no entry and a namespace subscription no end after `on_closed`. A request that is
+  over finishes or resets its stream: a fetch FINs its side once the peer's FIN or a REQUEST_ERROR completes it, and a
+  request that fails resets it. A publish session that is closing refuses SUBSCRIBE, TRACK_STATUS and
+  SUBSCRIBE_NAMESPACE with `GOING_AWAY`, and from `close()` to `on_closed` reports only ends (`on_subscribe_end`, an
+  `on_track_binding` with no alias). At its end it resets every data stream the application has not closed and every
+  response but an announce carrier whose FIN the transport has not taken yet. Nothing to change in an application.
+- `caprid-relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when a want's track has delivered nothing, such as an interrupt or transcript track before its first object, as in
+  the TypeScript SDK (#524). Such a want now moves when the replacement's SUBSCRIBE is accepted. On ord the old
+  connection closed 10.1 to 10.3 s after `rotate()` before, in 12 of 12 rotations, and 0.13 to 0.18 s after (median
+  0.15 s, 12 rotations). Nothing to change in an application.
+- `caprid-relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when the old connection delivers every object first, as in the TypeScript SDK (#430). A want whose target is
+  unchanged now cuts over at the replacement's first object, not at the first object the old subscription had not
+  delivered. Both connections receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once
+  each, and a subgroup end the old subscription reported is not reported again. On ord, with one want on a track
+  written every 100 ms, the old connection closed about 10 s after `rotate()` in 5 of 24 rotations before (over 1 s in
+  8), and 0.18 to 0.28 s after in all 72 (median 0.19 s). Nothing to change in an
+  application.
+- `caprid-relay`: `SupervisedSubscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`
+  reports the roots that are publishing now under a prefix, across reconnects and the subscriber's own rotations, as in
+  the TypeScript SDK (#422). Publishing means announced, not necessarily sending objects. Each namespace one field below
+  the prefix is a root (`PublishingRoot`: `id`, `namespace`), and one a field below a root is read as that root's
+  generation, so a supervised publisher's rotations and reconnects report nothing. The first `on_changed` is the load
+  (`PublishingRootsChange.initial` true, every root publishing in `added`, possibly none), and `PublishingRoots.loaded`
+  tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports only the roots added
+  or removed meanwhile. New roots come in one call at the load. A root the new discovery misses is removed in a later
+  call, once the new discovery has shown it nothing for 0.1 s, so a snapshot taken inside a publisher rotation's gap
+  reports nothing (#427). An application can build a room roster with no roster server.
+  `SupervisedSubscriber.close()` also closes every publishing-roots view, without calling its handlers.
+- `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
+  between every want that follows generations, every want waiting for its namespace to be announced again, and every
+  publishing-roots view. A want under another want's root or a view's prefix no longer fails with `PREFIX_OVERLAP`, and
+  a view refused on its prefix leaves the wants under it alone. A want waiting on a fixed namespace is still woken by
+  its announcement when a followed root or a publishing-roots view covers the namespace; before, a followed root
+  closed its watch and the want waited out the whole backoff. Nothing to change in an application.
+- `caprid-relay`: `namespace_events` yields `NamespaceEvent(type="loaded")` once, after the namespaces already announced
+  when the relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET`
+  (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported. `loaded`
+  takes no `capacity`, so a snapshot that fills the queue still loads. **Breaking (types):**
+  `NamespaceEvent.namespace` is now `tuple[str, ...] | None`, `None` for `loaded`; check `event.type` before reading
+  it.
+- `caprid-relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
+  error, which made a lost connection read as everyone leaving. Every error ending still means every namespace is
+  withdrawn, and a clean end still yields `unannounced` for each one first.
+- `caprid-moq-core`: MoQ Active Count (draft-lcurley-moq-active-count): `SETUP_OPTION.ACTIVE_COUNT`,
+  `PARAMETER_TYPE.ACTIVE_COUNT` and `MessageParameters.active_count` (decoded only on REQUEST_OK). A session that
+  declared the option and whose peer declared it too passes the count to `NamespaceSubscriptionHandlers.on_ok` and calls
+  the new `on_synced()` after the counted NAMESPACE messages; the session closes with PROTOCOL_VIOLATION when the peer
+  breaks the extension's rules. `caprid-relay`'s subscriber connection declares it. No deployed moq-relay does, so
+  nothing changes against them. **Breaking:** `on_ok` now takes `active_count: int | None`, and `on_namespace_done`
+  takes a second argument, `request_ended`, true for the withdrawals the session reports itself when a request ends;
+  update handlers passed to `MoqtSession.subscribe_namespace`.
+
+## 0.4.0
+
+- `caprid-relay`: `SupervisedSubscriber.catch_up(key)` replaces a want's accepted subscription at the live edge,
+  break-before-make, when it delivers too late to use (#447), as in the TypeScript SDK. The relay drops what it still
+  held queued for the cancelled subscription, `on_restarted` reports the new reason `"catch-up"`, and the replacement
+  opens at once when the cancelled one had moved past its first group, otherwise after the `retry` backoff. Code that
+  matches every `RestartReason` gains a case.
+- `caprid-relay`: `caprid_relay.media.LatestValueReader(on_value, *, late=None, on_catch_up=None)` reads a latest-wins
+  track such as telemetry or a control (#447), as in the TypeScript SDK. Pass its `subscription_handlers()` or
+  `want_handlers()`; it drops values older than the newest it judged and those the `late` predicate rejects, calls
+  `on_catch_up` once per run of late values (usually `subscriber.catch_up(key)`), and counts them in `stats`
+  (`LatestValueStats`). It replaces a hand-written "newest group applied" marker.
+- `caprid-moq-core`: a FETCH is removed from its session once its data stream has ended (`on_end`) or reset (`on_reset`)
+  and its response has arrived (#419), as in the TypeScript SDK. Before, only a REQUEST_ERROR or `cancel()` removed it,
+  so its handlers, and every payload they had collected, stayed in memory for the session's life. No API change.
+- Voice bot example: the bot publishes through `connect_supervised_publisher` (#442), so a lost connection no longer
+  ends it. It reconnects as a new generation under `<namespace>/bot` and answers the next utterance; the voice bot
+  page follows it. `run_bot` takes the `SupervisedPublisher` and no longer takes `bot_namespace`, and `bot_catalog()`
+  takes no namespace. Its tracks name none, so they are in whichever generation's namespace serves the catalog. The
+  README adds an install without mise and a note for scripted talkers.
+- `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
+  rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
+  encoder's next scheduled keyframe. The open group still finishes on the old generation.
+- `caprid-moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431), as in the TypeScript SDK. `late` keeps the
+  frames too late against the clock's position and those dropped past the held bound. A reader that reported `late`
+  as one number adds `behind` to keep the old total.
+- `caprid-relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `max_backlog=25` for the old behavior. Keyframe grouping keeps its default of 8.
+- `caprid-relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connect_supervised_subscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`on_publisher_done`) and never subscribes again.
+- Docs only, no code change:
+  - The README points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for
+    Client tokens.
+  - `SequencedFrame.key` is described as set on a group's first frame; under frame grouping that is every frame only
+    when each group holds one.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
+
 ## 0.3.0
 
 - `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.

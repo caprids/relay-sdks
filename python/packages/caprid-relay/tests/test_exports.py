@@ -11,6 +11,8 @@ import re
 import types
 from pathlib import Path
 
+import pytest
+
 import caprid_relay
 import caprid_relay.media
 import caprid_relay.quic
@@ -22,6 +24,8 @@ REPO = Path(__file__).resolve().parents[4]
 
 PUBLIC_NAMES = [
     "DEFAULT_ENDPOINT",
+    "SNAPSHOT_LIMIT",
+    "SNAPSHOT_QUIET",
     "CancellationToken",
     "Cancelled",
     "Closed",
@@ -30,6 +34,10 @@ PUBLIC_NAMES = [
     "GoawayEvent",
     "KeyValuePair",
     "LocationFilter",
+    "PublishingRoot",
+    "PublishingRoots",
+    "PublishingRootsChange",
+    "PublishingRootsHandlers",
     "MessageParameters",
     "MoqTrackSource",
     "MoqtObject",
@@ -43,7 +51,9 @@ PUBLIC_NAMES = [
     "RelayErrorCode",
     "RelayErrorPhase",
     "RelayGroupWriter",
+    "RelayPublication",
     "RelayPublisher",
+    "RelaySession",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
@@ -69,7 +79,9 @@ PUBLIC_NAMES = [
     "UpdateOkEvent",
     "PublisherGeneration",
     "RestartReason",
+    "SupervisedPublication",
     "SupervisedPublisher",
+    "SupervisedRelay",
     "SupervisedStatus",
     "SupervisedSubscriber",
     "SupervisionBackoff",
@@ -78,9 +90,11 @@ PUBLIC_NAMES = [
     "SwitchedInfo",
     "WantHandlers",
     "WantSwitchedInfo",
+    "connect_relay",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",
+    "connect_supervised_relay",
     "connect_supervised_subscriber",
     "read_json",
     "read_text",
@@ -98,6 +112,8 @@ MEDIA_NAMES = [
     "FrameReaderPoll",
     "FrameReaderSequencer",
     "FrameWriter",
+    "LatestValueReader",
+    "LatestValueStats",
     "MediaKind",
     "ReplaceableTrack",
     "TrackReplacement",
@@ -178,13 +194,26 @@ def test_the_audio_only_target_latency_is_exported_and_equals_the_typescript_con
     assert moq_media.AUDIO_ONLY_TARGET_LATENCY_US == int(declared.group(1).replace("_", "")) == 500_000
 
 
-def test_exports_one_entry_point_per_connection_role_and_nothing_under_the_old_names() -> None:
+@pytest.mark.parametrize(
+    ("python", "typescript", "seconds"),
+    [("SNAPSHOT_QUIET", "SNAPSHOT_QUIET_MS", 0.05), ("SNAPSHOT_LIMIT", "SNAPSHOT_LIMIT_MS", 1.0)],
+)
+def test_the_snapshot_windows_are_exported_and_equal_the_typescript_constants(
+    python: str, typescript: str, seconds: float
+) -> None:
+    source = (REPO / "ts" / "src" / "namespace-events.ts").read_text()
+    declared = re.search(rf"export const {typescript} = ([\d_]+);", source)
+    assert declared is not None, f"ts/src/namespace-events.ts no longer declares {typescript}"
+    assert python in caprid_relay.__all__
+    assert getattr(caprid_relay, python) == int(declared.group(1).replace("_", "")) / 1000 == seconds
+
+
+def test_exports_one_entry_point_per_connection_kind_and_nothing_under_the_old_names() -> None:
+    assert callable(caprid_relay.connect_relay)
     assert callable(caprid_relay.connect_relay_subscriber)
     assert callable(caprid_relay.connect_relay_publisher)
-
-    for old in ("connect_relay", "RelayConnection"):
-        assert not hasattr(caprid_relay, old)
-        assert old not in caprid_relay.__all__
+    assert not hasattr(caprid_relay, "RelayConnection")
+    assert "RelayConnection" not in caprid_relay.__all__
 
 
 def test_spells_subscription_events_after_what_happened_not_after_the_protocol_message() -> None:

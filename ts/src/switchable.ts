@@ -85,7 +85,7 @@ export interface SwitchOptions {
    * with what the active subscription has delivered, and accept once the new track has caught up,
    * so the cutover repeats media rather than skipping it. Group IDs are no such timeline: each
    * track numbers its own groups, and the SDK's publisher counts them from the track's first sent
-   * group. Against the Mux relay a subscription without a location filter starts at the beginning
+   * group. Against the Caprid relay a subscription without a location filter starts at the beginning
    * of the latest group, so its first object begins a group; a subscriber on another relay can
    * lose that first object (issue #243), which a timeline predicate absorbs.
    */

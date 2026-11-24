@@ -1,8 +1,8 @@
 /**
  * The supervised subscriber: one subscriber connection at a time, replaced with backoff whenever it ends, and one
  * supervisor per wanted track that keeps a subscription to it open across connections, publisher restarts and
- * generations. Each want retries the announce race, backs off after a publisher's done or a rejection, resubscribes a
- * subscription that went stale, and follows a supervised publisher's newest generation through namespace discovery.
+ * generations. Each want retries the announce race, backs off after a publisher's done or a rejection (cut short when
+ * its namespace is announced again), resubscribes a subscription that went stale, and follows a supervised publisher's newest generation through namespace discovery.
  * Objects are never fetched to fill a gap: a replacement subscription starts live, and `onRestarted` tells the
  * application to drop state that assumed continuity. A move to a newer generation, or to another track or parameters
  * on a re-want, is made before the break instead, as `switchTo` makes one (issue #282): the replacement opens while the
@@ -12,37 +12,39 @@
  * connections".
  */
 import {
-  isMoqtProtocolError,
   type MessageParameters,
   type MoqtObject,
+  PUBLISH_DONE_STATUS,
   type PublishDone,
   type SubscribeOk,
 } from '@caprid/moq-core';
 import type { Diagnostics } from './client-diagnostics.js';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
-import { assertTimeoutMs, type RelaySessionHooks, reportEndpoint } from './connect-session.js';
-import { diagnosticsOption, linkDiagnostics, wantDiagnostics } from './diagnostics-report.js';
-import { RelayError } from './errors.js';
-import type { NamespaceEvents } from './namespace-events.js';
+import { assertTimeoutMs, type RelaySessionHooks } from './connect-session.js';
+import { diagnosticsOption, wantDiagnostics } from './diagnostics-report.js';
+import { DISCOVERY_LINGER_MS, type DiscoveryIndex, discoveryEnding, refusedForGood } from './discovery.js';
+import {
+  openPublishingRoots,
+  type PublishingRoots,
+  type PublishingRootsHandlers,
+  type PublishingRootsOptions,
+} from './publishing-roots.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
-import { SubscriptionConnectionClosedError, SubscriptionRequestError, synchronousCallback } from './subscription.js';
+import { SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
   backoffDelay,
   backoffOptions,
   isFreshNamespaceRejection,
   isPermanentRequestError,
-  isSetupFailure,
   RECONNECT_BACKOFF,
   RESUBSCRIBE_BACKOFF,
-  ROTATION_OVERLAP_MS,
   rotateBeforeOption,
-  rotationDeadline,
-  rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
   sleep,
   whenAborted,
 } from './supervision.js';
+import { createSupervisor, type Supervisor } from './supervisor.js';
 import {
   assertDrainMs,
   type HeldEvent,
@@ -161,7 +163,10 @@ export interface WantHandlers {
   onSubgroupEnd?(info: { groupId: number; subgroupId: number; endOfGroup: boolean }): void;
   /** A subgroup stream was reset. */
   onSubgroupReset?(info: { groupId: number; error: unknown }): void;
-  /** The relay sent PUBLISH_DONE on the current subscription; the want resubscribes after its backoff. */
+  /**
+   * The relay sent PUBLISH_DONE on the current subscription. The want resubscribes after its backoff, or as soon as its
+   * namespace is announced again (after TRACK_ENDED, announced again after a withdrawal).
+   */
   onPublisherDone?(info: PublishDone): void;
   /**
    * An accepted subscription ended and the want will replace it: drop decoder state that assumed continuity. Called
@@ -214,12 +219,24 @@ export interface SupervisedSubscriber {
   /**
    * Replace the connection make-before-break, as happens on its own `rotateBeforeMs` before the credential expires: a
    * new connection opens, with a fresh token, and every want moves its subscription to it as a move would, keeping the
-   * old one delivering until the cutover. A want whose target is unchanged cuts over on the first object the old one did
-   * not deliver, with no callback: nothing is lost or repeated. The old connection closes once every want has moved,
-   * after 10 seconds at most. A no-op while no connection is up.
+   * old one delivering until the cutover. A want whose target is unchanged cuts over on the replacement's first object,
+   * with no callback, and an object the old one delivered is not delivered again: nothing is lost or repeated. The old
+   * connection closes once every want has moved, after 10 seconds at most. A no-op while no connection is up.
    */
   rotate(): void;
-  /** Stop reconnecting, cancel every want and close the connection. Idempotent. */
+  /**
+   * Follow the roots that are publishing now under a prefix, across reconnects and rotations, with no roster server.
+   * Publishing means announced, not necessarily sending objects. A root is the namespace one field below the prefix,
+   * publishing while it or a namespace one field below it is announced, and removed once its last namespace has been
+   * withdrawn for 100 ms (soon after a clean close, at the relay's idle timeout after a crash). The layout is a
+   * contract: a namespace one field below a root, two below the prefix, is read as that root's generation, so a
+   * supervised publisher's generations count as one root, and anything deeper is ignored.
+   * Shares the connection's discovery with every want and view under the same prefix tree. Arguments are checked at
+   * once; handlers run from the next turn on. Throws a `RelayError` with code `CLOSED` when the subscriber is already
+   * closed.
+   */
+  publishingRoots(options: PublishingRootsOptions, handlers?: PublishingRootsHandlers): PublishingRoots;
+  /** Stop reconnecting, cancel every want, close every publishing-roots view and close the connection. Idempotent. */
   close(): void;
 }
 
@@ -239,16 +256,19 @@ export type ConnectSubscriber = (
   options: ConnectRelaySubscriberOptions & RelaySessionHooks,
 ) => Promise<RelaySubscriber>;
 
-/** One live subscriber connection and the discovery it runs for followed roots. */
-interface Connection {
+export interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
   /** Aborts when a rotation replaced this connection: its wants move to the new one. */
   retiring: AbortSignal;
-  /** One discovery per followed root, shared by every want on it. */
-  roots: Map<string, RootWatch>;
-  /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
+  discovery: DiscoveryIndex;
+  /** One watch per fixed namespace a want waits on to be announced again, shared by every want on it. */
+  wakes: Map<string, NamespaceWake & { users: number; linger?: ReturnType<typeof setTimeout> | undefined }>;
+  /**
+   * Wants with a subscription and publishing-roots views with a discovery still on this connection; a rotation closes
+   * it once none are left.
+   */
   holds: number;
   /** Called whenever `holds` drops to zero. */
   onIdle?: (() => void) | undefined;
@@ -300,6 +320,15 @@ interface Want {
   deferred?: { error: unknown };
   /** Ends the running attempt for a catch-up; set while an attempt runs. */
   catchUp?: (() => void) | undefined;
+  /** The PUBLISH_DONE status that ended the running attempt's subscription, if one did. */
+  doneStatus?: number | undefined;
+  /**
+   * A fixed namespace's watch the want holds from its first wait until a subscription is accepted, so an announcement
+   * between two attempts is heard (spec/behavior.md, "Supervised connections").
+   */
+  wake?: { connection: Connection; watch: NamespaceWake; release(): void } | undefined;
+  /** The watch's count of changes when the latest attempt started: only an announcement after it wakes a wait. */
+  wakeMark?: { watch: NamespaceWake; seen: number } | undefined;
 }
 
 /**
@@ -317,327 +346,63 @@ export async function superviseRelaySubscriber(
   const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, diagnostics, ...connection } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
   const reporting = diagnosticsOption(diagnostics)?.scope('subscriber');
-  const linkReport = reporting && linkDiagnostics(reporting);
-  const wantReport = reporting && wantDiagnostics(reporting);
   const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
+  const supervisor = createSupervisor<ConnectRelaySubscriberOptions>(
+    async (attempt) => {
+      const subscriber = await connect(attempt);
+      return {
+        subscriber,
+        closed: subscriber.closed,
+        get expiresAt() {
+          return subscriber.expiresAt;
+        },
+        close: () => subscriber.close(),
+      };
+    },
+    { what: 'Supervised subscriber', connection, signal, backoff, rotateBeforeMs, onStatus, diagnostics: reporting },
+  );
+  const wants = createWantSurface(supervisor, reporting);
+  await supervisor.start();
+
+  return {
+    get status() {
+      return supervisor.status;
+    },
+    closed: supervisor.closed,
+    ...wants,
+    rotate() {
+      supervisor.rotate();
+    },
+    close() {
+      void supervisor.stop({});
+    },
+  };
+}
+
+/** The wants and publishing-roots views a supervisor's connections carry. */
+export type WantSurface = Pick<SupervisedSubscriber, 'want' | 'unwant' | 'catchUp' | 'publishingRoots'>;
+
+/**
+ * Keep wants and publishing-roots views on `supervisor`'s connections: each moves with a rotation and comes back on
+ * the next connection. Everything is cancelled when the supervisor stops. Given `reporting`, a diagnostics scope, each
+ * want's life is reported into it (`want` events and the `wants` section).
+ */
+export function createWantSurface(
+  supervisor: Pick<Supervisor, 'liveConnection' | 'current' | 'stopped' | 'closedError' | 'onStop' | 'ownsNamespace'>,
+  reporting?: Diagnostics,
+): WantSurface {
   const wants = new Map<string, Want>();
-  let status: SupervisedStatus = 'connecting';
-  let stopped = false;
-  let current: Connection | undefined;
-  const connectionWaiters: (() => void)[] = [];
-  let resolveClosed: (value: { error?: unknown }) => void = () => {};
-  const closed = new Promise<{ error?: unknown }>((resolve) => {
-    resolveClosed = resolve;
-  });
-  const lifetime = new AbortController();
-  /** Aborts the connection attempt in progress only: a live connection is closed cleanly on `close()`. */
-  let attemptInProgress: AbortController | undefined;
-  /** The connection a rotation is replacing, while its wants move off it. */
-  let retiring: Connection | undefined;
-  /**
-   * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
-   * one whose replacement is still connecting or being discarded.
-   */
-  let rotateRequested = false;
-  /** Wakes a serve loop waiting for its rotation; replaced for each wait. */
-  let wakeRotation: () => void = () => {};
-  const requestRotation = () => {
-    if (stopped || !current) return;
-    rotateRequested = true;
-    wakeRotation();
-  };
-
-  const setStatus = (next: SupervisedStatus, error?: unknown) => {
-    if (status === next && error === undefined) return;
-    status = next;
-    linkReport?.status(next, error);
-    onStatus?.(next, error);
-  };
-  let first: { resolve(): void; reject(error: unknown): void } | undefined;
-  const started = new Promise<void>((resolve, reject) => {
-    first = { resolve, reject };
-  });
-
-  const stop = (result: { error?: unknown }) => {
-    if (stopped) return;
-    stopped = true;
-    const reason = result.error ?? new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
-    lifetime.abort(reason);
-    attemptInProgress?.abort(reason);
-    // An abort while the first connection is still being made rejects the call that is waiting for it.
-    first?.reject(reason);
-    first = undefined;
+  const views = new Set<PublishingRoots>();
+  const wantReport = reporting && wantDiagnostics(reporting);
+  const liveConnection = (scope: AbortSignal) => supervisor.liveConnection(scope);
+  supervisor.onStop(() => {
     for (const want of wants.values()) want.controller.abort();
     wants.clear();
     wantReport?.forgetAll();
-    current?.subscriber.close();
-    current = undefined;
-    retiring?.subscriber.close();
-    retiring = undefined;
-    for (const wake of connectionWaiters.splice(0)) wake();
-    try {
-      setStatus('closed');
-    } finally {
-      resolveClosed(result);
-    }
-  };
-  const onAbort = () => {
-    try {
-      stop({ error: signal?.reason });
-    } catch {
-      // A throwing onStatus while reporting `closed`: `closed` is settled, and an abort listener has no caller to tell.
-    }
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-
-  /** The live connection, waiting for one while reconnecting; `undefined` once `scope` aborts. */
-  const liveConnection = async (scope: AbortSignal): Promise<Connection | undefined> => {
-    while (!scope.aborted && !stopped) {
-      if (current && !current.signal.aborted) return current;
-      const woken = new Promise<void>((resolve) => connectionWaiters.push(resolve));
-      await Promise.race([woken, whenAborted(scope)]);
-    }
-    return undefined;
-  };
-
-  /** Open one connection, or `undefined` if the supervisor stopped first. Throws the attempt's failure. */
-  const connectOnce = async (): Promise<
-    { live: Connection; ended: AbortController; retire: AbortController } | undefined
-  > => {
-    let subscriber: RelaySubscriber;
-    try {
-      attemptInProgress = new AbortController();
-      subscriber = await connect({
-        ...connection,
-        signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        [reportEndpoint]: (endpoint, framing) => {
-          connection.url ??= endpoint;
-          linkReport?.carrier(framing);
-        },
-      });
-    } finally {
-      attemptInProgress = undefined;
-    }
-    if (stopped) {
-      subscriber.close();
-      return undefined;
-    }
-    const ended = new AbortController();
-    // Aborted the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
-    void subscriber.closed.then(() => ended.abort());
-    const retire = new AbortController();
-    const live: Connection = {
-      subscriber,
-      signal: ended.signal,
-      retiring: retire.signal,
-      roots: new Map(),
-      holds: 0,
-      rotateAt: rotationDeadline(subscriber.expiresAt, rotateBeforeMs),
-    };
-    return { live, ended, retire };
-  };
-
-  type Opened = NonNullable<Awaited<ReturnType<typeof connectOnce>>>;
-
-  /** The connection ended: release what it ran and stop anything still waiting on it. */
-  const settleEnded = (opened: Opened) => {
-    opened.ended.abort();
-    for (const watch of opened.live.roots.values()) watch.close();
-  };
-
-  /**
-   * Open the connection that replaces `opened`, move every want to it, and close the old one once they have moved.
-   * Returns the new connection, or `undefined` when the old one ended or the supervisor stopped before a replacement
-   * was up, or when an automatic rotation found no fresher credential.
-   */
-  const rotateFrom = async (opened: Opened, manual: () => boolean): Promise<Opened | undefined> => {
-    const old = opened.live;
-    let failures = 0;
-    let next: Opened | undefined;
-    // The live connection ending while its replacement is still connecting is a reconnect: report it at once.
-    void old.subscriber.closed.then(({ error }) => {
-      if (stopped || current !== old) return;
-      current = undefined;
-      try {
-        setStatus('reconnecting', error);
-      } catch (thrown) {
-        try {
-          stop({ error: thrown });
-        } catch {
-          // A throwing onStatus while reporting `closed`: `closed` is settled either way.
-        }
-      }
-    });
-    while (!stopped && !old.signal.aborted) {
-      try {
-        next = await connectOnce();
-        break;
-      } catch {
-        if (stopped) return undefined;
-        // The live connection keeps serving; try again after the backoff unless it ends first.
-        await Promise.race([
-          sleep(backoffDelay(failures++, backoff), lifetime.signal).catch(() => {}),
-          whenAborted(old.signal),
-        ]);
-      }
-    }
-    if (!next) return undefined;
-    // `close()` may have run while the helper's result was on its way here: it could not see this connection.
-    if (stopped) {
-      next.live.subscriber.close();
-      return undefined;
-    }
-    // Consulted whatever happened to the old connection: a queued `rotate()` is answered by this replacement.
-    const asked = manual();
-    if (!old.signal.aborted && !asked) {
-      // A credential that expires no later than the live one replaces nothing: the relay would end both together.
-      const was = old.subscriber.expiresAt?.getTime();
-      const now = next.live.subscriber.expiresAt?.getTime();
-      if (was !== undefined && (now === undefined || now <= was)) {
-        next.live.subscriber.close();
-        return undefined;
-      }
-    }
-    current = next.live;
-    retiring = old;
-    setStatus('live');
-    for (const wake of connectionWaiters.splice(0)) wake();
-    const idle = new Promise<void>((resolve) => {
-      old.onIdle = resolve;
-    });
-    // Every want on the old connection ends its attempt there and subscribes on the new one.
-    opened.retire.abort();
-    if (old.holds === 0) old.onIdle?.();
-    // The replacement ending cuts the overlap short too: the wants on it need the next connection now. So does its own
-    // rotation falling due, for a credential shorter than the overlap.
-    const overlap = new AbortController();
-    await Promise.race([
-      idle,
-      sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
-      whenAborted(old.signal),
-      whenAborted(next.live.signal),
-      rotationDue(next.live.rotateAt, new Promise<void>(() => {}), AbortSignal.any([lifetime.signal, overlap.signal])),
-    ]);
-    overlap.abort();
-    old.onIdle = undefined;
-    if (retiring === old) retiring = undefined;
-    old.subscriber.close();
-    settleEnded(opened);
-    return next;
-  };
-
-  /** Serve `opened` until it ends, or until a rotation replaced it with the connection returned. */
-  const serve = async (opened: Opened): Promise<{ error?: unknown } | { next: Opened }> => {
-    const { subscriber } = opened.live;
-    const scope = new AbortController();
-    /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
-    let automatic = true;
-    try {
-      for (;;) {
-        const asked = new Promise<void>((resolve) => {
-          wakeRotation = resolve;
-        });
-        if (rotateRequested) wakeRotation();
-        const due = rotationDue(
-          automatic ? opened.live.rotateAt : undefined,
-          asked,
-          AbortSignal.any([lifetime.signal, scope.signal]),
-        ).then(() => undefined);
-        const outcome = await Promise.race([subscriber.closed, due]);
-        if (outcome !== undefined || stopped) return outcome ?? {};
-        // A `rotate()` before the replacement is current makes this rotation a manual one: it takes the replacement.
-        let manual = false;
-        const isManual = () => {
-          if (rotateRequested) {
-            rotateRequested = false;
-            manual = true;
-          }
-          return manual;
-        };
-        isManual();
-        const next = await rotateFrom(opened, isManual);
-        if (next) return { next };
-        if (opened.live.signal.aborted || stopped) return await subscriber.closed;
-        if (!manual) automatic = false;
-      }
-    } finally {
-      scope.abort();
-      wakeRotation = () => {};
-    }
-  };
-
-  const run = async () => {
-    let attempt = 0;
-    /** A connection a rotation already opened and moved the wants to. */
-    let next: Opened | undefined;
-    while (!stopped) {
-      let opened = next;
-      next = undefined;
-      if (!opened) {
-        try {
-          opened = await connectOnce();
-        } catch (error) {
-          if (stopped) return;
-          if (first && isSetupFailure(error)) {
-            first.reject(error);
-            first = undefined;
-            stop({ error });
-            return;
-          }
-          setStatus('reconnecting', error);
-          await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
-          continue;
-        }
-        if (!opened) return;
-        // `close()` may have run while the helper's result was on its way here: it could not see this connection.
-        if (stopped) {
-          opened.live.subscriber.close();
-          return;
-        }
-        current = opened.live;
-        setStatus('live');
-        first?.resolve();
-        first = undefined;
-        for (const wake of connectionWaiters.splice(0)) wake();
-      }
-      const upAt = performance.now();
-
-      const outcome = await serve(opened);
-      if ('next' in outcome) {
-        if (stopped) return;
-        next = outcome.next;
-        attempt = 0;
-        continue;
-      }
-      settleEnded(opened);
-      if (stopped) return;
-      current = undefined;
-      // Already reported if the connection ended while a rotation's replacement was connecting.
-      if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
-      if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
-      await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
-    }
-  };
-  const supervise = async () => {
-    try {
-      await run();
-    } catch (error) {
-      // An application callback (onStatus) threw: stop rather than leave the supervisor neither reconnecting nor
-      // closed, and fail a caller still waiting to connect.
-      stop({ error });
-    }
-  };
-  // A second throw, from onStatus reporting `closed`, has nowhere to go: `closed` is settled either way.
-  void supervise().catch(() => {});
-  try {
-    await started;
-  } catch (error) {
-    signal?.removeEventListener('abort', onAbort);
-    throw error;
-  }
-  if (stopped) throw signal?.reason ?? new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+    for (const view of [...views]) view.close();
+  });
 
   const forget = (key: string, want: Want) => {
     want.controller.abort();
@@ -645,26 +410,24 @@ export async function superviseRelaySubscriber(
     wants.delete(key);
     wantReport?.forget(key);
   };
+  const guard = <H extends object>(handlers: H, what: string): H => {
+    if (typeof handlers !== 'object' || handlers === null) throw new TypeError(`${what} handlers must be an object`);
+    const guarded: Record<string, (...args: unknown[]) => void> = {};
+    for (const [name, callback] of Object.entries(handlers)) {
+      if (callback === undefined) continue;
+      if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
+      guarded[name] = synchronousCallback(name, callback, handlers);
+    }
+    return guarded as H;
+  };
 
   return {
-    get status() {
-      return status;
-    },
-    closed,
     want(key, wantOptions, handlers = {}) {
       if (typeof key !== 'string') throw new TypeError('want key must be a string');
       if (typeof wantOptions !== 'object' || wantOptions === null) {
         throw new TypeError('want takes an options object');
       }
-      if (typeof handlers !== 'object' || handlers === null) throw new TypeError('want handlers must be an object');
-      // The primitive's guard: a declared-async callback is refused, a returned promise is observed, never left unhandled.
-      const guarded: Record<string, (...args: unknown[]) => void> = {};
-      for (const [name, callback] of Object.entries(handlers)) {
-        if (callback === undefined) continue;
-        if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
-        guarded[name] = synchronousCallback(name, callback, handlers);
-      }
-      const safeHandlers = guarded as WantHandlers;
+      const safeHandlers = guard(handlers, 'want');
       const { parameters, generations = false, staleAfterMs, retry, until, drainMs = 0 } = wantOptions;
       const namespace = namespaceFields(wantOptions.namespace);
       if (generations) namespaceFields([...namespace, 'x']);
@@ -673,7 +436,7 @@ export async function superviseRelaySubscriber(
       const retryBackoff = backoffOptions('retry', retry, RESUBSCRIBE_BACKOFF);
       const predicate = untilPredicate(until);
       assertDrainMs(drainMs);
-      if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+      if (supervisor.stopped) throw supervisor.closedError();
 
       const source = JSON.stringify([namespace, generations]);
       const target = targetKey([], track, parameters);
@@ -703,12 +466,7 @@ export async function superviseRelaySubscriber(
         controller: new AbortController(),
       };
       wants.set(key, want);
-      void runWant(
-        want,
-        liveConnection,
-        () => current,
-        () => forget(key, want),
-      );
+      void runWant(want, liveConnection, supervisor.current, () => forget(key, want));
     },
     unwant(key) {
       const want = wants.get(key);
@@ -718,25 +476,30 @@ export async function superviseRelaySubscriber(
       if (typeof key !== 'string') throw new TypeError('want key must be a string');
       wants.get(key)?.catchUp?.();
     },
-    rotate() {
-      requestRotation();
-    },
-    close() {
-      signal?.removeEventListener('abort', onAbort);
-      stop({});
+    publishingRoots(rootsOptions, handlers = {}) {
+      if (typeof rootsOptions !== 'object' || rootsOptions === null) {
+        throw new TypeError('publishingRoots takes an options object');
+      }
+      const safeHandlers = guard(handlers, 'publishingRoots');
+      const prefix = namespaceFields(rootsOptions.prefix);
+      namespaceFields([...prefix, 'x', 'x']);
+      if (supervisor.stopped) throw supervisor.closedError();
+      const view: PublishingRoots = openPublishingRoots(
+        {
+          liveConnection,
+          current: supervisor.current,
+          hold,
+          onClosed: () => views.delete(view),
+          // The connection a rotation replaces sees the next one's announces, and the other way round: hide both.
+          hides: (namespace) => supervisor.ownsNamespace(namespace),
+        },
+        prefix,
+        safeHandlers,
+      );
+      views.add(view);
+      return view;
     },
   };
-}
-
-/**
- * Whether a request refused at the call is the want's own fault, which no connection fixes: an argument, or a root
- * overlapping another followed root. Anything else thrown there (CLOSED, the connection's TRANSPORT_ERROR or GOAWAY)
- * is the connection ending before the supervisor has heard of it.
- */
-function refusedForGood(error: unknown): boolean {
-  // The core's encoders refuse a request the wire cannot carry (a field too long to encode) the same way every time.
-  if (error instanceof TypeError || error instanceof RangeError || isMoqtProtocolError(error)) return true;
-  return error instanceof RelayError && error.code === 'PREFIX_OVERLAP';
 }
 
 /** What ended one attempt, and what the want does next. */
@@ -789,6 +552,7 @@ async function superviseWant(
     await keepSubscribed();
   } finally {
     want.changes.delete(changed);
+    releaseWake(want);
   }
   async function keepSubscribed() {
     while (!scope.aborted) {
@@ -799,10 +563,16 @@ async function superviseWant(
         return;
       }
       const started = await liveConnection(scope);
-      // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
       if (!started || scope.aborted) return;
       want.settledTarget = undefined;
       want.connection = started;
+      want.doneStatus = undefined;
+      // What the namespace's watch has seen by now, whether this want holds it or another want on the connection does:
+      // only what comes later is news to this attempt. A watch opened later saw nothing before it.
+      const existing =
+        want.wake?.watch ??
+        (want.options.generations ? undefined : started.wakes.get(JSON.stringify(want.options.namespace)));
+      want.wakeMark = existing && !existing.failed() ? { watch: existing, seen: existing.seen() } : undefined;
       let outcome = await attempt(want, started, nextConnection);
       // A rotation may have moved the attempt to another connection: what follows waits on the one it ended on.
       const connection = want.connection ?? started;
@@ -847,17 +617,34 @@ async function superviseWant(
       }
       // Cached objects followed by a done are not progress: only a later group resets the backoff.
       if (outcome.progressed) failures = 0;
-      await backoff(want, connection, backoffDelay(failures++, want.retry));
+      // After TRACK_ENDED the namespace may still be announced for the publisher that ended the track: only its being
+      // announced again wakes the wait early, and the backoff is the slow fallback.
+      const trackEnded = outcome.reason === 'publisher-done' && want.doneStatus === PUBLISH_DONE_STATUS.TRACK_ENDED;
+      // Woken by an announcement: a new publisher, whose announce race is retried from the shortest delay.
+      if (await backoff(want, connection, backoffDelay(failures++, want.retry), trackEnded)) failures = 0;
     }
   }
 }
 
 /**
- * Wait out a retry delay, cut short when a fresh attempt can do better at once: the connection ended, or (following
- * generations) a generation other than the last one tried became the newest.
+ * Wait out a retry delay, cut short when a fresh attempt can do better at once: the connection ended, (following
+ * generations) a generation other than the last one tried became the newest, or (on a fixed namespace) the namespace
+ * was announced after the latest attempt started, which returns true. After TRACK_ENDED (`trackEnded`) only an
+ * announcement this watch saw follow a withdrawal counts: one already announced may be the publisher that ended the
+ * track.
  */
-async function backoff(want: Want, connection: Connection, delayMs: number): Promise<void> {
+async function backoff(want: Want, connection: Connection, delayMs: number, trackEnded = false): Promise<boolean> {
   const wake = new AbortController();
+  let announced = false;
+  const watched = want.options.generations ? undefined : holdWake(want, connection);
+  const mark = watched && want.wakeMark?.watch === watched ? want.wakeMark.seen : 0;
+  const heard = () => {
+    if (!watched || watched.failed()) return;
+    if ((trackEnded ? watched.returnedAt() : watched.announcedAt()) <= mark) return;
+    announced = true;
+    wake.abort();
+  };
+  const unheard = watched?.onChange(heard);
   // A rotation replacing the connection wakes it too: the want's next attempt belongs on the new one.
   const scope = AbortSignal.any([want.controller.signal, connection.signal, connection.retiring, wake.signal]);
   let held: { watch: RootWatch; release(): void } | undefined;
@@ -868,7 +655,6 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
       // The attempt itself reports a discovery it cannot open.
     }
   }
-  // Released in the turn the want is cancelled, as in an attempt, so a replacement can claim an overlapping root.
   if (held) want.controller.signal.addEventListener('abort', held.release, { once: true });
   // Only a newer generation wakes the wait. A discovery that fails again does not: the next attempt reports it after
   // the delay, so failing discovery is retried no faster than the backoff.
@@ -899,13 +685,41 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
   want.changes.add(rewanted);
   try {
     changed();
+    heard();
     await sleep(delayMs, scope).catch(() => {});
   } finally {
     want.changes.delete(rewanted);
     unwatch?.();
+    unheard?.();
     if (held) want.controller.signal.removeEventListener('abort', held.release);
     held?.release();
   }
+  return announced && !want.controller.signal.aborted;
+}
+
+/**
+ * The want's watch of its fixed namespace on `connection`, held until a subscription is accepted or the want ends; one
+ * held on an earlier connection is released. `undefined` when none can open: the backoff alone applies then.
+ */
+function holdWake(want: Want, connection: Connection): NamespaceWake | undefined {
+  if (want.wake?.connection === connection && !want.wake.watch.failed()) return want.wake.watch;
+  releaseWake(want);
+  if (connection.signal.aborted || want.controller.signal.aborted) return undefined;
+  try {
+    const { watch, release } = namespaceWake(connection, want.options.namespace);
+    want.wake = { connection, watch, release };
+    return watch;
+  } catch {
+    // The connection is closing, or its discovery cannot open a request.
+    return undefined;
+  }
+}
+
+/** Release the want's watch of its fixed namespace, if it holds one. */
+function releaseWake(want: Want): void {
+  const held = want.wake;
+  want.wake = undefined;
+  held?.release();
 }
 
 /** One attempt for `want` on `connection`: its discovery, if it follows generations, and its subscriptions. */
@@ -925,7 +739,6 @@ async function attempt(
   if (options.generations) {
     try {
       ({ watch, release } = rootWatch(connection, options.namespace));
-      // Released in the turn the want is cancelled, so a replacement want can claim an overlapping root at once.
       scope.addEventListener('abort', release, { once: true });
     } catch (error) {
       // As for a subscribe: a connection ending under the call refuses the request with its own error.
@@ -978,12 +791,18 @@ interface Slot {
   firstGroup?: number;
   largestGroup?: number;
   /** The latest object it delivered, by location: a rotation's replacement skips what is at or before it. */
-  latest?: { groupId: number; objectId: number };
+  latest?: Location;
   /**
-   * After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object arriving late on
-   * another stream was delivered already, and is skipped.
+   * After a rotation's silent cutover, the latest object its predecessors delivered: the replacement repeats the
+   * latest group from its start, and an earlier object arriving late on another stream was delivered already. Both
+   * are skipped.
    */
-  skipThrough?: { groupId: number; objectId: number } | undefined;
+  skipThrough?: Location | undefined;
+  /**
+   * The subgroup ends it reported, as `group:subgroup`, newest last. A rotation's replacement takes the set over and
+   * does not report them again.
+   */
+  ends: Set<string>;
   /** Whether it delivered an object from a later group than its first. */
   progressed: boolean;
   /** While draining after a cutover: the largest group it had delivered, through which its events still reach the handlers. */
@@ -994,13 +813,23 @@ interface Slot {
   held: HeldEvent[];
 }
 
+/**
+ * Whether `object` shows the track moving on: an object with a payload in a group after `firstGroup`. A status object
+ * is not, so the end-of-track marker a relay replays after the cached last group never resets the backoff.
+ */
+function isProgress(object: MoqtObject, firstGroup: number | undefined): boolean {
+  return object.status === 'normal' && firstGroup !== undefined && object.groupId > firstGroup;
+}
+
 /** Whether `object` is at or before `latest`, by group and then object ID. */
-function atOrBefore(object: MoqtObject, latest: { groupId: number; objectId: number } | undefined): boolean {
+function atOrBefore(object: MoqtObject, latest: Location | undefined): boolean {
   if (latest === undefined) return false;
   return object.groupId < latest.groupId || (object.groupId === latest.groupId && object.objectId <= latest.objectId);
 }
 
 type Location = { groupId: number; objectId: number };
+/** How many subgroup ends a slot remembers reporting: far more than a replacement repeats from the latest group. */
+const REMEMBERED_ENDS = 256;
 
 /** The later of two locations, either of which may be unknown. */
 function later(a: Location | undefined, b: Location | undefined): Location | undefined {
@@ -1025,8 +854,9 @@ function targetKey(namespace: readonly string[], track: string, parameters: Mess
  * The want's subscriptions from the first SUBSCRIBE on `connection` to whatever ends the attempt. A move (a newer
  * generation, or a re-want with another track or parameters) is made before the break: the replacement opens pending
  * while the active subscription keeps delivering, and takes over once one of its objects passes `until`. A rotation is
- * a move to the next connection: with the target unchanged, the replacement takes over at the first object the active
- * one had not delivered, and no callback marks it.
+ * a move to the next connection: with the target unchanged, the replacement takes over at its first object, or at its
+ * acceptance when the active one has delivered nothing. It delivers only what the active one had not, and no callback
+ * marks it.
  */
 async function follow(
   want: Want,
@@ -1190,13 +1020,18 @@ async function follow(
     if (on.signal.aborted) closed();
   };
 
-  const cutover = (slot: Slot, object: MoqtObject) => {
+  /**
+   * `slot` takes over at `object`, which is delivered unless the old subscription delivered it (`repeated`). A
+   * rotation's replacement for a track that has delivered nothing takes over at its acceptance, with no object.
+   */
+  const cutover = (slot: Slot, object?: MoqtObject, repeated = false) => {
     const from = active;
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
     // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
     if (silent && !endedTargets.has(slot.key) && from.ended !== 'publisher-done') {
       slot.skipThrough = later(from.latest, from.skipThrough);
+      slot.ends = from.ends;
     }
     endedTargets.clear();
     pending = undefined;
@@ -1224,8 +1059,11 @@ async function follow(
       );
     } else from.subscription.cancel();
     releaseUnused();
-    slot.firstGroup = object.groupId;
-    slot.largestGroup = object.groupId;
+    if (object) {
+      slot.firstGroup = object.groupId;
+      // A replacement that starts behind the old subscription still drains through what that one delivered.
+      slot.largestGroup = Math.max(object.groupId, slot.skipThrough?.groupId ?? object.groupId);
+    }
     lastObjectAt = performance.now();
     if (!silent) {
       try {
@@ -1243,7 +1081,7 @@ async function follow(
     }
     // Later groups that reached the replacement early, out of order, follow the object that cut over. Each delivery
     // is isolated, so one throwing callback loses neither the rest nor the held events.
-    const replay = heldAfter(slot.held, object);
+    const replay = object ? heldAfter(slot.held, object) : slot.held;
     slot.held = [];
     const deliver = (call: () => void) => {
       try {
@@ -1254,18 +1092,29 @@ async function follow(
       }
     };
     // A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-    delivered(slot, object);
-    if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
+    if (object && !repeated) {
+      delivered(slot, object);
+      if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
+    }
     for (const event of replay) {
       if (over() || active !== slot) break;
       if (event.type === 'object') {
         delivered(slot, event.value);
-        if (event.value.groupId > (slot.firstGroup as number)) slot.progressed = true;
+        if (isProgress(event.value, slot.firstGroup)) slot.progressed = true;
         if (event.value.groupId > (slot.largestGroup as number)) slot.largestGroup = event.value.groupId;
         deliver(() => handlers().onObject?.(event.value));
-      } else if (event.type === 'subgroupEnd') deliver(() => handlers().onSubgroupEnd?.(event.value));
+      } else if (event.type === 'subgroupEnd') deliver(() => onSubgroupEnd(slot, event.value));
       else deliver(() => handlers().onSubgroupReset?.(event.value));
     }
+  };
+
+  /** A subgroup end of the active subscription, or of one draining: once, across a rotation's cutover. */
+  const onSubgroupEnd = (slot: Slot, info: { groupId: number; subgroupId: number; endOfGroup: boolean }) => {
+    const key = `${info.groupId}:${info.subgroupId}`;
+    if (slot.ends.has(key)) return;
+    slot.ends.add(key);
+    if (slot.ends.size > REMEMBERED_ENDS) slot.ends.delete(slot.ends.values().next().value as string);
+    handlers().onSubgroupEnd?.(info);
   };
 
   const onObject = (slot: Slot | undefined, object: MoqtObject) => {
@@ -1275,14 +1124,16 @@ async function follow(
       if (atOrBefore(object, slot.skipThrough)) return;
       lastObjectAt = performance.now();
       if (slot.firstGroup === undefined) slot.firstGroup = object.groupId;
-      else if (object.groupId > slot.firstGroup) slot.progressed = true;
+      else if (isProgress(object, slot.firstGroup)) slot.progressed = true;
       if (slot.largestGroup === undefined || object.groupId > slot.largestGroup) slot.largestGroup = object.groupId;
       delivered(slot, object);
       handlers().onObject?.(object);
       return;
     }
     if (draining.has(slot)) {
-      if (object.groupId <= (slot.drainThrough as number)) handlers().onObject?.(object);
+      if (object.groupId <= (slot.drainThrough as number) && !atOrBefore(object, slot.skipThrough)) {
+        handlers().onObject?.(object);
+      }
       return;
     }
     if (slot !== pending) return;
@@ -1293,15 +1144,21 @@ async function follow(
       onEnded(active, activeEnd);
       if (over() || pending !== slot) return;
     }
-    // A rotation's replacement starts at the latest group, which the active subscription may have delivered: skip it.
-    // Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from 0 again.
+    // A rotation's replacement starts at the latest group, which the active subscription may have delivered. Its first
+    // object shows the same stream flowing on the new connection, so it cuts over there, and a repeated object is not
+    // delivered again. Waiting for a new object instead would hold the old connection for as long as it delivers each
+    // one first. Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from
+    // 0 again.
     const rotation = rotating(slot);
     // Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected subscription
     // does not.
     const continues = !endedTargets.has(slot.key) && active.ended !== 'publisher-done';
-    if (rotation && continues && atOrBefore(object, active.latest)) return;
+    if (rotation && continues && atOrBefore(object, later(active.latest, active.skipThrough))) {
+      cutover(slot, object, true);
+      return;
+    }
     // With the active subscription gone there is nothing left to compare with: the next object cuts over. A rotation's
-    // replacement continues the same stream, so its first new object does too.
+    // replacement continues the same stream, so its first object does too.
     let passed = true;
     if (!active.ended && !rotation) {
       try {
@@ -1351,14 +1208,23 @@ async function follow(
         onSubscribed: (info) => {
           if (!slot || over()) return;
           slot.accepted = info;
+          // A rotation's replacement for a track that has delivered nothing has no first object to wait for, and
+          // waiting would hold the old connection for the whole overlap. It takes over once accepted: the relay
+          // sends the track's first object on both subscriptions (measured on ord, #524).
+          if (slot === pending && rotating(slot) && !active.latest && !active.skipThrough) {
+            cutover(slot);
+            return;
+          }
           if (slot !== active) return;
+          // Accepted: the watch that waited for the namespace to be announced again is done with.
+          releaseWake(want);
           lastObjectAt = performance.now();
           handlers().onSubscribed?.(info, { namespace: [...slot.namespace] });
         },
         onObject: (object) => onObject(slot, object),
         onSubgroupEnd: (info) => {
           if (slot && slot === pending && !over()) holdEvent(slot.held, { type: 'subgroupEnd', value: info });
-          else if (reaches(slot, info.groupId)) handlers().onSubgroupEnd?.(info);
+          else if (slot && reaches(slot, info.groupId)) onSubgroupEnd(slot, info);
         },
         onSubgroupReset: (info) => {
           if (slot && slot === pending && !over()) holdEvent(slot.held, { type: 'subgroupReset', value: info });
@@ -1371,6 +1237,7 @@ async function follow(
           if (slot === pending) endedTargets.add(slot.key);
           if (slot === pending) pendingFailed(slot, undefined);
           else if (slot === active && !slot.ended) {
+            want.doneStatus = info.statusCode;
             activeEnded('publisher-done');
             handlers().onPublisherDone?.(info);
           }
@@ -1385,6 +1252,7 @@ async function follow(
       connection: on,
       subscription,
       progressed: false,
+      ends: new Set(),
       held: [],
     };
     slot = opened;
@@ -1566,11 +1434,15 @@ function discoveryFailed(
   cancelledOrConnection: (accepted: boolean) => AttemptOutcome,
   accepted: boolean,
 ): AttemptOutcome {
-  if (scope.aborted || error instanceof SubscriptionConnectionClosedError) return cancelledOrConnection(accepted);
-  const retry: AttemptOutcome = { kind: 'retry', accepted, progressed: false, reason: 'generation' };
-  if (error === undefined) return retry;
-  if (error instanceof SubscriptionRequestError && !isPermanentRequestError(error.requestError)) return retry;
-  return { kind: 'fatal', error };
+  if (scope.aborted) return cancelledOrConnection(accepted);
+  switch (discoveryEnding(error)) {
+    case 'connection':
+      return cancelledOrConnection(accepted);
+    case 'retry':
+      return { kind: 'retry', accepted, progressed: false, reason: 'generation' };
+    case 'fatal':
+      return { kind: 'fatal', error };
+  }
 }
 
 /** What a subscription's own ending means for the want. */
@@ -1608,35 +1480,113 @@ interface RootWatch {
   failure(): { error: unknown } | undefined;
   /** Observe every change, discovery's end included; returns the removal. */
   onChange(listener: () => void): () => void;
+}
+
+function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; release(): void } {
+  const generations = new Set<string>();
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of [...listeners]) listener();
+  };
+  const generationOf = (namespace: string[]) =>
+    namespace.length === root.length + 1 ? namespace[root.length] : undefined;
+  const watch = connection.discovery.watch(root, {
+    onAnnounced: (namespace) => {
+      const generation = generationOf(namespace);
+      if (generation === undefined) return;
+      generations.add(generation);
+      notify();
+    },
+    onUnannounced: (namespace) => {
+      const generation = generationOf(namespace);
+      if (generation === undefined) return;
+      generations.delete(generation);
+      notify();
+    },
+    onEnded: notify,
+  });
+  for (const namespace of watch.namespaces()) {
+    const generation = generationOf(namespace);
+    if (generation !== undefined) generations.add(generation);
+  }
+  const current = () => {
+    let newest: string | undefined;
+    for (const generation of generations) if (newest === undefined || generation > newest) newest = generation;
+    return newest;
+  };
+  const failure = () => watch.ended;
+  return {
+    watch: {
+      current,
+      failure,
+      async newest(scope) {
+        for (;;) {
+          const ended = failure();
+          if (ended) return { kind: 'failed', error: ended.error };
+          const found = current();
+          if (found !== undefined) return { kind: 'found', generation: found };
+          if (scope.aborted) return { kind: 'aborted' };
+          await new Promise<void>((resolve) => {
+            const remove = () => {
+              listeners.delete(wake);
+              scope.removeEventListener('abort', wake);
+            };
+            const wake = () => {
+              remove();
+              resolve();
+            };
+            listeners.add(wake);
+            scope.addEventListener('abort', wake, { once: true });
+          });
+        }
+      },
+      onChange(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    release: () => watch.release(),
+  };
+}
+
+/**
+ * One fixed namespace's announcement, watched with SUBSCRIBE_NAMESPACE on the namespace itself. Each change of the
+ * namespace is counted, so a waiter compares what came after the moment it marked with {@link NamespaceWake.seen}.
+ */
+interface NamespaceWake {
+  /** How many changes of the namespace the request has reported. */
+  seen(): number;
+  /** The count at the latest `announced`, while the namespace is announced; 0 when it is not. */
+  announcedAt(): number;
+  /** As {@link announcedAt}, but only for an `announced` that followed a withdrawal this request reported. */
+  returnedAt(): number;
+  /** Whether the watch ended: the relay refused or ended its request, or the connection closed. */
+  failed(): boolean;
+  /** Observe every change, the request's end included; returns the removal. */
+  onChange(listener: () => void): () => void;
   close(): void;
 }
 
-/** Whether two namespace prefixes overlap field by field: equal, or one contains the other. */
-function overlaps(a: readonly string[], b: readonly string[]): boolean {
-  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
-  return shorter.every((field, i) => field === longer[i]);
-}
-
-/** The connection's watch for `root`, opened on first use and closed when its last user releases it. */
-function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; release(): void } {
-  const key = JSON.stringify(root);
-  let entry = connection.roots.get(key) as (RootWatch & { users: number }) | undefined;
+/**
+ * The connection's watch for the fixed `namespace`, opened on first use and closed a moment after its last user leaves.
+ * It is served by the connection's discovery, so a root's discovery or a publishing-roots view over the namespace
+ * serves it too.
+ */
+function namespaceWake(connection: Connection, namespace: string[]): { watch: NamespaceWake; release(): void } {
+  const key = JSON.stringify(namespace);
+  let entry = connection.wakes.get(key);
   if (!entry) {
-    // A watch kept for reuse but unused would hold its prefix and refuse an overlapping root: close it first.
-    for (const [heldKey, held] of connection.roots) {
-      if ((held as RootWatch & { users: number }).users === 0 && overlaps(JSON.parse(heldKey), root)) {
-        connection.roots.delete(heldKey);
-        held.close();
-      }
-    }
-    // An ended discovery leaves the map at once, so the next attempt asks the relay again.
     const forgetEnded = () => {
-      if (connection.roots.get(key) === entry) connection.roots.delete(key);
+      if (connection.wakes.get(key) === entry) connection.wakes.delete(key);
     };
-    entry = Object.assign(openRootWatch(connection.subscriber, root, forgetEnded), { users: 0 });
-    connection.roots.set(key, entry);
+    // Throws when the connection's discovery is closed or cannot open a request.
+    entry = Object.assign(openNamespaceWake(connection.discovery, namespace, forgetEnded), { users: 0 });
+    connection.wakes.set(key, entry);
   }
   const watch = entry;
+  // Used again: a keep-alive started by an earlier release no longer applies.
+  clearTimeout(watch.linger);
+  watch.linger = undefined;
   watch.users += 1;
   let released = false;
   return {
@@ -1646,79 +1596,71 @@ function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; 
       released = true;
       watch.users -= 1;
       if (watch.users === 0) {
-        // Kept a moment so a want that resubscribes at once reuses the snapshot instead of asking again.
-        setTimeout(() => {
-          if (watch.users === 0 && connection.roots.get(key) === watch) {
-            connection.roots.delete(key);
+        // Kept a moment, as a root's discovery is, so the next done finds what it already saw.
+        watch.linger = setTimeout(() => {
+          watch.linger = undefined;
+          if (watch.users === 0 && connection.wakes.get(key) === watch) {
+            connection.wakes.delete(key);
             watch.close();
           }
-        }, 5_000);
+        }, DISCOVERY_LINGER_MS);
       }
     },
   };
 }
 
-function openRootWatch(subscriber: RelaySubscriber, root: string[], onEnd: () => void): RootWatch {
-  const generations = new Set<string>();
+function openNamespaceWake(discovery: DiscoveryIndex, namespace: string[], onEnd: () => void): NamespaceWake {
   const listeners = new Set<() => void>();
-  let failure: { error: unknown } | undefined;
-  // Throws PREFIX_OVERLAP synchronously when another followed root overlaps this one.
-  const events: NamespaceEvents = subscriber.namespaceEvents({ prefix: root });
+  let seen = 0;
+  let announcedAt = 0;
+  let returnedAt = 0;
+  let withdrawn = false;
+  let ended = false;
   const notify = () => {
     for (const listener of [...listeners]) listener();
   };
-  void (async () => {
-    try {
-      for await (const event of events) {
-        // Only one field below the root is a generation; anything deeper belongs to someone else.
-        if (event.namespace.length !== root.length + 1) continue;
-        const generation = event.namespace[root.length] as string;
-        if (event.type === 'announced') generations.add(generation);
-        else generations.delete(generation);
-        notify();
-      }
-      // The relay ended the request, or the watch was closed: neither is a failure of the want.
-      failure = { error: undefined };
-    } catch (error) {
-      failure = { error };
-    }
-    onEnd();
-    notify();
-  })();
-  const current = () => {
-    let newest: string | undefined;
-    for (const generation of generations) if (newest === undefined || generation > newest) newest = generation;
-    return newest;
-  };
-  return {
-    current,
-    failure: () => failure,
-    async newest(scope) {
-      for (;;) {
-        if (failure) return { kind: 'failed', error: failure.error };
-        const found = current();
-        if (found !== undefined) return { kind: 'found', generation: found };
-        if (scope.aborted) return { kind: 'aborted' };
-        await new Promise<void>((resolve) => {
-          const remove = () => {
-            listeners.delete(wake);
-            scope.removeEventListener('abort', wake);
-          };
-          const wake = () => {
-            remove();
-            resolve();
-          };
-          listeners.add(wake);
-          scope.addEventListener('abort', wake, { once: true });
-        });
-      }
+  // Only the namespace itself; a deeper one is another publisher's.
+  const isNamespace = (shown: string[]) => shown.length === namespace.length;
+  const watch = discovery.watch(namespace, {
+    onAnnounced(shown) {
+      if (!isNamespace(shown)) return;
+      seen += 1;
+      announcedAt = seen;
+      if (withdrawn) returnedAt = seen;
+      notify();
     },
+    onUnannounced(shown) {
+      if (!isNamespace(shown)) return;
+      seen += 1;
+      announcedAt = 0;
+      returnedAt = 0;
+      withdrawn = true;
+      notify();
+    },
+    onEnded() {
+      // Refused or ended with the connection: the wants waiting on it back off.
+      ended = true;
+      onEnd();
+      notify();
+    },
+  });
+  // A request already open over the namespace shows it without an event: count that as a fresh request's first one.
+  if (watch.namespaces().some(isNamespace)) {
+    seen = 1;
+    announcedAt = 1;
+  }
+  return {
+    seen: () => seen,
+    announcedAt: () => announcedAt,
+    returnedAt: () => returnedAt,
+    failed: () => ended,
     onChange(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     close() {
-      void events.return();
+      ended = true;
+      watch.release();
     },
   };
 }

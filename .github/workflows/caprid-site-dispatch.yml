@@ -15,11 +15,11 @@ on:
     branches: [main]
     paths:
       # Markdown pages.
+      - 'docs/guides/*.md'
+      - 'docs/networks.md'
       - 'ts/README.md'
-      - 'ts/GUIDE.md'
       - 'ts/CHANGELOG.md'
       - 'ts/packages/*/README.md'
-      - 'python/README.md'
       - 'python/CHANGELOG.md'
       - 'python/packages/*/README.md'
       # The TypeScript API reference (TypeDoc over every package) and the SDK version on the landing page.

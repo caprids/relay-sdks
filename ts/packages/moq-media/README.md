@@ -1,8 +1,18 @@
-# MoQ media formats
+# MoQ media formats and players
 
-`@caprid/moq-media` holds pure format helpers for LOC (`draft-ietf-moq-loc-04`) and independent MSF
-(`draft-ietf-moq-msf-01`) catalogs, plus the clocks, frame sequencer, and audio player that sit on top of them. It
-depends only on `@caprid/moq-core`. It needs no encoder, transport library, or Relay connection.
+`@caprid/moq-media` has headless audio and video players for the browser, playout clocks, a frame
+sequencer, and the LOC and MSF formats they read.
+
+The formats are LOC (`draft-ietf-moq-loc-04`) and independent MSF (`draft-ietf-moq-msf-01`) catalogs,
+with pure helpers that map WebCodecs chunks and configs to them. [Audio playout](#audio-playout) and
+[video playout](#video-playout) decode and play a subscribed track with no UI. The package depends
+only on `@caprid/moq-core`. It needs no encoder, transport library, or Relay connection.
+
+```sh
+npm install @caprid/moq-media
+```
+
+The frame writer, frame reader, and catalog service that send and receive these formats are in `@caprid/relay/media`.
 
 ```ts
 import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@caprid/moq-media';
@@ -153,12 +163,9 @@ than assuming that the relay rescaled to microseconds.
 `createFrameSequencer({ clock })` turns one subscribed track's objects into frames in decode order. Objects can arrive
 out of order across group streams, and the sequencer drops what is too late against the playout clock.
 `createFrameReader` in `@caprid/relay/media` drives it from a subscription (see
-[subscribing to media](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs`, and
+[subscribing and sequencing frames](https://www.caprid.com/docs/media/browser/#subscribing-and-sequencing-frames)). Per track, `lateDropUs`, `reorderWindowUs`, and
 `catchUpAfterUs` tune audio delivery for a listener or for speech-to-text. `missingGroups` on a frame names the groups
-skipped before it (see [voice delivery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#voice-delivery-per-direction)).
-
-The combined `register_media` publishing handle is still a proposal in `spec/media-layer.md`. `@caprid/relay/media`
-ships the frame writer and catalog service that it would compose.
+skipped before it (see [voice delivery](https://www.caprid.com/docs/media/voice/#delivery-policy-per-direction)).
 
 ## Media timeline
 
@@ -216,8 +223,42 @@ Give an audio-only broadcast's playout clock `AUDIO_ONLY_TARGET_LATENCY_US` (500
 default waits for keyframe intervals.
 
 The player takes structural Web Audio types, so it imports no DOM library. Its tests run under a fake context that runs
-the real worklet. See [playing audio](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#playing-audio) and
+the real worklet. See [playing audio](https://www.caprid.com/docs/media/browser/#playing-audio) and
 [audio player](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#audio-player).
+
+## Video playout
+
+`createVideoPlayer({ clock, decoderConfig, render })` plays one video track with no UI. It decodes the frames you
+push to it with WebCodecs and calls `render(frame)` when the playout clock says each is due. It closes the frames the clock
+says to drop.
+
+```ts
+import { canvasRenderer, createFrameSequencer, createPlayoutClock, createVideoPlayer, videoDecoderConfigFromTrack } from '@caprid/moq-media';
+import { createFrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
+
+const clock = createPlayoutClock(); // one per broadcast, shared with the audio input
+const player = createVideoPlayer({ clock, decoderConfig: videoDecoderConfigFromTrack(videoTrack), render: canvasRenderer(canvas) });
+const reader = createFrameReader(createFrameSequencer({ clock }), { onFrame: player.push });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...reader, onError });
+```
+
+- `render` borrows the frame. The player closes it when `render` returns, so a hardware decoder never runs out of
+  frames. Keep `frame.clone()` to hold one longer.
+- `canvasRenderer(canvas)` draws onto an `HTMLCanvasElement` or an `OffscreenCanvas`, sized to the frame.
+- `videoDecoderConfigFromTrack(track)` reads the decoder config from a catalog track.
+- The player waits for a keyframe at the start, after a decoder error, and after a `resync` or `restart`, which also
+  reset the decoder and close the frames waiting. `player.reset()` does the same at once, for a restart the app hears
+  of before the next frame, such as a supervised want's `onRestarted`. `player.configure(decoderConfig)` switches the
+  config from the next keyframe, as at a rendition switch.
+- The player reports a decoder that fails before its first frame, or with `NotSupportedError`, once. It then decodes
+  nothing until `player.configure(decoderConfig)`.
+- Share the clock with the audio input so audio drives the video. Without audio, the clock paces it by the wall clock.
+- It uses only `VideoDecoder`, `EncodedVideoChunk` and timers, so it runs in a dedicated worker as it is.
+- `player.stats` counts frames decoded, shown, dropped by the clock, and skipped before a keyframe. `player.joinPhases`
+  records when the first frame was pushed, decoded, and shown.
+
+See [playing video](https://www.caprid.com/docs/media/browser/#playing-video) and
+[video player](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#video-player).
 
 ## Stability
 

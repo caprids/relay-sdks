@@ -2,6 +2,7 @@ import type { Diagnostics } from './client-diagnostics.js';
 import { diagnosticsOption } from './diagnostics-report.js';
 import { RelayError } from './errors.js';
 import type { PublishProperty, RelayGroupWriter, RelayTrackWriter } from './publish.js';
+import { type MaybeMovedOff, MOVED_OFF } from './write-slot.js';
 
 /**
  * How a {@link FrameWriter} maps frames onto groups. `'keyframe'` is the LOC mapping for video: a keyframe FINs the
@@ -54,7 +55,7 @@ export interface FrameWriterOptions<F extends Frame = Frame> {
   stale?: (frame: F) => boolean;
   /**
    * How many frames may wait behind the one being written before the writer drops. A positive integer; default 8
-   * under keyframe grouping, 25 under frame grouping.
+   * under keyframe grouping; no bound under frame grouping, where memory is then unbounded while delivery is blocked.
    */
   maxBacklog?: number;
   /**
@@ -113,21 +114,26 @@ interface Pending<F> {
   reject(error: unknown): void;
 }
 
-const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: 25 };
+/** Frame grouping has no default bound: a bound of its own dropped voice frames in outages of 2 s or more. */
+const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: Number.POSITIVE_INFINITY };
 /** A write that takes longer than this, from the call to its outcome, counts as slow in the `send` section. */
 const SLOW_WRITE_MS = 100;
 
 /** A failure ends the track exactly when the SDK says so: `CLOSED`, or the track is closed afterwards. */
 const retired = (track: RelayTrackWriter, error: RelayError) => error.code === 'CLOSED' || track.closed;
 const never = () => false;
+/** Whether the track's subscribers get the rest of `group`. A supervised track can move to another generation under it. */
+const reaching = (group: RelayGroupWriter | undefined): boolean =>
+  group !== undefined && !group.closed && !(group as MaybeMovedOff)[MOVED_OFF];
 
 /**
  * Map encoded frames onto a registered track's groups (spec/behavior.md, "Media publishing").
  *
  * A frame the relay has no subscription for is `'skipped'` at once, because an encoder loop cannot block on the write
  * deadline; publishing resumes at the next keyframe. When the backlog is full the transport has fallen behind:
- * keyframe grouping drops the backlog and the open group, frame grouping drops the oldest frame. Under keyframe grouping
- * the writer watches the track's demand from now until it closes, and says when it needs a keyframe.
+ * keyframe grouping drops the backlog and the open group, frame grouping drops the oldest frame when `maxBacklog` is set
+ * (it has no bound by default). Under keyframe grouping the writer watches the track's demand from now until it
+ * closes, and says when it needs a keyframe.
  *
  * ```ts
  * const writer = createFrameWriter(track, { onKeyframeNeeded: () => (forceKeyframe = true) });
@@ -142,9 +148,10 @@ export function createFrameWriter<F extends Frame = Frame>(
   if (typeof options !== 'object' || options === null) throw new TypeError('options must be an object');
   const grouping = options.grouping ?? 'keyframe';
   if (grouping !== 'keyframe' && grouping !== 'frame') throw new TypeError("grouping must be 'keyframe' or 'frame'");
-  const maxBacklog = options.maxBacklog ?? DEFAULT_BACKLOG[grouping];
-  if (!Number.isSafeInteger(maxBacklog) || maxBacklog < 1)
+  const given = options.maxBacklog ?? undefined;
+  if (given !== undefined && (!Number.isSafeInteger(given) || given < 1))
     throw new RangeError('maxBacklog must be a positive integer');
+  const maxBacklog = given ?? DEFAULT_BACKLOG[grouping];
   if (options.stale !== undefined && typeof options.stale !== 'function')
     throw new TypeError('stale must be a function');
   if (options.onKeyframeNeeded !== undefined && typeof options.onKeyframeNeeded !== 'function') {
@@ -296,6 +303,13 @@ export function createFrameWriter<F extends Frame = Frame>(
       }
       // Held before the predicate runs, so a predicate that throws still has the group reset.
       group = opened;
+      // The track moved to another generation while this keyframe opened its group on the old one, and no keyframe
+      // waiting opens one there.
+      if (!reaching(opened) && !waiting.some(({ frame }) => frame.key)) {
+        needKeyframe();
+        // A callback that wrote its keyframe at once can overflow the backlog, which resets this group.
+        if (droppedUnder()) return { kind: 'dropped', groupId: opened.groupId };
+      }
       if (stale(frame)) {
         // Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
         recovering = 'stale';
@@ -499,7 +513,8 @@ export function createFrameWriter<F extends Frame = Frame>(
         // A new or replacement relay subscription, or its end. The write slot has already ended the open group, which
         // the next frame finds closed; the new subscription needs a keyframe. Unless it has one: the change closed every
         // group open at the time, so a group still open came after it, and a keyframe waiting or in progress opens one.
-        const recovered = (group && !group.closed) || keyOpening || waiting.some(({ frame }) => frame.key);
+        // A supervised track's move to another generation closes nothing: the open group finishes on the old one.
+        const recovered = reaching(group) || keyOpening || waiting.some(({ frame }) => frame.key);
         if (!recovered) needKeyframe();
       }
     })().catch(() => {});

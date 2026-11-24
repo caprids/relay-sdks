@@ -1,5 +1,7 @@
 # Relay Python SDK
 
+> **Note:** The published task-oriented Relay and media guides now live in [`../docs/guides/`](../docs/guides/connecting.md) and at [caprid.com/docs](https://www.caprid.com/docs/). This file is retained for local reference and repo-checkout walkthroughs.
+
 The Python SDK for Relay. It connects to a Relay endpoint from any Python 3.11+ asyncio program,
 publishes data, and subscribes to track objects. No browser is involved. The SDK speaks MOQT
 directly on QUIC (native QUIC) through aioquic.
@@ -16,6 +18,8 @@ The shared protocol pins, behavior contract, and test vectors live in [spec](../
 [root README](../README.md) describes the whole repository. Before 1.0, a minor version can break the
 API, and [CHANGELOG.md](CHANGELOG.md) says what changed. This guide follows the `main` branch, which
 can be ahead of the latest release.
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 
@@ -31,8 +35,11 @@ subscribe** under its root, which is the namespace prefix the token grants. Ask 
 backend owner for it. For another Relay deployment, also ask its operator for an HTTPS Relay
 endpoint.
 
-The SDK uses tokens but does not issue them, and there is no public token signup. A Mux API access
-token is not a Relay JWT.
+The SDK uses tokens but does not issue them. Switchboard does, and calls them Client tokens. Sign up
+at `app.caprid.com`, then mint a Client token through Switchboard's API, or sign one in your backend
+with a signing key. [Credentials](https://www.caprid.com/docs/guides/credentials/) says which
+credential goes where. Only the Client token belongs in a client, and a relay never accepts an API
+key.
 
 A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
 root as the path. A token rooted at `acme/rooms/42` connects to
@@ -42,7 +49,7 @@ it, and the relay verifies the token. Name namespaces relative to the root: `["p
 not a JWT, or has no `root` claim, raises `TypeError` before anything connects and tells you to pass
 `url` ([token-rooted endpoint](../spec/behavior.md#token-rooted-endpoint)).
 
-The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
+The Caprid relays carry announcements between regions, so a publisher and a subscriber can each use
 their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
 Pass `url` to choose the endpoint yourself: a nearby region, a room below the token's root, or
 another deployment. A path the token does not grant fails at connect with `UNAUTHORIZED`. A client
@@ -528,8 +535,8 @@ so later assignments to the handler object do not change that subscription.
 
 ## Stay connected: supervised connections
 
-`connect_relay_publisher` and `connect_relay_subscriber` never reconnect or resubscribe. A live
-application that has to survive network loss can use the supervisors instead. They take the same
+`connect_relay_publisher`, `connect_relay_subscriber` and `connect_relay` never reconnect or resubscribe. A
+live application that has to survive network loss can use the supervisors instead. They take the same
 connection options and return once their first connection is up. With no `url`, every later
 connection dials the endpoint the first one rooted at its token's root, so a later token that does
 not grant that path fails with `UNAUTHORIZED` rather than moving the connection.
@@ -573,13 +580,15 @@ track treats `RECONNECTING` as an interruption and resumes at the next keyframe.
 
 `want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
 retries the announce race, and resubscribes after `PUBLISH_DONE` or after a rejection that waiting may
-fix, with backoff from 0.25 s up to 8 s. It also moves to the replacement connection. With
+fix, with backoff from 0.25 s up to 8 s, or as soon as its namespace is announced again (after
+`TRACK_ENDED`, announced again after a withdrawal), so a restarted publisher is picked up within about
+a round trip of its announcement. It also moves to the replacement connection. With
 `stale_after` in seconds, it resubscribes a track that went silent. Set that only for tracks that are
 never silent while live. With `generations=True`, it discovers the publisher's root and stays on the
 newest generation, moving as soon as a newer one is announced, with no application channel. A
 rejection that waiting does not fix, such as bad credentials or a malformed request, reaches
 `on_error`, and the want stops. To change the backoff bounds, pass
-`SupervisionBackoff(initial_delay=..., max_delay=...)` as `reconnect=` to either supervisor or as
+`SupervisionBackoff(initial_delay=..., max_delay=...)` as `reconnect=` to any supervisor or as
 `retry=` to a want. See the [supervised contract](../spec/behavior.md#supervised-connections).
 
 A move to a newer generation is make-before-break, as with `switch_to`. The old subscription keeps
@@ -606,7 +615,7 @@ numbers its own groups. Wanting the key again with only `until`, `drain`, `stale
 the handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on
 or off, replaces the want.
 
-Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
+The supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
 session never reaches the relay's deadline. `rotate_before` seconds (default 60) before `expires_at`,
 they call `get_token` again and open the replacement while the old connection still serves. The
 publisher's next generation is announced, each track moves to it once viewers subscribe there, and
@@ -615,10 +624,363 @@ move. When the want's target is unchanged, the cutover is invisible: no callback
 lost or repeated. Call `rotate()` to rotate now, for example after you revoke a token. See
 [rotation](../spec/behavior.md#rotation).
 
+For video, viewers keep the old generation's picture until the new generation's first keyframe. A
+`FrameWriter` asks for that keyframe through `on_keyframe_needed` as soon as viewers subscribe to the
+new generation, so honor it. In a live test that honored the request, video switched 46 to 206 ms
+after `rotate()`, and no viewer went more than one frame without a picture. An encoder that ignores
+the request switches at its next scheduled keyframe, up to one keyframe interval later. The move
+also reports `True` from `demand_changes()` while demand carries over. Force a keyframe on it, but
+don't restart the encoder. moq-relay can't give a live connection a new token today, so every
+rotation opens a new connection and generation.
+
+### Test recovery by dropping the transport
+
+To check how your application handles a lost connection, close the transport under it on purpose.
+`caprid_relay.quic.connect_quic` is the factory the connect functions use when `create_transport`
+is left out. Wrap it, keep each transport it opens, and close them when you want a drop:
+
+```python
+from caprid_relay import connect_supervised_publisher, connect_supervised_subscriber
+from caprid_relay.quic import connect_quic
+
+opened = []
+
+
+def create_transport(url, protocols):
+    connecting = connect_quic(url, protocols)
+    opened.append(connecting.transport)
+    return connecting
+
+
+def drop_connections():
+    """Drop every open connection, as a network loss would."""
+    for transport in opened:
+        transport.close(0, "chaos: dropped")
+    opened.clear()
+
+
+publisher = await connect_supervised_publisher(
+    url, namespace=namespace, get_token=get_token, create_transport=create_transport
+)
+subscriber = await connect_supervised_subscriber(url, get_token=get_token, create_transport=create_transport)
+```
+
+After `drop_connections()`, each supervisor reports `reconnecting` and then `live` through
+`on_status`. The publisher comes back as a new generation, and each want resubscribes on the new
+connection. Against `ord.relay.mux.global`, a want following generations was receiving again about
+1 s after the drop.
+
+## Discover who is publishing, with no server
+
+A call needs the list of people in it, and a dashboard needs the list of cameras that are up. The
+relay already knows which namespaces its publishers have announced, so an application can read that
+list from the relay and run no roster server of its own. `subscriber.publishing_roots()` reads the
+list and keeps it correct across reconnects and token rotations. The example below is a room roster,
+but the API has no notion of a room. It follows whatever prefix you give it.
+
+### The namespace layout
+
+A publishing-roots view reads one layout and treats it as a contract: a prefix, then a root, then a
+generation.
+
+```text
+room/standup                     the prefix, which you choose
+room/standup/ada                 a root: one live party, named by its last field
+room/standup/ada/0mwmoh58v0da3   a generation: one connection of ada's supervised publisher
+```
+
+- The **prefix** is any namespace the subscriber's token allows it to discover.
+- Each namespace one field below the prefix is a **root**. A root is one entry in the list, and its
+  last field is its `id`.
+- A [supervised publisher](#stay-connected-supervised-connections) on `[*prefix, id]` announces each
+  of its connections one field below its root, as a **generation**. The view counts a root once,
+  however many generations it has had.
+- An unsupervised publisher (`connect_relay_publisher`) on `[*prefix, id]` announces the root itself.
+  It counts too.
+- The view ignores anything deeper than a generation, and the prefix itself.
+
+Publishing here means announced. A publisher announces its namespace when it registers its first
+track, before it writes anything. A publisher with no track announces nothing, so it is never a
+root.
+
+### Follow the roots
+
+Each party publishes under the prefix at its own id. Any party that wants the list opens a view on
+the prefix.
+
+```python
+from caprid_relay import (
+    MoqtObject,
+    PublishingRootsChange,
+    PublishingRootsHandlers,
+    WantHandlers,
+    connect_supervised_publisher,
+    connect_supervised_subscriber,
+)
+
+prefix = ["room", room_id]
+
+# Every party publishes under the prefix, at its own id.
+publisher = await connect_supervised_publisher(url, namespace=[*prefix, my_id], get_token=get_token)
+camera = publisher.register_track("video")
+
+# Any party that wants the list follows the prefix.
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+
+
+def on_changed(change: PublishingRootsChange) -> None:
+    for root in change.added:
+        if root.id == my_id:
+            continue  # the view reports your own publisher too
+
+        def on_object(obj: MoqtObject, root_id: str = root.id) -> None:
+            show_frame(root_id, obj)
+
+        subscriber.want(
+            f"video/{root.id}", root.namespace, "video", WantHandlers(on_object=on_object), generations=True
+        )
+    for root in change.removed:
+        subscriber.unwant(f"video/{root.id}")
+    print("loaded" if change.initial else "changed", [root.id for root in change.present])
+
+
+roots = subscriber.publishing_roots(
+    prefix,
+    PublishingRootsHandlers(
+        on_changed=on_changed,
+        on_error=lambda error: print("discovery failed for good", error),
+    ),
+)
+```
+
+With ada already in the room, bob joining and then closing the publisher, ada's process prints:
+
+```text
+loaded ['ada']
+changed ['ada', 'bob']
+changed ['ada']
+```
+
+`on_changed` is required. It receives one `PublishingRootsChange`:
+
+- `added` holds the roots that started publishing. On the first call it holds every root that was
+  already publishing, which can be none.
+- `removed` holds the roots that stopped. It is empty on the first call.
+- `present` is a tuple of every `PublishingRoot` after the change, in the order the view first saw
+  them.
+- `initial` is true on the first call only. That call is the load, and it always comes, even for an
+  empty prefix. An application that announces arrivals skips it. Every later call names at least one
+  root in `added` or `removed`.
+
+The view itself has the same state. `roots.loaded` is false until the first `on_changed`, so you can
+tell an empty room from one that has not loaded yet. `roots.present` is the same tuple `on_changed`
+last received. `roots.close()` stops the view. It is idempotent, and the view delivers nothing after it.
+`subscriber.close()` closes every view too, without calling its handlers.
+
+Each `root.namespace` is the prefix followed by the root's `id`. Hand it to `want()` with
+`generations=True`, as above, to follow that root's media across its publisher's reconnects and
+rotations. Unwant the key when the view removes the root.
+
+What the view reports, and when:
+
+- The load comes about one round trip and 0.05 s after the call.
+- A publisher's clean `close()` removes its root about 105 ms later on the same relay, and about 210
+  ms later from another relay of the cluster. The view waits 0.1 s after the relay withdraws a
+  root's last namespace before it removes the root.
+- A crashed or frozen publisher stays announced until the relay's idle timeout. The view removes its
+  root 10 to 13 s after the crash.
+- A publisher's token rotation reports nothing. Neither does the subscriber's own rotation.
+- While the subscriber reconnects, the view keeps its last state. Once the new connection has
+  loaded, one `on_changed` reports what changed meanwhile, with additions and removals together. A
+  root whose removal was already pending when the connection dropped can be removed in a later call.
+
+`on_error` runs only for a failure that no retry fixes, such as a relay without namespace discovery.
+The view has closed by then. See the [publishing-roots contract](../spec/behavior.md#publishing-roots).
+
+### Presence: read the documents with a want
+
+A root tells you that something is announced. It does not tell you who it is, and a frozen publisher
+stays announced for about 10 s. The TypeScript SDK has presence helpers for this. Each party
+publishes a small JSON document on a `presence` track and resends it every 2 s as a heartbeat
+([TypeScript guide](../ts/GUIDE.md#presence-a-document-and-a-heartbeat-for-each-root)).
+
+The Python SDK has no presence helper. A Python application can still read presence, because the
+track is plain JSON with no added fields. Each object is one party's whole document, in a group of
+its own. Want the `presence` track of each root and keep the newest document. A want can deliver the
+relay's cached copy of an object again after it resubscribes, so count an object only when it is
+newer than the last one. Newer means a larger group ID in the same generation, or a newer
+generation.
+
+```python
+import time
+
+from caprid_relay import (
+    MoqtObject,
+    PublishingRootsChange,
+    PublishingRootsHandlers,
+    WantHandlers,
+    connect_supervised_subscriber,
+    read_json,
+)
+
+STALE_AFTER = 6.0  # three of the publishers' 2 s heartbeats
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+documents: dict[str, object] = {}
+payloads: dict[str, bytes] = {}
+heard: dict[str, float] = {}
+route: dict[str, str] = {}  # the generation each want is subscribed to
+newest: dict[str, tuple[str, int]] = {}  # the (generation, group) of the last object counted
+
+
+def is_stale(root_id: str) -> bool:
+    return time.monotonic() - heard[root_id] >= STALE_AFTER
+
+
+def counts(root_id: str, group_id: int) -> bool:
+    """Whether an object is newer than the last one counted. A relay's cached copy is not."""
+    generation = route.get(root_id)
+    if generation is None:
+        return False
+    if root_id not in newest:
+        return True
+    last_generation, last_group = newest[root_id]
+    if generation == last_generation:
+        return group_id > last_group
+    return generation > last_generation or is_stale(root_id)  # generations sort by start time
+
+
+def on_presence(root_id: str, obj: MoqtObject) -> None:
+    if obj.status != "normal" or not counts(root_id, obj.group_id):
+        return
+    newest[root_id] = (route[root_id], obj.group_id)
+    if payloads.get(root_id) != obj.payload:
+        try:
+            document = read_json(obj)
+        except ValueError:
+            return  # not JSON: keep the document you had
+        payloads[root_id] = obj.payload
+        documents[root_id] = document
+        print("document", root_id, document)
+    if root_id in documents:
+        heard[root_id] = time.monotonic()
+
+
+def follow(root_id: str, namespace: tuple[str, ...]) -> None:
+    def on_object(obj: MoqtObject) -> None:
+        on_presence(root_id, obj)
+
+    def on_generation(generation_namespace: tuple[str, ...]) -> None:
+        route[root_id] = generation_namespace[-1]
+
+    subscriber.want(
+        f"presence/{root_id}",
+        namespace,
+        "presence",
+        WantHandlers(
+            on_object=on_object,
+            on_subscribed=lambda info, generation_namespace: on_generation(generation_namespace),
+            on_switched=lambda info: on_generation(info.to_namespace),
+        ),
+        generations=True,
+    )
+
+
+def on_changed(change: PublishingRootsChange) -> None:
+    for root in change.added:
+        follow(root.id, root.namespace)
+    for root in change.removed:
+        subscriber.unwant(f"presence/{root.id}")
+        for state in (documents, payloads, heard, route, newest):
+            state.pop(root.id, None)
+        print("left", root.id)
+
+
+roots = subscriber.publishing_roots(["room", room_id], PublishingRootsHandlers(on_changed=on_changed))
+
+
+def live() -> dict[str, object]:
+    """Members heard from within the stale window."""
+    return {root_id: document for root_id, document in documents.items() if not is_stale(root_id)}
+```
+
+Against three TypeScript parties that call `publishPresence`, this prints each document once, then a
+new one when dora changes the document, and `left` when bob closes the publisher and carol is killed:
+
+```text
+document bob {'name': 'Bob', 'handRaised': False}
+document carol {'name': 'Carol', 'handRaised': False}
+document dora {'name': 'Dora', 'handRaised': False}
+document dora {'name': 'Dora', 'handRaised': True}
+left bob
+left carol
+```
+
+Treat a document as untrusted input, and check its shape before you use it. Any party whose token can
+publish under the prefix can send any JSON.
+
+How fast this learns that a party has gone:
+
+| What happened | What you see | When |
+| --- | --- | --- |
+| The party closed its publisher | Its root in `removed` | About 105 ms later on the same relay |
+| The party crashed or froze | `live()` drops it | 6 s after its last heartbeat, with the default 2 s heartbeat |
+| The party crashed or froze | Its root in `removed` | 10 to 13 s later, at the relay's idle timeout |
+
+A Python party that publishes no `presence` track is still a root, so `publishing_roots()` lists it.
+A TypeScript presence view does not, because it reports a party only once it has read a document
+from it. The track format is in the [presence track](../spec/media-layer.md#presence-track) section
+of the media-layer spec.
+
+### Select one kind of party with a label
+
+To list one kind of party, put a label in the namespace before the id, and view the prefix that ends
+with the label. Publish participants on `["room", room_id, "participant", who]` and bots on
+`["room", room_id, "bot", name]`. Then follow only the participants:
+
+```python
+participants = subscriber.publishing_roots(
+    ["room", room_id, "participant"],
+    PublishingRootsHandlers(on_changed=lambda change: print("participants", [root.id for root in change.present])),
+)
+```
+
+The relay filters by prefix, so it sends this view nothing about bots. A label after the id, or
+inside a presence document, would make every viewer discover everything and filter it locally.
+
+The view's prefix must end one field above the ids. With this layout a view on `["room", room_id]`
+loads empty, because every generation is three fields below it.
+
+### Things to check
+
+- **An empty list with no error can mean a token problem.** If the subscriber's token does not grant
+  the prefix, the relay accepts the request and sends nothing. The view loads empty, and `on_error`
+  never runs.
+- **A publisher needs a track to be listed.** A publisher announces its namespace when it registers
+  its first track.
+- **Handlers must be synchronous.** Passing an `async def` as `on_changed` or `on_error` raises
+  `TypeError` from `publishing_roots()`. The SDK logs a handler that raises, and the view carries
+  on.
+- **A closed subscriber raises.** `publishing_roots()` on a closed subscriber raises `RelayError`
+  with code `CLOSED`.
+- **The view includes you.** Your own publisher is a root under the prefix like any other. Skip your
+  own `id` where it matters.
+- **Views and wants can overlap.** One connection can hold a view on a prefix, more views on
+  prefixes under it, and wants on the roots, all at once. They share one discovery request. Only
+  `namespace_events`, on an unsupervised subscriber, refuses an overlapping prefix with
+  `PREFIX_OVERLAP`.
+- **A publisher's own reconnect can look like a leave.** A rotation opens the new connection before
+  it closes the old one, so it reports nothing. A reconnect after a lost connection has no old
+  connection to overlap with. If the relay sees the old connection close before the new one
+  announces, the view removes the root and then adds it again. Want the root again when the view
+  adds it, as the samples above do.
+
 ## Publishing lifecycle
 
 A publisher connection serves one namespace with any number of tracks. It uses a separate transport
-from subscriber connections. Publishing needs no camera, microphone, catalog, or timestamps.
+from subscriber connections. Publishing needs no camera, microphone, catalog, or timestamps. To
+publish and subscribe on one connection, use
+[`connect_relay`](#publish-and-subscribe-on-one-connection). Its publications behave as described here.
 
 Publishing follows Relay's announce-and-serve flow. `register_track()` registers the track and sends
 nothing. `write()` waits for the relay to subscribe upstream, which is called demand, before it sends
@@ -729,6 +1091,72 @@ exits right after `close()` leaves no UDP socket open and sees no `ResourceWarni
 returns sooner because the browser keeps its closing period to itself. A track name cannot be reused
 on the same publisher connection, even after its writer closes.
 
+### Publish and subscribe on one connection
+
+`connect_relay` opens one connection that subscribes as `connect_relay_subscriber` does and publishes
+any number of namespaces. A participant in a room needs one connection and one token for both
+directions:
+
+```python
+from caprid_relay import RelaySubscriptionHandlers, connect_relay
+
+async with await connect_relay(get_token=get_token) as session:
+    me = session.publish(["room", "p", my_id])
+    video = me.register_track("video")
+
+    session.subscribe(["room", "p", their_id], "video", RelaySubscriptionHandlers(on_object=render))
+    async with session.namespace_events(["room", "p"]) as events:
+        async for event in events:
+            ...  # Everyone else under the prefix. The relay never reports this connection's own namespaces.
+```
+
+`publish()` returns a `RelayPublication`. Its tracks work as on a publisher connection, and
+`announced` settles the same way. Publish another namespace with another `publish()` call. The token
+must grant every namespace the connection publishes and every one it subscribes to.
+
+- `await publication.close()` ends that namespace's tracks, waits for their last groups, and withdraws
+  the namespace. The connection stays open. The namespace stays taken on this connection, so
+  publishing it again raises `ValueError`.
+- If the relay stops soliciting a namespace, only its publication ends. `await publication.closed`
+  returns `Closed` with a `NAMESPACE_ENDED` error, and the publication's writes and registrations
+  raise that error. A publisher connection would end instead.
+- The relay does not route the connection's own announcements back to it. Its discovery leaves them
+  out, and the relay refuses a subscribe to one of the connection's own tracks with request error 16.
+- `await session.close()` closes every publication, then the connection. Unlike
+  `RelaySubscriber.close()`, it is a coroutine, because it waits for the publications' groups as
+  `RelayPublisher.close()` does. A `RelaySession` has every `RelaySubscriber` method and property, but
+  it is not a `RelaySubscriber` instance.
+
+`connect_supervised_relay` does the same and reconnects. Each connection is one generation. The
+supervisor serves every root you publish as the root followed by that generation's field, so all of
+a client's namespaces move to a new connection together:
+
+```python
+from caprid_relay import PublishingRootsHandlers, WantHandlers, connect_supervised_relay
+
+relay = await connect_supervised_relay(get_token=get_token, on_status=lambda status, error: show(status))
+me = relay.publish(["room", "p", my_id])  # served as room/p/<my_id>/<generation>
+video = me.register_track("video")  # the writer outlives the connections
+
+
+def on_changed(change):
+    # Your own root is not reported. The relay never routes a connection's own announcements back to it.
+    for root in change.added:
+        relay.want(f"video/{root.id}", root.namespace, "video", WantHandlers(on_object=render), generations=True)
+    for root in change.removed:
+        relay.unwant(f"video/{root.id}")
+
+
+relay.publishing_roots(["room", "p"], PublishingRootsHandlers(on_changed=on_changed))
+```
+
+It has every `want()` and `publishing_roots()` feature of the supervised subscriber, and the track
+writers of the supervised publisher. If the relay stops soliciting one of your roots, the supervisor
+replaces the whole connection, so every root moves to the next generation together.
+`relay.generation` is the live connection's field, and `on_generation` receives it as each
+connection comes up. `await relay.close()` drains the publications' groups as
+`RelaySession.close()` does. See the [supervised relay contract](../spec/behavior.md#supervised-relay).
+
 ### Advanced media groups
 
 A media track needs more than one object per group. LOC and MSF map one GOP to one MOQT group whose
@@ -761,6 +1189,13 @@ if video.has_demand:  # the relay currently has an upstream subscription for the
 
 A group that fails part-way, because the relay's subscription changed or ended, is reset instead of
 completed, and the track stays open. Start the next group at the next keyframe.
+
+Serve the catalog before you gate encoding on demand. Viewers read the catalog first, and only then
+subscribe to the video track, which is what gives it demand. If the catalog waits for the encoder's
+first output, and the encoder waits for `has_demand`, neither ever starts, and no viewer gets video.
+Either build the catalog from the encoder configuration you already know, or encode regardless of
+demand until the first decoder configuration arrives, then encode only while `video.has_demand` is
+true.
 
 `demand_changes()` iterates relay demand. It yields the current state first. After that it yields
 `True` when the relay subscribes or replaces its subscription, so `True` can repeat, and `False` when
@@ -795,7 +1230,7 @@ example runs on:
 - `CatalogService(track, document)` re-sends a document on every relay subscription, and retries a
   failed send while demand remains.
 - `DocumentService(track)` does the same for a document you replace with `update(document)`, such as
-  a media timeline. It also sends each update while the relay is subscribed.
+  a media timeline. It also sends the latest document on each update while the relay is subscribed.
 - `FrameWriter(track)` maps encoded frames onto groups. By default a keyframe opens a group and deltas
   append to it. `grouping="frame"` sends one group per frame. The writer skips frames the relay has
   no subscription for instead of waiting on the deadline, and resumes at the next keyframe after any
@@ -805,7 +1240,9 @@ Each `await writer.write(frame)` returns what became of the frame (`sent`, `skip
 `dropped`, `interrupted`, or `ended`) instead of raising. The writer serves writes from several tasks
 in call order. When more than `max_backlog` frames wait behind the one being written, the writer
 drops frames instead of queueing them. Under keyframe grouping it drops the waiting frames and the
-group in progress. Under `grouping="frame"` it drops the oldest waiting frame.
+group in progress. Under `grouping="frame"` it drops the oldest waiting frame. `max_backlog` defaults
+to 8 under keyframe grouping; under frame grouping there is no default bound, so no frame is dropped
+for the backlog, and memory is unbounded while delivery is blocked.
 `writer.keyframe_needed` and `on_keyframe_needed=` say when the next frame must be a keyframe: after a
 demand change, a failure, a stale frame, or a drop. An encoder can then force one. A frame is any
 object with `payload`, `key`, `properties`, and `discontinuity` attributes, so your own encoded-sample
@@ -842,6 +1279,139 @@ values, cycles, non-finite numbers, and unpaired surrogates fail locally. Readin
 and `Infinity`. Other conversions follow Python's standard JSON behavior. Text writing uses strict
 UTF-8 encoding. Raw byte `write()` and plain subscriptions remain available.
 
+## Control and telemetry
+
+Apps that send media often send small data beside it. A robot reports telemetry, and a remote
+cockpit sends it controls. Most of this data is **latest-wins**: a newer value makes the older one
+useless. Some of it is not, such as an emergency stop that must arrive even when a newer message
+follows. Choose the pattern per track.
+
+### Each side publishes its own track
+
+A publisher connection serves one namespace. So each side of a two-way app has its own publisher,
+and subscribes to the other side's namespace with a subscriber. The robot publishes `video` and
+`telemetry` under `["room", "robot"]`, and subscribes to `control` under `["room", "cockpit"]`. The
+cockpit does the reverse. Each side's token must grant publishing under its own namespace and
+subscribing under the other's.
+
+```python
+import asyncio
+import json
+import time
+
+from caprid_relay import (
+    MessageParameters,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    read_json,
+)
+from caprid_relay.media import DocumentService, LatestValueReader
+
+# On the robot.
+publisher = await connect_relay_publisher(url, namespace=["room", "robot"], get_token=get_token)
+telemetry = DocumentService(publisher.register_track("telemetry"))
+serving = asyncio.create_task(telemetry.serve())
+
+
+async def report() -> None:
+    while True:
+        telemetry.update(json.dumps(read_sensors()).encode())
+        await asyncio.sleep(0.05)
+
+
+reporting = asyncio.create_task(report())
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+control = LatestValueReader(
+    lambda obj: apply_control(read_json(obj)),
+    late=lambda obj: time.time() - read_json(obj)["sent_at"] > 0.5,
+    on_catch_up=lambda: subscriber.catch_up("control"),
+)
+subscriber.want(
+    "control",
+    ["room", "cockpit"],
+    "control",
+    control.want_handlers(on_error=on_error),
+    parameters=MessageParameters(subscriber_priority=0),
+)
+```
+
+The reader delivers a value only when it is newer than every value before it. The `late` and
+`on_catch_up` arguments are optional. The next section explains them.
+
+### Latest-wins values
+
+Send each value as a group of its own, holding one object. `track.write()` does this, and so does a
+document service. `caprid_relay.media.DocumentService(track)` is the simplest latest-wins publisher.
+`update(value)` replaces the value it holds. While a write is in progress, later updates replace one
+another, so only the newest is sent next. The service also sends the current value again on every
+relay subscription. That matters because an update made while the relay has no subscription is only
+held, not sent. After a failed write, it waits `retry_delay` seconds (1 by default) before it sends again, so
+pass a smaller value for a value that changes quickly.
+
+Make each value complete, not a change to the previous one. A viewer that joins late starts at the
+relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
+and the viewer drops values that arrive superseded.
+
+**Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`RelaySubscriber.max_age_supported`)
+skips groups that a newer one has superseded for longer than the
+`MessageParameters(max_age=...)` (milliseconds) you subscribe with. The SDK sends it only to such a
+relay, so it is safe to set ([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)). In
+a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
+one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
+600 of them arrived before an older group, because each group travels on a stream of its own. The
+same happened with 100 ms subscriber delivery timeouts and with group order descending
+([measurements](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+Delivery timeouts do not change this. The relay ignores the subscriber's, and the publisher's only
+bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+So the viewer does the dropping:
+
+- `caprid_relay.media.LatestValueReader` drops any value older than the newest one it has seen, as
+  in the example above. Group IDs rise within one subscription and start over when a want restarts
+  or moves to a new generation, so the reader starts over there too. Pass its `want_handlers(...)`,
+  with your own callbacks as keyword arguments, and keep the want's `drain` at 0. For a plain
+  subscription, pass `subscription_handlers(...)` instead.
+- To know when a value is too old to act on, put the time it was taken in the payload and pass a
+  `late` predicate. Comparing that time with the viewer's clock assumes the two machines' clocks
+  agree. The reader drops a late value. On the first late value after a value it delivered, it calls
+  `on_catch_up`. There, call the supervised subscriber's `catch_up(key)`. It replaces the
+  subscription at the live edge, which drops the relay's backlog, and runs `on_restarted` with reason
+  `"catch-up"`. A restart does not re-arm `on_catch_up`: it runs again only after a value is
+  delivered. Set the limit above the lateness the viewer's link can reach. Below it, the values after
+  a catch-up are late too, and the reader delivers nothing until the link speeds up. `reader.stats` counts the values delivered, superseded and late, and the catch-ups.
+  `stale_after` does not help here, because a backlog is not silence.
+- Give control and telemetry a subscriber priority ahead of the video on the same connection. The
+  relay orders what it sends you by your subscriber priority alone, where a lower number is more
+  urgent ([measured](../spec/relay-interop.md#subscription-parameters)).
+  `caprid_relay.media.media_subscribe_parameters` gives audio 16 and video 96.
+
+A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
+`write_json()` for each one. A concurrent write raises `WRITE_PENDING`, so queue commands in your own
+code. A write waits for relay demand and sends once the relay subscribes. `write_timeout` (10 s by
+default) covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the
+command was never delivered. Check its `phase`: only `"waiting-for-demand"` means no bytes went
+out. Commands can also arrive out of order, so number them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
+that, have the viewer reply on its own track.
+
+### Latency and staleness: where each is set
+
+The publisher and the viewer set different things, under similar names:
+
+| Setting | Side | What it does |
+| --- | --- | --- |
+| `PlayoutClock(target_latency_us=...)` | viewer | The viewer's lateness budget. It does not add a playout delay: the clock anchors on the first frame. Under keyframe grouping (video) it is how late a frame may be before the sequencer drops it with its group, and it sets when a resync happens. Frame-grouped audio is dropped once it is later than the clock's `late_drop_us` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
+| Resync | viewer, automatic | When no frame has arrived within the budget for a whole target latency and the lateness is steady (a growing stall or a draining backlog restarts the wait), or the next keyframe is more than one target latency ahead, the `FrameSequencer` re-anchors the clock and marks the frame `resync`. A lasting increase in delay then costs about one target latency, not a stall ([media subscribing](../spec/behavior.md#media-subscribing)). |
+| `late` with `on_catch_up` on `LatestValueReader` | viewer | Drops values your predicate calls late, and on the first one calls `on_catch_up`, where `catch_up(key)` replaces the subscription at the live edge. The want restarts with reason `"catch-up"` ([latest-wins values](#latest-wins-values)). |
+| `stale_after` on `want` | viewer | Resubscribes a track that has been silent that many seconds. The want restarts with reason `"stale"`. Use it only for tracks that are never silent while live. |
+| `media_track_properties(kind, target_latency_us=...)` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
+| Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
+
+The TypeScript sequencer can also ask to catch up when frames keep arriving late
+(`catchUpAfterUs` with `catchUp(key)`). The Python sequencer cannot yet, but `catch_up(key)` on a
+supervised subscriber is there to call.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not on message wording. SDK errors use these stable codes:
@@ -861,10 +1431,10 @@ Branch on `code` and `phase`, not on message wording. SDK errors use these stabl
 | `UPDATE_QUEUE_FULL` | Eight updates already wait for the relay to accept the subscription. Wait for `subscribed` before updating again. |
 | `PREFIX_OVERLAP` | `namespace_events` refused a prefix that equals, contains, or falls under one this connection already discovers. Nothing was sent. Widen one iterator's prefix and filter, or use a second connection. |
 | `GOAWAY` | The relay asked the client to migrate. Open a replacement connection. |
-| `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
+| `RECONNECTING` | A supervised publisher or relay had no generation up, or the connection ended under the operation. Nothing was replayed. Write the next object, or the next keyframe, once the publisher is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and the connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | No transport is available in this runtime. In TypeScript, supply a transport where browser WebTransport is missing. In Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed. |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed, or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later. Older relays' refusals reach a browser as `TRANSPORT_ERROR`. |
 
 Each error also has a `phase`:
 
@@ -897,7 +1467,7 @@ session with MOQT session termination code `UNAUTHORIZED` (0x2). `MALFORMED_AUTH
 `EXPIRED_AUTH_TOKEN` (0x18) map to it too. It can come in any phase. In phase `connection` it means
 the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)).
 TypeScript reports it too, though in a browser only against moq-relay 0.17.0 or later. Older relays'
-close never reached the page, so a refusal arrived as `TRANSPORT_ERROR` (#14). No other connection
+close never reached the page, so a refusal arrived as `TRANSPORT_ERROR`. No other connection
 failure, and no uncovered namespace, proves that authentication was denied. A subscription outside
 the token's grant is refused per request through `onError` or `on_error` (MOQT `UNAUTHORIZED`, 0x1),
 and the connection stays open.
@@ -973,7 +1543,7 @@ rate, not the network. On an idle host, a connection receiving 1 MiB objects fro
 `sjc.relay.mux.global` spends about 25 ms of CPU per MB, a ceiling of roughly **40 MB/s** (measured
 2026-09-30, aioquic 1.3). A host whose CPU is contended, or an application that does its own work on
 the same loop, gets much less. The adapter reads every datagram already waiting on the socket before
-it transmits (#162). Most of the remaining cost is aioquic's per-packet receive work.
+it transmits. Most of the remaining cost is aioquic's per-packet receive work.
 
 Media bitrates are far below this ceiling, but bulk data transfers may not be. A subscriber that
 falls behind gets no signal. The relay keeps queueing toward it, and the only symptoms are growing
@@ -999,7 +1569,8 @@ Follow that example's setup after you finish the data quickstart.
 user's microphone with `moq_media.opus.OpusDecoder`, waits for a pause, answers with `OpusEncoder`,
 and sends an interrupt when the user talks over it. Speech-to-text, a language model, and
 text-to-speech plug in through one async function, and the text of each reply goes on the transcript
-track. Its browser side is `ts/examples/voice-bot`.
+track. The bot publishes through a supervised publisher, so a dropped connection comes back as a new
+generation and the page follows it. Its browser side is `ts/examples/voice-bot`.
 
 ## Package boundaries
 
@@ -1026,8 +1597,9 @@ The observable behavior is the same. The spelling follows Python conventions:
 | TypeScript | Python |
 | --- | --- |
 | `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
+| `connectRelay(options)` returns a `RelaySession` that extends `RelaySubscriber`; `session.close()` returns a promise | `connect_relay(url, ...)` returns a `RelaySession` that has every `RelaySubscriber` method but is not a subclass; `await session.close()` |
 | `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
-| `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`. `NamespaceEvent.namespace` is a tuple, and a prefix that overlaps one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP`. |
+| `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`. `NamespaceEvent.namespace` is `tuple[str, ...] \| None`. It is `None` only on a `loaded` event, which marks the end of the relay's initial snapshot, so check `type` before you read it. A prefix that overlaps one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP`. |
 | `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |
@@ -1045,15 +1617,19 @@ The observable behavior is the same. The spelling follows Python conventions:
 | Browser `WebTransport`, or `@caprid/relay-quic` on Node | aioquic native QUIC client (`caprid_relay.quic.connect_quic`) |
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
+| `connectSupervisedRelay({ ..., onGeneration })` with `onGeneration({ generation })`; `relay.close()` returns a promise | `connect_supervised_relay(url, ..., on_generation=...)` with `on_generation(generation)`, the field itself; `await relay.close()` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
+| `subscriber.publishingRoots({ prefix }, { onChanged, onError })`; `present` is a `Map` by id | `subscriber.publishing_roots(prefix, PublishingRootsHandlers(on_changed=..., on_error=...))`; `present` is a tuple of `PublishingRoot`, and `on_changed` is required |
+| `publishPresence`, `createPresenceView` in `@caprid/relay/media` | No helper. Read the `presence` track with a want ([recipe](#presence-read-the-documents-with-a-want)). |
 
 ## Scope and limits
 
 The SDK subscribes to tracks over reliable streams, updates and cancels subscriptions, discovers
 namespaces with `namespace_events` ([discovery contract](../spec/behavior.md#discovery)), and publishes
-on a dedicated connection. The supervised connections add reconnection, resubscription, and token
-rotation. The generic core also exposes FETCH and TRACK_STATUS. The SDK offers `moqt-22`, then
-`moqt-20` as a fallback, and speaks whichever the relay selects.
+on a dedicated connection or on one that also subscribes (`connect_relay`). The supervised
+connections add reconnection, resubscription, and token rotation. The generic core also exposes FETCH
+and TRACK_STATUS. The SDK offers `moqt-22`, then `moqt-20` as a fallback, and speaks whichever the
+relay selects.
 
 The SDK does not refresh the token of a live session, receive datagrams, or discover tracks within a
 namespace. A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`. Subscriptions still
