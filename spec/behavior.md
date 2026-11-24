@@ -2117,9 +2117,11 @@ nobody watches sends nothing.
   (a scope of a scope joins the names with `/`), and its section names are prefixed with the name
   and a dot. The SDK pieces that take a `diagnostics` option report into the recorder or scope they
   are given.
-- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publisher's broadcast and
-  writes them through a frame writer under frame grouping, so a write without relay demand is
-  skipped. Each object is one group, sent as a keyframe, and its payload is UTF-8 JSON:
+- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publisher's broadcast (a
+  publisher, a supervised publisher, or a root published on a
+  [supervised relay](#supervised-relay)) and writes them through a frame writer under frame
+  grouping, so a write without relay demand is skipped. Each object is one group, sent as a
+  keyframe, and its payload is UTF-8 JSON:
   - `diag.events`: `{ "instance", "backlog"?: true, "events": [event, ...] }`. Each time the relay
     subscribes to the track (its first subscription and every replacement), everything the
     recorder holds goes first, marked `backlog`, in objects of 200 events (more each when it holds
@@ -2132,9 +2134,9 @@ nobody watches sends nothing.
 - Demand is the relay's own subscription, shared by every follower, so a follower that subscribes
   while another already does gets live events but no replay from the client; a location filter on
   its subscription asks the relay for the groups it still holds.
-- `followDiagnostics` wants both tracks on a supervised subscriber (following generations when
-  asked), delivers each recorder's events once (a replay repeats sequence numbers already
-  delivered), and skips objects that are not valid JSON of these shapes.
+- `followDiagnostics` wants both tracks on a supervised subscriber or a supervised relay
+  (following generations when asked), delivers each recorder's events once (a replay repeats
+  sequence numbers already delivered), and skips objects that are not valid JSON of these shapes.
 - Reading the tracks takes read access to the client's broadcast, which includes its media. A
   central collector with a credential that reads every client's broadcast is for debugging only.
 

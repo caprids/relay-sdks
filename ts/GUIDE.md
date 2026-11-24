@@ -1839,6 +1839,10 @@ diagnostics.event('app.joined', { participant: id });
 diagnostics.section('app.video', () => ({ layer, freezes }));
 ```
 
+On a `SupervisedRelay`, which publishes and subscribes on one connection, publish on the root's
+publication: `publishDiagnostics(diagnostics, relay.publish(root))`. The tracks then move to each
+new connection with the root's other tracks.
+
 The recorder holds the last 10 minutes of events. `diag.events` carries them, and `diag.stats`
 carries a snapshot of every section once a second. When the relay subscribes to `diag.events`, the
 client first sends everything it holds, so a collector that starts following after a complaint
