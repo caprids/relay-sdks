@@ -52,7 +52,8 @@ import {
   STREAM_TYPE,
   type SubgroupHeader,
 } from './object-stream.js';
-import { type BidirectionalStreamLike, openRequestStream, type RequestStream } from './request-stream.js';
+import { type BidirectionalStreamLike, openRequestStream, type RequestStream, readRequest } from './request-stream.js';
+import { isSessionError } from './transport-error.js';
 
 // ============================================================================
 // Transport seam
@@ -285,8 +286,18 @@ export interface MoqtSubscribeNamespaceOptions {
  * suffix relative to the requested prefix; an empty suffix is the prefix itself.
  */
 export interface NamespaceSubscriptionHandlers {
-  /** REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream. */
-  onOk?(): void;
+  /**
+   * REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream. `activeCount` is MoQ
+   * Active Count's promise, how many NAMESPACE messages come before the first change; absent when the session did not
+   * negotiate the extension.
+   */
+  onOk?(info: { activeCount?: number }): void;
+  /**
+   * MoQ Active Count only: the `activeCount` NAMESPACE messages REQUEST_OK promised have all been passed to
+   * `onNamespace`, repeats included, so the peer's view as of its answer is complete. Called right after the last of
+   * them, or right after `onOk` on a count of 0. Never called when `onOk` had no `activeCount`.
+   */
+  onSynced?(): void;
   /** The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
   /**
@@ -296,10 +307,10 @@ export interface NamespaceSubscriptionHandlers {
   onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
   /**
    * NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available. Also called for each namespace still
-   * active when the accepted request ends (§9.15), just before `onEnd`. One for a namespace never named closes the
-   * session with PROTOCOL_VIOLATION (§9.15).
+   * active when the accepted request ends (§9.15), just before `onEnd`, with `requestEnded` true. One for a namespace
+   * never named closes the session with PROTOCOL_VIOLATION (§9.15).
    */
-  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
+  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace, info: { requestEnded: boolean }): void;
   /**
    * The accepted request ended: the peer finished its side of the stream (no `error`), or the stream failed (`error`
    * is the transport's). No entry follows. Not called for a local cancel or the session ending.
@@ -356,12 +367,20 @@ export interface MoqtSessionCallbacks {
     publish: IncomingPublish,
     respond: { accept(): void; reject(errorCode?: number, reason?: string): void }
   ): void;
-  /** The session ended — transport closed, or a fatal protocol error. */
+  /**
+   * The session ended — transport closed, or a fatal protocol error. It is the last callback: no session callback and
+   * no request handler runs after it, and a request started afterwards does nothing.
+   */
   onClosed?(info: { error?: unknown }): void;
 }
 
 /** Options for {@link createMoqtSession}. */
 export interface MoqtSessionConfig {
+  /**
+   * The peer's consumed Request IDs (§6.4.2.1). Sessions sharing one transport pass the same set, so an ID one of them
+   * consumed is a reuse to the other; `createMoqtDuplexSession` does. Default: the session's own.
+   */
+  peerRequestIds?: Set<number>;
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§9.1.5). */
@@ -496,6 +515,10 @@ interface FetchRecord extends RequestRecordBase {
   requestId: number;
   handlers: FetchHandlers;
   groupOrder: 'ascending' | 'descending';
+  /** The data stream being read, so a cancel stops it at once rather than at the next entry. */
+  reader?: StreamReader | undefined;
+  /** The data stream ended or reset. The session forgets the fetch once its request is answered too (#419). */
+  dataEnded?: boolean;
 }
 
 interface TrackStatusRecord extends RequestRecordBase {
@@ -510,6 +533,59 @@ interface NamespaceSubscriptionRecord extends RequestRecordBase {
   accepted?: boolean;
   /** Suffixes named by NAMESPACE and not yet withdrawn, keyed by their JSON. */
   active: Map<string, TrackNamespace>;
+  owed: number;
+}
+
+function declares(options: readonly KeyValuePair[], type: number): boolean {
+  return options.some((option) => option.type === type);
+}
+
+type RequestKind = 'subscribe' | 'fetch' | 'track-status' | 'subscribe-namespace';
+
+const PENDING = Symbol('pending');
+
+/** Whether `promise` had already settled when this was called: one microtask turn, whichever handler runs first. */
+async function settled(promise: Promise<unknown>): Promise<boolean> {
+  try {
+    return (await Promise.race([promise, Promise.resolve(PENDING)])) !== PENDING;
+  } catch {
+    return true;
+  }
+}
+
+function activeCountViolation(
+  answers: RequestKind,
+  negotiated: boolean,
+  parameters: MessageParameters
+): string | undefined {
+  const carried = parameters.activeCount !== undefined;
+
+  if (answers !== 'subscribe-namespace') {
+    return carried ? `ACTIVE_COUNT on a REQUEST_OK answering ${answers}` : undefined;
+  }
+
+  if (negotiated && !carried) return 'REQUEST_OK omits ACTIVE_COUNT, which the session negotiated';
+  if (!negotiated && carried) return 'REQUEST_OK carries ACTIVE_COUNT, which the session did not negotiate';
+  return undefined;
+}
+
+type CountedInput = 'namespace' | 'namespace-done' | 'goaway' | 'fin' | 'stream-failed';
+
+function countedStep(owed: number, input: CountedInput): { owed: number; synced: boolean } | { violation: string } {
+  if (owed === 0) return { owed, synced: false };
+
+  switch (input) {
+    case 'namespace':
+      return { owed: owed - 1, synced: owed === 1 };
+    case 'namespace-done':
+      return { violation: 'NAMESPACE_DONE inside the ACTIVE_COUNT set' };
+    case 'goaway':
+      return { violation: 'GOAWAY inside the ACTIVE_COUNT set' };
+    case 'fin':
+      return { violation: 'subscribe-namespace stream finished inside the ACTIVE_COUNT set' };
+    case 'stream-failed':
+      return { owed, synced: false };
+  }
 }
 
 interface AliasWaiter {
@@ -533,13 +609,24 @@ class MoqtSessionImpl implements MoqtSession {
   /** Client request IDs are even, starting at 0; a server's are odd, starting at 1 (§6.4.2.1). */
   #nextRequestId: number;
   /** Every inbound request ID ever seen. Reuse, or this endpoint's own parity, closes the session (§6.4.2.1). */
-  #peerRequestIds = new Set<number>();
+  #peerRequestIds: Set<number>;
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
   #trackStatuses = new Map<number, TrackStatusRecord>();
   #namespaceSubscriptions = new Map<number, NamespaceSubscriptionRecord>();
   #aliasRoutes = new Map<number, SubscriptionRecord>();
   #aliasWaiters = new Map<number, AliasWaiter[]>();
+  /**
+   * Every request stream with a direction still open, answered or not: teardown cancels them all, whatever the maps
+   * still hold.
+   * Held weakly, so a request the session has forgotten (#419) keeps nothing alive here; one the transport still
+   * holds is still reached.
+   */
+  #requestStreams = new Set<WeakRef<RequestStream>>();
+  /** Every incoming data stream still being read. The peer's control stream is not one: stopping it ends the session. */
+  #dataReaders = new Set<StreamReader>();
+  /** Drops each incoming request the application has yet to answer. */
+  #incomingRequests = new Set<() => void>();
 
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
@@ -547,6 +634,7 @@ class MoqtSessionImpl implements MoqtSession {
   #receivedServerSetup = false;
   /** The server's SETUP declared SETUP_OPTION.MAX_AGE. */
   #maxAgeSupported = false;
+  #activeCountNegotiated = false;
   #receivedControlGoaway = false;
   #destroyed = false;
 
@@ -554,6 +642,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#transport = transport;
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
+    this.#peerRequestIds = config.peerRequestIds ?? new Set();
     this.#callbacks = config.callbacks ?? {};
     this.#nextRequestId = config.perspective === 'server' ? 1 : 0;
     this.ready = new Promise((resolve, reject) => {
@@ -601,6 +690,14 @@ class MoqtSessionImpl implements MoqtSession {
       const control = await this.#transport.createUnidirectionalStream();
 
       this.#controlWriter = control.getWriter();
+      // A control stream MUST stay open for the session's lifetime (§6.3): a peer stopping it has ended the session, as
+      // the publish driver also treats it. A clean local close resolves the writer instead, and #fatal no-ops once
+      // #handleClosed has run. A session-wide failure (a peer's clean close fails every stream as it settles `closed`)
+      // is the transport's to report: `closed` says whether it was clean.
+      void this.#controlWriter.closed.catch(async (error: unknown) => {
+        if (isSessionError(error) || (await settled(this.#transport.closed))) return;
+        this.#fatal(error);
+      });
       const options: KeyValuePair[] = [
         {
           type: SETUP_OPTION.MOQT_IMPLEMENTATION,
@@ -661,10 +758,13 @@ class MoqtSessionImpl implements MoqtSession {
     ];
     const pending = expected ? [] : records.filter((r) => !r.settled && !r.cancelled);
 
-    for (const record of records) {
-      this.#settleRequest(record);
-      record.stream?.cancel(error);
-    }
+    for (const record of records) this.#settleRequest(record);
+    for (const stream of this.#requestStreams) stream.deref()?.cancel(error);
+    for (const drop of this.#incomingRequests) drop();
+    this.#incomingRequests.clear();
+    for (const reader of this.#dataReaders) void reader.cancel(error).catch(() => {});
+    this.#requestStreams.clear();
+    this.#dataReaders.clear();
 
     for (const record of this.#subscriptions.values()) this.#removeSubscription(record);
     this.#subscriptions.clear();
@@ -745,6 +845,7 @@ class MoqtSessionImpl implements MoqtSession {
   subscribe(options: MoqtSubscribeOptions, callbacks: SubscriptionHandlers = {}): Subscription {
     const handlers = synchronousSubscriptionHandlers(callbacks);
     const requestId = this.#allocateRequestId();
+    if (this.#destroyed) return { requestId, update: () => {}, cancel: () => {} };
     const record: SubscriptionRecord = { requestId, handlers, cancelled: false, settled: false, readers: new Set() };
 
     this.#subscriptions.set(requestId, record);
@@ -760,6 +861,7 @@ class MoqtSessionImpl implements MoqtSession {
     );
 
     void this.#openRequest(
+      'subscribe',
       message,
       record,
       (msg) => this.#handleSubscriptionMessage(record, msg),
@@ -792,6 +894,7 @@ class MoqtSessionImpl implements MoqtSession {
 
   fetch(options: MoqtFetchOptions, handlers: FetchHandlers = {}): FetchHandle {
     const requestId = this.#allocateRequestId();
+    if (this.#destroyed) return { requestId, cancel: () => {} };
     const record: FetchRecord = {
       requestId,
       handlers,
@@ -809,12 +912,18 @@ class MoqtSessionImpl implements MoqtSession {
     };
 
     void this.#openRequest(
+      'fetch',
       encodeFetch(request, this.#protocol),
       record,
       (msg) => this.#handleFetchMessage(record, msg),
       (error) => {
         this.#fetches.delete(requestId);
         handlers.onError?.(error);
+      },
+      () => {
+        // §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request. Left open, the stream would
+        // outlive a fetch the session has already forgotten.
+        record.stream?.finWrite().catch(() => {});
       }
     );
 
@@ -825,6 +934,7 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   trackStatus(options: MoqtSubscribeOptions, handlers: TrackStatusHandlers = {}): void {
+    if (this.#destroyed) return;
     const requestId = this.#allocateRequestId();
     const record: TrackStatusRecord = { requestId, handlers, cancelled: false, settled: false };
 
@@ -844,6 +954,7 @@ class MoqtSessionImpl implements MoqtSession {
     );
 
     void this.#openRequest(
+      'track-status',
       message,
       record,
       (msg) => {
@@ -871,12 +982,14 @@ class MoqtSessionImpl implements MoqtSession {
     handlers: NamespaceSubscriptionHandlers = {}
   ): NamespaceSubscription {
     const requestId = this.#allocateRequestId();
+    if (this.#destroyed) return { requestId, cancel: () => {} };
     const record: NamespaceSubscriptionRecord = {
       requestId,
       handlers,
       cancelled: false,
       settled: false,
       active: new Map(),
+      owed: 0,
     };
     const message = encodeSubscribeNamespace(
       {
@@ -891,17 +1004,22 @@ class MoqtSessionImpl implements MoqtSession {
 
     // Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
     const end = (error?: unknown) => {
+      if (this.#count(record, error === undefined ? 'fin' : 'stream-failed') === undefined) return;
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
       // A failed stream is dropped here: session teardown only reaches the records it still holds.
       if (error !== undefined) record.stream?.cancel(error);
       // §9.15: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
       const active = [...record.active.values()];
       record.active.clear();
-      for (const suffix of active) handlers.onNamespaceDone?.(suffix);
-      handlers.onEnd?.(error === undefined ? {} : { error });
+      for (const suffix of active) {
+        if (!this.#live(record)) return;
+        handlers.onNamespaceDone?.(suffix, { requestEnded: true });
+      }
+      if (this.#live(record)) handlers.onEnd?.(error === undefined ? {} : { error });
     };
 
     void this.#openRequest(
+      'subscribe-namespace',
       message,
       record,
       (msg) => this.#handleNamespaceMessage(record, msg),
@@ -943,6 +1061,7 @@ class MoqtSessionImpl implements MoqtSession {
    * are ignored, except that a FIN calls `onEnd` and a stream error calls `onSettledError` when given.
    */
   async #openRequest(
+    kind: RequestKind,
     message: Uint8Array,
     record: RequestRecordBase,
     onMessage: (message: ControlMessage) => void,
@@ -954,6 +1073,8 @@ class MoqtSessionImpl implements MoqtSession {
       if (record.settled || record.cancelled || this.#destroyed) return;
 
       this.#settleRequest(record);
+      // A request that died unanswered keeps no stream: its sending direction would otherwise stay open.
+      record.stream?.cancel(error);
       onFailure(error);
     };
 
@@ -971,6 +1092,13 @@ class MoqtSessionImpl implements MoqtSession {
       return;
     }
 
+    // The session ended while the stream was opening: nothing is sent on it, and nothing it carries is reported.
+    if (this.#destroyed) {
+      void stream.readable.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+      return;
+    }
+
     const timeout = this.#config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
     if (timeout > 0 && !record.settled && !record.cancelled) {
@@ -985,11 +1113,22 @@ class MoqtSessionImpl implements MoqtSession {
       }, timeout);
     }
 
-    record.stream = openRequestStream(
+    const requestStream = openRequestStream(
       stream,
       message,
       {
-        onMessage,
+        onMessage: (msg) => {
+          // Frames decoded in one read keep arriving after a frame among them, or its handler, ended the session.
+          if (this.#destroyed) return;
+
+          const violation =
+            msg.kind === 'request-ok'
+              ? activeCountViolation(kind, this.#activeCountNegotiated, msg.parameters)
+              : undefined;
+
+          if (violation === undefined) onMessage(msg);
+          else this.#fatal(new MoqtProtocolError(violation));
+        },
         onFin: () => {
           if (!record.settled) {
             fail(streamFailure('request stream closed before a response'));
@@ -1003,6 +1142,9 @@ class MoqtSessionImpl implements MoqtSession {
             return;
           }
 
+          // The response direction failed, so the request is over: its sending direction goes with it.
+          record.stream?.cancel(error);
+
           if (record.settled) {
             if (!record.cancelled && !this.#destroyed) onSettledError?.(error);
             return;
@@ -1010,12 +1152,22 @@ class MoqtSessionImpl implements MoqtSession {
 
           fail(streamFailure(error instanceof Error ? error.message : 'request stream failed'));
         },
+        onClosed: () => this.#requestStreams.delete(tracked),
       },
       this.#protocol
     );
+    const tracked = new WeakRef(requestStream);
+
+    record.stream = requestStream;
+    this.#requestStreams.add(tracked);
 
     // A cancel that raced the stream opening lands here.
     if (record.cancelled) record.stream.cancel(record.pendingCancelReason);
+  }
+
+  /** Whether `record`'s handlers may still be called: not after its cancel, and not after the session's `onClosed`. */
+  #live(record: RequestRecordBase): boolean {
+    return !record.cancelled && !this.#destroyed;
   }
 
   /** Mark a request answered (or dead) and disarm its response timeout. */
@@ -1096,7 +1248,7 @@ class MoqtSessionImpl implements MoqtSession {
   #handleFetchMessage(record: FetchRecord, message: ControlMessage): void {
     switch (message.kind) {
       case 'fetch-ok':
-        this.#settleRequest(record);
+        this.#settleFetch(record);
         record.handlers.onOk?.({
           endOfTrack: message.endOfTrack,
           endLocation: message.endLocation,
@@ -1113,12 +1265,13 @@ class MoqtSessionImpl implements MoqtSession {
       // armed would fail an answered fetch (and drop its data stream)
       // once the deadline passed.
       case 'request-ok':
-        this.#settleRequest(record);
+        this.#settleFetch(record);
         break;
       case 'request-error':
         this.#settleRequest(record);
         this.#fetches.delete(record.requestId);
         record.handlers.onError?.(message);
+        record.stream?.finWrite().catch(() => {});
         break;
       case 'goaway':
         record.handlers.onGoaway?.(message);
@@ -1129,8 +1282,7 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   #handleNamespaceMessage(record: NamespaceSubscriptionRecord, message: ControlMessage): void {
-    // Frames decoded in one read keep arriving after a frame among them closed the session.
-    if (record.cancelled || this.#destroyed) return;
+    if (record.cancelled) return;
     switch (message.kind) {
       case 'request-ok':
         if (record.settled) {
@@ -1140,7 +1292,11 @@ class MoqtSessionImpl implements MoqtSession {
 
         this.#settleRequest(record);
         record.accepted = true;
-        record.handlers.onOk?.();
+        record.owed = message.parameters.activeCount ?? 0;
+        record.handlers.onOk?.(
+          message.parameters.activeCount === undefined ? {} : { activeCount: message.parameters.activeCount }
+        );
+        if (message.parameters.activeCount === 0 && this.#live(record)) record.handlers.onSynced?.();
         break;
       case 'request-error':
         // After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
@@ -1155,7 +1311,7 @@ class MoqtSessionImpl implements MoqtSession {
         record.stream?.finWrite().catch(() => {});
         break;
       case 'namespace':
-      case 'namespace-done':
+      case 'namespace-done': {
         // Entries follow REQUEST_OK (§9.15); one before it, or after REQUEST_ERROR, is outside the
         // stream's grammar.
         if (!record.accepted) {
@@ -1165,11 +1321,15 @@ class MoqtSessionImpl implements MoqtSession {
           return;
         }
 
+        const synced = this.#count(record, message.kind);
+        if (synced === undefined) return;
+
         if (message.kind === 'namespace') {
           record.active.set(JSON.stringify(message.trackNamespaceSuffix), message.trackNamespaceSuffix);
           record.handlers.onNamespace?.(message.trackNamespaceSuffix);
+          if (synced && this.#live(record)) record.handlers.onSynced?.();
         } else if (record.active.delete(JSON.stringify(message.trackNamespaceSuffix))) {
-          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix, { requestEnded: false });
         } else {
           // §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
           this.#fatal(
@@ -1177,12 +1337,26 @@ class MoqtSessionImpl implements MoqtSession {
           );
         }
         break;
+      }
       case 'goaway':
+        if (this.#count(record, 'goaway') === undefined) return;
         record.handlers.onGoaway?.(message);
         break;
       default:
         this.#fatal(new MoqtProtocolError(`unexpected ${message.kind} on a subscribe-namespace request stream`));
     }
+  }
+
+  #count(record: NamespaceSubscriptionRecord, input: CountedInput): boolean | undefined {
+    const step = countedStep(record.owed, input);
+
+    if ('violation' in step) {
+      this.#fatal(new MoqtProtocolError(step.violation));
+      return undefined;
+    }
+
+    record.owed = step.owed;
+    return step.synced;
   }
 
   #cancelSubscription(record: SubscriptionRecord, reason?: unknown): void {
@@ -1207,6 +1381,12 @@ class MoqtSessionImpl implements MoqtSession {
     }
   }
 
+  /** A fetch's response arrived: settle it, and forget it if its data stream has already ended (#419). */
+  #settleFetch(record: FetchRecord): void {
+    this.#settleRequest(record);
+    if (record.dataEnded) this.#fetches.delete(record.requestId);
+  }
+
   #cancelFetch(record: FetchRecord, reason?: unknown): void {
     if (record.cancelled) return;
 
@@ -1214,6 +1394,7 @@ class MoqtSessionImpl implements MoqtSession {
     record.pendingCancelReason = reason;
     this.#settleRequest(record);
     record.stream?.cancel(reason);
+    void record.reader?.cancel(reason).catch(() => {});
     this.#fetches.delete(record.requestId);
   }
 
@@ -1242,6 +1423,7 @@ class MoqtSessionImpl implements MoqtSession {
 
   async #handleUnidirectionalStream(stream: ReadableStream<Uint8Array>): Promise<void> {
     const reader = new StreamReader(stream);
+
     const streamType = await reader.readVarint();
 
     if (streamType === STREAM_TYPE.SETUP) {
@@ -1249,27 +1431,38 @@ class MoqtSessionImpl implements MoqtSession {
       return;
     }
 
-    if (isSubgroupHeaderType(streamType)) {
-      const header = await readSubgroupHeader(reader, streamType);
-
-      await this.#runSubgroupStream(reader, header);
-      return;
-    }
-
-    if (streamType === STREAM_TYPE.FETCH_HEADER) {
-      const { requestId } = await readFetchHeader(reader);
-
-      await this.#runFetchStream(reader, requestId);
-      return;
-    }
-
-    if (streamType === STREAM_TYPE.PADDING) {
+    if (this.#destroyed) {
       await reader.cancel();
       return;
     }
 
-    await reader.cancel();
-    throw new MoqtProtocolError(`unknown unidirectional stream type 0x${streamType.toString(16)}`);
+    this.#dataReaders.add(reader);
+
+    try {
+      if (isSubgroupHeaderType(streamType)) {
+        const header = await readSubgroupHeader(reader, streamType);
+
+        await this.#runSubgroupStream(reader, header);
+        return;
+      }
+
+      if (streamType === STREAM_TYPE.FETCH_HEADER) {
+        const { requestId } = await readFetchHeader(reader);
+
+        await this.#runFetchStream(reader, requestId);
+        return;
+      }
+
+      if (streamType === STREAM_TYPE.PADDING) {
+        await reader.cancel();
+        return;
+      }
+
+      await reader.cancel();
+      throw new MoqtProtocolError(`unknown unidirectional stream type 0x${streamType.toString(16)}`);
+    } finally {
+      this.#dataReaders.delete(reader);
+    }
   }
 
   /** Read one control-message frame using the pull-based stream reader. */
@@ -1284,6 +1477,8 @@ class MoqtSessionImpl implements MoqtSession {
   async #runControlStream(reader: StreamReader): Promise<void> {
     // The stream-type varint (0x2F00) doubles as the first message's type.
     const setup = await this.#readControlFrame(reader, MESSAGE_TYPE.SETUP);
+    // A duplex session's transport outlives its subscriber, so the control stream can still deliver after `onClosed`.
+    if (this.#destroyed) return;
     if (setup.kind !== 'setup') throw new MoqtProtocolError('control stream did not begin with SETUP');
 
     if (this.#receivedServerSetup) {
@@ -1292,7 +1487,10 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#receivedServerSetup = true;
     // The option's value is reserved and ignored on receipt: its presence is the declaration.
-    this.#maxAgeSupported = setup.options.some((option) => option.type === SETUP_OPTION.MAX_AGE);
+    this.#maxAgeSupported = declares(setup.options, SETUP_OPTION.MAX_AGE);
+    this.#activeCountNegotiated =
+      declares(this.#config.setupOptions ?? [], SETUP_OPTION.ACTIVE_COUNT) &&
+      declares(setup.options, SETUP_OPTION.ACTIVE_COUNT);
     this.#resolveReady();
     this.#callbacks.onReady?.(setup.options);
 
@@ -1300,6 +1498,7 @@ class MoqtSessionImpl implements MoqtSession {
     while (!(await reader.atEnd())) {
       const type = await reader.readVarint();
       const message = await this.#readControlFrame(reader, type);
+      if (this.#destroyed) return;
       if (message.kind !== 'goaway') throw new MoqtProtocolError(`unexpected ${message.kind} on the control stream`);
 
       if (this.#receivedControlGoaway) {
@@ -1392,9 +1591,11 @@ class MoqtSessionImpl implements MoqtSession {
       return;
     }
 
+    record.reader = reader;
+
     try {
       for await (const entry of readFetchEntries(reader, record.groupOrder)) {
-        if (record.cancelled) {
+        if (record.cancelled || this.#destroyed) {
           await reader.cancel();
           return;
         }
@@ -1402,13 +1603,23 @@ class MoqtSessionImpl implements MoqtSession {
         record.handlers.onEntry?.(entry);
       }
 
+      // Teardown's or the fetch's own cancel of this reader reads as a clean end.
+      if (this.#destroyed || record.cancelled) return;
       record.handlers.onEnd?.();
     } catch (error) {
+      if (record.cancelled) return;
       if (isMoqtProtocolError(error)) throw error;
 
       // A reset mid-replay means entries may be missing — never report it
       // as the clean FIN `onEnd` promises.
-      record.handlers.onReset?.({ error });
+      if (!this.#destroyed) record.handlers.onReset?.({ error });
+    } finally {
+      // Nothing more arrives for the fetch once its data stream and its response have, so the session forgets it
+      // then (#419): kept, the record's handlers held everything they had collected for the session's life. Data can
+      // beat the response; until the response, or the request timeout, the record stays for teardown to fail.
+      record.dataEnded = true;
+      record.reader = undefined;
+      if (record.settled) this.#fetches.delete(requestId);
     }
   }
 
@@ -1437,8 +1648,14 @@ class MoqtSessionImpl implements MoqtSession {
 
   async #handleIncomingRequest(stream: BidirectionalStreamLike): Promise<void> {
     const reader = new StreamReader(stream.readable);
-    const type = await reader.readVarint();
-    const message = await this.#readControlFrame(reader, type);
+    const message = await readRequest(stream, reader, (type) => this.#readControlFrame(reader, type));
+    // A request still arriving when the session ended is dropped: nothing reaches a callback after `onClosed`. (A duplex
+    // session's transport outlives its subscriber, for the publisher's drain.)
+    if (this.#destroyed) {
+      await reader.cancel().catch(() => {});
+      void stream.writable.abort().catch(() => {});
+      return;
+    }
     const initiatingRequestId =
       message.kind === 'fetch'
         ? message.request.requestId
@@ -1453,38 +1670,40 @@ class MoqtSessionImpl implements MoqtSession {
     // Before answering: a request this client rejects still consumes its id.
     if (initiatingRequestId !== undefined) this.#claimPeerRequestId(initiatingRequestId);
 
+    const writer = stream.writable.getWriter();
+    let responded = false;
+    // Until its response has been written, the request is teardown's to drop: nothing is answered after `onClosed`.
+    const drop = (): void => {
+      responded = true;
+      void reader.cancel().catch(() => {});
+      void writer.abort().catch(() => {});
+    };
     const respond = async (bytes: Uint8Array) => {
-      const writer = stream.writable.getWriter();
+      if (responded) return;
+
+      responded = true;
 
       try {
         await writer.write(bytes);
         await writer.close();
       } catch {
-        // Peer cancelled; nothing to clean up.
+        // Peer cancelled, or teardown dropped the request.
       }
 
-      await reader.cancel();
+      this.#incomingRequests.delete(drop);
+      await reader.cancel().catch(() => {});
     };
+
+    this.#incomingRequests.add(drop);
 
     if (message.kind === 'publish') {
       const callbacks = this.#callbacks;
 
       if (callbacks.onIncomingPublish) {
-        let responded = false;
-
         callbacks.onIncomingPublish(message, {
-          accept: () => {
-            if (responded) return;
-
-            responded = true;
-            void respond(encodeRequestOk({}, this.#protocol));
-          },
-          reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') => {
-            if (responded) return;
-
-            responded = true;
-            void respond(encodeRequestError(errorCode, reason));
-          },
+          accept: () => void respond(encodeRequestOk({}, this.#protocol)),
+          reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') =>
+            void respond(encodeRequestError(errorCode, reason)),
         });
         return;
       }

@@ -6,7 +6,7 @@ import type { MoqtObject, RequestError, SubscribeOk } from '../../packages/moq-c
 import type { RelaySubscriber, RelaySubscriptionHandlers, RelayTrackOptions } from '../../src/connect.js';
 import { RelayError } from '../../src/errors.js';
 import type { NamespaceEvent } from '../../src/namespace-events.js';
-import type { RegisterTrackOptions, RelayPublisher, RelayTrackWriter } from '../../src/publish.js';
+import type { RegisterTrackOptions, RelayPublication, RelayPublisher, RelayTrackWriter } from '../../src/publish.js';
 import {
   type RelaySubscription,
   SubscriptionConnectionClosedError,
@@ -360,4 +360,39 @@ export function fakeSubscriber(expiresAt?: Date): FakeSubscriber {
     },
   };
   return fake;
+}
+
+export interface FakeSession extends FakeSubscriber {
+  /** Each publication made on this connection, by its namespace joined with `/`. */
+  publications: Map<string, FakePublisher>;
+  publish(namespace: readonly string[]): RelayPublication;
+}
+
+/** A connection that publishes and subscribes: a fake subscriber plus one fake publisher per published namespace. */
+export function fakeSession(expiresAt?: Date): FakeSession {
+  const subscriber = fakeSubscriber(expiresAt);
+  const publications = new Map<string, FakePublisher>();
+  const session = subscriber as FakeSession;
+  session.publications = publications;
+  session.publish = (namespace) => {
+    const key = namespace.join('/');
+    if (publications.has(key)) throw new RangeError('Namespace is already published on this connection');
+    const publisher = fakePublisher([...namespace], expiresAt);
+    publications.set(key, publisher);
+    // The connection's end ends its publications.
+    void subscriber.closed.then(({ error }) => publisher.end(error));
+    return {
+      namespace: [...namespace],
+      announced: Promise.resolve(),
+      registerTrack: (options) => publisher.registerTrack(options),
+      closed: publisher.closed,
+      close: () => publisher.close(),
+    };
+  };
+  const end = subscriber.end.bind(subscriber);
+  session.close = (async () => {
+    for (const publisher of publications.values()) publisher.end();
+    end();
+  }) as never;
+  return session;
 }

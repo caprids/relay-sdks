@@ -14,6 +14,8 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
+| Open one connection that publishes and subscribes | `connectRelay(options)` (`ConnectRelaySessionOptions`) returns `RelaySession`, a `RelaySubscriber` with `publish()` | `connect_relay(url, ...)` returns `RelaySession`, with every `RelaySubscriber` method, `publish()`, and an awaitable `close()` |
+| Announce a namespace on that connection and serve its tracks | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `registerTrack()`, `announced`, `closed`, `close()`) | `session.publish(namespace)` returns `RelayPublication` (`namespace`, `register_track()`, `announced`, `closed`, `close()`) |
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
@@ -29,6 +31,7 @@ without a row here is a bug.
 | Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` (`NamespaceEventOptions`) returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
+| The relay's initial snapshot of a namespace request is complete | `{ type: 'loaded' }`; `SNAPSHOT_QUIET_MS`, `SNAPSHOT_LIMIT_MS` | `NamespaceEvent(type='loaded')` (`namespace=None`); `SNAPSHOT_QUIET`, `SNAPSHOT_LIMIT` (seconds) |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` (`RegisterTrackOptions`, each track property a `PublishProperty`) returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
@@ -51,22 +54,28 @@ without a row here is a bug.
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
-| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
+| The default transport factory, to wrap: the runtime's WebTransport, `framing: 'webtransport'`, `TRANSPORT_UNAVAILABLE` where there is none or it cannot negotiate protocols | `webTransport()` returns `RelayTransportFactory` | `caprid_relay.quic.connect_quic` is the default and is already public; the Python SDK dials no WebTransport |
+| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` (`NativeQuicTransportOptions`: `ca`, `serverCertificateHashes`, each hash a `CertificateHash`) returns `NativeQuicTransportFactory`; each call returns `NativeQuicConnection` (`transport`, a `NativeQuicMoqtTransport` with the selected `protocol`; `ready`; `framing: 'native-quic'`) | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
 | How many unidirectional streams the relay may keep open to a native QUIC connection at once (the MAX_STREAMS credit granted) | `nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams })` from `@caprid/relay-quic`: 1000 by default, an integer from 1 to 65535 | not applicable: aioquic raises the limit itself as streams are used (128, doubled whenever more than half is used) |
 | Write a qlog trace per native QUIC connection | `nativeQuicTransport({ qlogDir })` from `@caprid/relay-quic`, or `RELAY_QUIC_QLOG_DIR` | not yet (TypeScript only) |
-| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
-| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`) | not applicable |
+| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` returns `WebSocketTransportFactory`; each call returns `WebSocketConnection` (`transport`, a `WebSocketMoqtTransport` with the selected `protocol`; `ready`; `framing: 'websocket'`) | not applicable: the Python SDK ships no WebSocket adapter (#321) |
+| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`); returns `FallbackTransportFactory`, each call returning `FallbackConnection` (`transport`, a `FallbackTransport`; `ready`; `framing`, a `FallbackCarrier`: `'webtransport'` until WebSocket wins) | not applicable |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options, buffer?)` (`buffer`: `SubscriptionEventOptions`) returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
 | Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` (`ConnectSupervisedPublisherOptions`) returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` |
 | Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` (`ConnectSupervisedSubscriberOptions`) returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` |
+| Open one connection that publishes, subscribes and reconnects, one generation per connection | `connectSupervisedRelay(options)` (`ConnectSupervisedRelayOptions`) returns `SupervisedRelay`: the supervised subscriber's wants and views, `publish()`, `generation`, `onGeneration({ generation })` | `connect_supervised_relay(url, ...)` returns `SupervisedRelay`, with the supervised subscriber's wants and views, `publish()`, `generation` and an awaitable `close()`. `on_generation(generation)` receives the field itself |
+| Publish a root on every connection of a supervised relay | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `registerTrack()`, `close()`) | `relay.publish(root)` returns `SupervisedPublication` (`root`, `namespace`, `register_track()`, `close()`) |
 | One supervised publisher connection and the namespace it serves | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `onGeneration(info)` | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `on_generation(info)` |
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
+| Follow the roots publishing under a prefix, across reconnects and rotations | `subscriber.publishingRoots(PublishingRootsOptions, PublishingRootsHandlers)` (`prefix`) returns `PublishingRoots` (`loaded`, `present`, `close()`) | `subscriber.publishing_roots(prefix, PublishingRootsHandlers)` returns `PublishingRoots` (`loaded`, `present` as a tuple, `close()`) |
+| One root publishing under a prefix | `PublishingRoot` (`id`, `namespace`) | `PublishingRoot` (`id`, `namespace`) |
+| A publishing-roots view loaded, or roots were added or removed | `onChanged(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `onError(error)` | `on_changed(change)` with `PublishingRootsChange` (`added`, `removed`, `present`, `initial`); `on_error(error)` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
-| Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | not yet (TypeScript only) |
+| Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | `subscriber.catch_up(key)`; `on_restarted` reason `"catch-up"` |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
@@ -76,27 +85,45 @@ without a row here is a bug.
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
-returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb.
+returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb. A
+standing request reports through synchronous handlers instead, as `subscribe`, `want` and
+`publishingRoots` do.
 
-## Connection roles: `connectRelaySubscriber`, `connectRelayPublisher`
+## Connections: `connectRelay`, `connectRelaySubscriber`, `connectRelayPublisher`
 
-A Relay connection has one role. A subscriber connection can subscribe, fetch, and query track
-status; it cannot publish. A publisher connection announces one namespace and serves tracks in it;
-it cannot subscribe. Each uses its own transport and its own token, and the application owns both
-connections' shutdown.
+A Relay connection does one of three things, and its entry point says which. A subscriber
+connection can subscribe, fetch, query track status and discover namespaces; it cannot publish. A
+publisher connection announces one namespace and serves tracks in it; it cannot subscribe. A
+connection from `connectRelay` does both: it is a `RelaySubscriber` with `publish()`, which
+announces any number of namespaces. The application owns every connection's shutdown.
 
-`connectRelay` was the subscriber entry point. Next to `connectRelayPublisher` it read as the
-general or bidirectional way in, and its result type `RelayConnection` said nothing about what the
-connection could do. The names now carry the role: `connectRelaySubscriber` returns a
-`RelaySubscriber`, `connectRelayPublisher` returns a `RelayPublisher`, and a reader who sees either
-knows which token it needs and which operations it has.
+`connectRelay` names the connection that does both because it is the general way in: one
+connection, one token, everything MOQT lets a session do. The name had a different meaning before
+2026-11. It was the subscriber entry point, and next to `connectRelayPublisher` it read as the
+general or bidirectional way in, which that connection was not, while its result type
+`RelayConnection` said nothing about what the connection could do. It was renamed
+`connectRelaySubscriber`. In 2026-11 the SDK gained a connection that publishes and subscribes
+(MOQT gives a session no role, and moq-relay serves both directions on one session; see
+behavior.md, "One connection that publishes and subscribes"), and the bare name now means what it
+always seemed to. The role-named entry points stay: `connectRelaySubscriber` and
+`connectRelayPublisher` say which token a connection needs and which operations it has.
 
-Not adopted: keeping `connectRelay` as the short, default entry point (subscribing is not more
-fundamental than publishing, and the asymmetry is what caused the confusion); `RelayConnection` as a
-shared base type (the two roles share a lifetime implementation, not an API).
+`RelaySession` is the result type: one MOQT session, both directions. It extends `RelaySubscriber`,
+so anything that takes a subscriber (a supervised subscriber's connection, a player's track source)
+takes it unchanged. In Python the two share every subscriber method and property, but neither
+subclasses the other. A session's `close()` is a coroutine, because it waits for its publications'
+groups as `RelayPublisher.close()` does. `RelaySubscriber.close()` returns at once, and a type
+checker refuses a coroutine that overrides a plain method. `RelayPublication` is one namespace the
+connection announces, with the tracks it serves. It is not a "publisher", which in this vocabulary
+is a connection, nor an "announcement", because it also serves the tracks and owns their writers. Its options type is
+`ConnectRelaySessionOptions`, because `ConnectRelayOptions` already names what every connection
+takes.
 
-The connection options follow the same split
-([issue #72](https://github.com/muxinc/relay-sdks/issues/72)). `ConnectRelayOptions` is what both
+Not adopted: `connectRelaySession` (longer, for no gain once the bare name was free of its old
+meaning); `RelayConnection` again as the result type (the objection to it stands);
+`connectRelayPeer` / `RelayPeer` ("peer" says nothing about publishing or subscribing).
+
+The connection options follow the same split. `ConnectRelayOptions` is what both
 roles take: endpoint, token provider, lifetime signal, connection deadline, and transport. Each
 role's type extends it with what only that role uses. `ConnectRelaySubscriberOptions` adds
 `requestTimeoutMs`, the deadline for a subscription's initial response.
@@ -179,8 +206,7 @@ The handler used to be `onDone`. That reads as "this subscription is done, nothi
 which is wrong in both halves: trailing objects can still come, and the subscription is not over.
 `onPublisherDone` names the party that is done. The terminal signal for the subscription itself,
 settling once when it can no longer deliver, is `ended`
-([issue #68](https://github.com/muxinc/relay-sdks/issues/68), and
-[below](#subscription-readiness-and-termination-relaysubscription-subscribed-ended)). It is not
+([below](#subscription-readiness-and-termination-relaysubscription-subscribed-ended)). It is not
 named "drained" or "complete" because the protocol cannot establish that property.
 
 ## Subscription acceptance: `onSubscribed`
@@ -195,7 +221,7 @@ names agree.
 `onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected the
 subscription or the request itself failed before acceptance (request timeout, or the request stream
 failing). A REQUEST_ERROR can also arrive after acceptance, when a relay refuses an `update()`, and
-it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+it ends the subscription then too.
 moq-relay sends neither REQUEST_OK nor REQUEST_ERROR for an update: it ends the subscription with
 PUBLISH_DONE instead, so against it `onUpdateOk` / `on_update_ok` never fires and an update reaches
 `onPublisherDone` / `on_publisher_done`, not `onError`
@@ -230,7 +256,8 @@ alias would have kept the misleading name in autocomplete next to the one that r
 Consumers inside the repository (examples, live smoke tests, the Video.js streaming example) moved
 in the same change. The packages have been published since 0.1.0. Before 1.0, a minor version can
 break the API, and the changelogs ([TypeScript](../ts/CHANGELOG.md), [Python](../python/CHANGELOG.md))
-say what each rename changed and what to do about it.
+say what each rename changed and what to do about it. `connectRelay` is the one name that came back, with a new
+meaning; [Connections](#connections-connectrelay-connectrelaysubscriber-connectrelaypublisher) says why.
 
 ## One error identity: `RelayError`, `code`, `phase`
 
@@ -291,18 +318,57 @@ The iterator ends with the subscription error classes (`SubscriptionRequestError
 subscription in the draft's terms, and a second set of classes with the same meanings would only
 add names. The prefix is a namespace prefix, matched field by field, never a string prefix.
 
+`loaded` marks the end of the relay's initial snapshot: the namespaces announced when the request was
+accepted have all been yielded, so an empty set means nobody is there, not that nothing has arrived.
+It is an event in the stream, not a promise, so it is ordered with the entries it ends. Not adopted:
+`synced` (MoQ Active Count's word, which promises an exact count that the quiet-window estimate
+cannot); `ready` (the connection's word for its SETUP); `snapshot` (it names what came before the
+marker, not the marker).
+
 Not adopted: `announcements()` (CONTEXT.md keeps "announcement" out because it names the act and
 the relay's state interchangeably); `watchNamespaces()` (a verb, where every other iterator is named
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
 
+## Publishing roots: `publishingRoots`, `PublishingRoot`, `onChanged`
+
+`subscriber.publishingRoots({ prefix }, { onChanged })` reports the roots that are publishing now
+under a prefix ([behavior.md](behavior.md#publishing-roots)). A root is the namespace one field
+below the prefix that a publisher announces at or one field under, as CONTEXT.md defines it, and
+publishing means announced, not necessarily sending objects. The name says what the relay knows, a root with
+something announced, and claims nothing about who is behind it. The option is `prefix`, as on
+`namespaceEvents`. The call is a noun for what it keeps, as `want` is, because it is a standing
+request on the supervisor, not a single request: it outlives connections and reports through
+synchronous handlers, as a want does. `onChanged` takes one `PublishingRootsChange` (`added`,
+`removed`, `present`, `initial`), so the load and every later change go through one handler: a
+caller that acts on "this root is publishing" has one place to do it, and cannot forget the roots
+already there. `added` and `removed` describe a set changing, and leave `joined` and `left` to the
+presence helper, whose roster is people. `present` and `loaded` on the returned `PublishingRoots`
+are state, read as properties.
+
+Names considered for the call and not adopted: `members` (room-coupled, and `PresenceMember` in the
+presence helper is a different member, one with a document); `peers` (rejected by the operator);
+`publishers` (reads as the `RelayPublisher` and `SupervisedPublisher` handles); `publisherRoots`
+(asserts one publisher per entry, where a root is whatever announced under it); `children` and
+`nodes` (too generic); `feeds` (rejected); `announcers` (the runner-up: accurate, but it names the
+actor where the entries are namespaces).
+
+Also not adopted: an iterator returning coalesced changes (it suits a consumer that awaits per root,
+but it reads the set one async hop behind the want handlers it would drive, and the supervised
+layer reports through handlers); separate `onLoaded`, `onAdded` and `onRemoved` (two entry points
+for one fact, and forgetting `onLoaded` silently drops every root already there); `presence` (the
+per-participant document a later helper adds on top); `roster` (the application's list, which may
+hold more than the relay knows); `watch…()` and `follow…()` (CONTEXT.md lists "watch" and "follow"
+among the words to avoid for a standing request); a `depth` option (no caller needs a root deeper
+than one field, and it can be added without breaking this shape).
+
 ## Room-rooted endpoints: `roomEndpoint`
 
 `roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path, and
 `roomEndpoint(room)` does the same for `DEFAULT_ENDPOINT`, the hosted Relay that most applications
 use. A connection to that URL names namespaces relative to the room
-([Subscribing](behavior.md#subscribing), [issue #348](https://github.com/muxinc/relay-sdks/issues/348)).
+([Subscribing](behavior.md#subscribing)).
 It is a pure function: it builds a string and connects nothing. "Room" is the word the docs already
 use for the path a token grants, and the result is an endpoint, the same noun as `url` on every
 connect call, so the name says what it returns, as `mediaTrackProperties` does. `room` is a
@@ -325,16 +391,14 @@ existing call, and an endpoint read before its path matches the URL it builds); 
 `roomEndpoint(room, { endpoint })` (one optional value does not need a bag).
 
 A connect call given no `url` dials `DEFAULT_ENDPOINT` rooted at the token's `root` claim, the URL
-`roomEndpoint` builds from that root ([token-rooted endpoint](behavior.md#token-rooted-endpoint),
-[issue #374](https://github.com/muxinc/relay-sdks/issues/374)). It adds no name: `url` becomes
+`roomEndpoint` builds from that root ([token-rooted endpoint](behavior.md#token-rooted-endpoint)). It adds no name: `url` becomes
 optional. Like the rejected `room` option, it takes the URL out of application code. It was taken
 anyway because it removes the step quickstart users get wrong, copying their token's root into
 `roomEndpoint`, and the shortest call stays the recommended room-rooted form, with relative
 namespaces unchanged. A token that names no usable root fails before dialing with a message that
 says to pass `url`, and the relay still verifies the token. Not adopted: defaulting `url` to the bare
 `DEFAULT_ENDPOINT` (the shortest call would be the less recommended endpoint, and room-relative
-namespaces there fail far from the cause, as in
-[issue #119](https://github.com/muxinc/relay-sdks/issues/119)); the `room` option (the user would
+namespaces there fail far from the cause); the `room` option (the user would
 still copy the root in by hand).
 
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
@@ -361,7 +425,13 @@ They live in `@caprid/relay` and `caprid_relay` themselves, not in a separate pa
 
 **Generation** names one supervised publisher connection and the namespace field it serves. Each
 reconnect is a new publisher to the relay, and the word says so: it is not a session, an epoch, or a
-reconnect count.
+reconnect count. On a supervised relay a generation is still one connection, and every root it
+publishes carries the same field.
+
+`connectSupervisedRelay` is `connectRelay` supervised, as the other two are their primitives
+supervised; its result is a `SupervisedRelay`, not a `SupervisedSession`, because "session" is the
+core's word for the MOQT session underneath. Each root it serves is a `SupervisedPublication`, the
+supervised counterpart of `RelayPublication`.
 
 `want(key, ...)` is declarative: it states which track the application wants, keyed by a name the
 application chooses, and the supervisor owns how that stays true. `unwant` undoes it. Not adopted:
@@ -469,6 +539,18 @@ above: the package no longer dials WebTransport (#232), so the old name was a mi
 subclass made a stop a type rather than a place. Not adopted: `TransportError`, which reads as the
 `TRANSPORT_ERROR` code it is wrapped in, and a `StreamStopped` subclass kept beside the shape.
 
+## The default transport factory: `webTransport()`
+
+`webTransport()` returns the factory the TypeScript connect functions use when `createTransport` is
+left out, so a caller can wrap it (#445). It is named after what it dials and returns a factory,
+as `nativeQuicTransport()` and `createWebSocketTransport()` do, which leaves room for options. Its
+return type is `RelayTransportFactory`, not the DOM `WebTransport`, so the package's declarations
+still compile for a Node project without the DOM lib. Not adopted: `createBrowserTransport`, the
+internal name it had (it dials whatever `WebTransport` the runtime has, not only a browser's);
+`createWebTransportTransport` (stutters); a `browserTransport` constant (unlike the other
+factories, it could not take options later). Python needs no counterpart:
+`caprid_relay.quic.connect_quic` is the default `create_transport` and is already public.
+
 ## Names considered and left alone
 
 - `RelayTrackOptions`, the subscribe request shape (`namespace`, `track`, `parameters`), and
@@ -478,7 +560,7 @@ subclass made a stop a type rather than a place. Not adopted: `TransportError`, 
   callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
-- Everything in `@caprid/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
+- Everything in `@caprid/moq-core` (its `/wire` entry included) and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
   `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
   product packages re-export the same short list of core names (the "Protocol types borrowed from
   the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
@@ -539,7 +621,7 @@ types rather than the builder's `VideoTrackInfo` / `AudioTrackInfo` / `DataTrack
 read track may be any role and any packaging (moq-rs `cmaf`, `legacy`) and carries the namespace,
 packaging, and live status the builder fixes. The TypeScript parser was internal as
 `parseIndependentCatalog` (with `MoqCatalog` / `MoqCatalogTrack` from Video.js); those names are gone,
-with no alias. Media publishing-handle and object-to-frame reader names remain provisional.
+with no alias. The one-call media publishing handle was never built, so it has no name.
 
 The TypeScript-only WebCodecs helpers in `@caprid/moq-media` are `videoTrackFromDecoderConfig`,
 `audioTrackFromDecoderConfig`, `chunkToLocFrame`, `LocFrame`, and `ChunkToLocFrameOptions`.
@@ -550,8 +632,7 @@ Python keeps its PyAV Annex B conversion helpers.
 
 ## Shared timeline and playout clock
 
-The broadcast and playout clocks of [media-layer.md](media-layer.md#shared-timeline-and-playout-clock)
-([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), exported from `@caprid/moq-media` and
+The broadcast and playout clocks of [media-layer.md](media-layer.md#shared-timeline-and-playout-clock), exported from `@caprid/moq-media` and
 `moq_media`. TypeScript uses factories that return interfaces, like the rest of that package; Python
 uses classes, like `CatalogService` and `FrameWriter`.
 
@@ -591,8 +672,7 @@ instead.
 ## Media Timeline track
 
 msf-01 §7's Media Timeline track, which maps a broadcast's media time to wall-clock time
-([media-layer.md](media-layer.md#media-timeline-track),
-[issue #291](https://github.com/muxinc/relay-sdks/issues/291)). Exported from `@caprid/moq-media` and
+([media-layer.md](media-layer.md#media-timeline-track)). Exported from `@caprid/moq-media` and
 `moq_media`.
 
 | Concept | TypeScript | Python |
@@ -614,14 +694,12 @@ monotonic source. `depends` keeps msf-01's JSON name rather than Video.js's `dep
 the reader's other fields. `MediaTimeline` is the [glossary](../CONTEXT.md)'s media timeline:
 "timeline" alone also names the clock's source and sample timelines. Its `add` takes what
 `mediaTimelineEntry` takes, and it has no `clear()`: a supervised publisher's
-next generation is a new broadcast with a new timeline
-([issue #292](https://github.com/muxinc/relay-sdks/issues/292)). Not added: helpers for the §7.4
+next generation is a new broadcast with a new timeline. Not added: helpers for the §7.4
 template, incremental documents, and a reader for MSF_COMPRESSION payloads.
 
 ## Media subscribing: `FrameSequencer`, `FrameReader`
 
-Reading a track as frames in decode order within the playout clock's target latency
-([issue #303](https://github.com/muxinc/relay-sdks/issues/303)); its contract is the "Media
+Reading a track as frames in decode order within the playout clock's target latency; its contract is the "Media
 subscribing" section of [behavior.md](behavior.md#media-subscribing). The sequencer is format-aware
 and lives in `@caprid/moq-media` and `moq_media`; the reader is transport glue and lives in
 `@caprid/relay/media` and `caprid_relay.media`, which do not depend on the format packages, so it takes the
@@ -638,7 +716,7 @@ sequencer as an argument.
 | Hold early frames and release each at its timestamp, off unless used | `timestampPlayout: true` or `TimestampPlayoutOptions { horizonUs?, leadUs? }` on `FrameSequencerOptions` (frame grouping; `leadUs` a number or a function read at every poll) | — |
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
-| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, behind, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, behind, skipped_groups, resyncs, untimed)` |
 | A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
@@ -648,8 +726,7 @@ sequencer as an argument.
 too late, but holds nothing for smoothing, which the audio player's jitter buffer does. "Reader"
 pairs with the frame writer. "Target latency" follows msf-01's catalog field in name only: msf-01
 §5.2.8 measures end-to-end wall-clock latency, while this budget is how far behind the playout
-position a frame may still be delivered, so the catalog field is not read. Not adopted from
-[issue #303](https://github.com/muxinc/relay-sdks/issues/303): `targetLatencyMs` (every clock option
+position a frame may still be delivered, so the catalog field is not read. Not adopted: `targetLatencyMs` (every clock option
 is in microseconds); the reader taking the clock and grouping itself (the product package cannot
 import the format package).
 
@@ -663,8 +740,7 @@ a relay can be asked about.
 
 `mediaSubscribeParameters` says what it returns, like `mediaTrackProperties`: the `parameters` that
 `subscribe`, `want` and `switchTo` take, so it pairs with the publisher's helper and lives beside it
-in `@caprid/relay/media` and `caprid_relay.media`
-([#337](https://github.com/muxinc/relay-sdks/issues/337)). It takes the whole parameters as
+in `@caprid/relay/media` and `caprid_relay.media`. It takes the whole parameters as
 overrides rather than a `subscriberPriority` option, so a viewer adds a location filter without
 spreading two objects. Not adopted: reading the publisher's `0x0E` from SUBSCRIBE_OK (the priority
 is chosen before SUBSCRIBE, and changing it later ends the subscription on moq-relay); a default
@@ -674,8 +750,7 @@ inside `subscribe` (the product package knows nothing about media kinds); docume
 ## Audio playout: `createAudioPlayer`, `AudioPlayerInput`
 
 A headless player for decoded audio: WebCodecs decoding, an adaptive jitter buffer in an
-`AudioWorklet`, a mix, and reports to the playout clock
-([issue #314](https://github.com/muxinc/relay-sdks/issues/314)); its design is in
+`AudioWorklet`, a mix, and reports to the playout clock; its design is in
 [media-layer.md](media-layer.md#audio-player). TypeScript only, in `@caprid/moq-media`: a Python bot has
 no output device. It takes frames, not a subscription, so a frame reader's `onFrame` feeds it and
 the format package still does not depend on the product package.
@@ -709,7 +784,7 @@ timeline already use "source", and a mixer's inputs are what this is. "Jitter bu
 [glossary](../CONTEXT.md)'s name for what the audio path holds for smoothing, which the frame
 reader does not; its options and counters say `jitterTarget` so they do not read as the clock's
 target latency. "Cut", not "flush" or "interrupt": it names a timeline range dropped
-([issue #320](https://github.com/muxinc/relay-sdks/issues/320)'s interruption is one use), and
+(an interruption is one use), and
 `flush` reads as WebCodecs' "finish pending work". "Loopback" is the word
 [media-layer.md](media-layer.md#playout-clock-player) already uses for the WebRTC path. The render
 clock moved here from the WebCodecs example, which still re-exports it. Not adopted from
@@ -718,8 +793,7 @@ method for the loopback (it is a function over any node, so the v10 renderer can
 `createPlayoutClock({ audioOnly: true })` preset or an automatic audio-only default (the clock is
 pinned by shared vectors in both SDKs; the constant changes nothing for Python).
 
-`playbackRate` is Web Audio's and `HTMLMediaElement`'s name for the same ratio
-([issue #329](https://github.com/muxinc/relay-sdks/issues/329)); the Video.js renderer applied its
+`playbackRate` is Web Audio's and `HTMLMediaElement`'s name for the same ratio; the Video.js renderer applied its
 latency nudges to `AudioBufferSourceNode.playbackRate` before it used the player. `AudioInputClock`
 names the members the input calls, rather than `Pick<PlayoutClock, …>`, because its `reportAudio`
 takes a third argument that `PlayoutClock` does not: the input's stats, refreshed with the report.
@@ -731,9 +805,45 @@ bumped per start: `reports` counts reports, and two meanings in one counter woul
 to read. `dryAtUs` and `heldUntilUs` are timeline timestamps, so they end in `Us` like `fromUs` and
 `untilUs`.
 
+## Video playout: `createVideoPlayer`
+
+A headless player for one video track. It decodes with WebCodecs and hands each decoded frame to a
+render callback when the playout clock says it is due. Its design is in
+[media-layer.md](media-layer.md#video-player). TypeScript only, in `@caprid/moq-media`, as the audio
+player is, since a Python process has no display. It takes frames, not a subscription, so a frame
+reader's `onFrame` feeds it.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| Play one video track on the playout clock | `createVideoPlayer({ clock, decoderConfig, render, onError })` → `VideoPlayer` (`VideoPlayerOptions`) | — |
+| What the player calls on its clock; a `PlayoutClock` qualifies | `VideoPlayerClock` (the clock's `due` and `localNow`) | — |
+| Hand it a frame in decode order | `player.push(frame)` (`VideoPlayerFrame`: `timestampUs`, `payload`, `key`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
+| Show a decoded frame, borrowed until the callback returns | `render(frame)` on `VideoPlayerOptions` | — |
+| Decode with another config from the next keyframe | `player.configure(decoderConfig)` | — |
+| Replace the timeline now, as a `restart` frame would | `player.reset()` | — |
+| Counters | `player.stats`: `VideoPlayerStats { decoded, shown, dropped, skipped, decoderResets, errors, queued, lastOffsetUs }` | — |
+| When a join's steps happened | `player.joinPhases`: `VideoPlayerJoinPhases { createdUs, firstPushUs, firstDecodedUs, firstShownUs }` | — |
+| Stop | `player.close()`, `player.closed` | — |
+| Draw frames onto a canvas | `canvasRenderer(canvas)` (`VideoCanvas`, which an `HTMLCanvasElement` or an `OffscreenCanvas` is) | — |
+| A catalog video track's decoder config | `videoDecoderConfigFromTrack(track)` | — |
+
+It is a "player", as for audio, because it decodes and presents. A video track has one decoder, so
+there are no inputs. The callback is `render`, not `sink` or `onFrame`. `onFrame` is the frame reader's callback for
+encoded frames, and `render` names what the callback does with a decoded one. `shown` and `dropped`
+follow the clock's `show` and `drop` decisions, and `lastOffsetUs` is the `offsetUs` of the last
+`show`. `skipped` is its own counter because it needs a different fix from `dropped`. `configure`
+is WebCodecs' word for the same change on a decoder. `VideoCanvas` names the two members
+`canvasRenderer` uses, as `AudioPlayerContext` does for Web Audio, so the package builds against the
+WebWorker library with no DOM types. `VideoPlayerClock` is `Pick<PlayoutClock, …>` rather than its
+own interface, unlike `AudioInputClock`, because the player calls the clock exactly as a
+`PlayoutClock` takes it. Not adopted: a canvas in the options instead of `render` (a sink that is not
+a canvas would still need the callback, and `canvasRenderer` gives the canvas case one line); and a
+worker message bridge (the player runs in a worker as it is, and what crosses to the worker is the
+application's choice).
+
 ## Interrupts: `INTERRUPT_TRACK`, `buildInterrupt`, `parseInterrupt`
 
-The talker's side of a cut ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)): one
+The talker's side of a cut: one
 message on a data track that tells listeners to drop audio they already hold. Its design is in
 [media-layer.md](media-layer.md#interrupt-track). Both format packages.
 
@@ -762,8 +872,7 @@ matches them belongs to the listener.
 
 ## Transcripts: `TRANSCRIPT_TRACK`, `buildTranscriptSegment`, `Transcript`
 
-The text of a talker's audio, placed on its timeline
-([issue #320](https://github.com/muxinc/relay-sdks/issues/320)). Its design is in
+The text of a talker's audio, placed on its timeline. Its design is in
 [media-layer.md](media-layer.md#transcript-track). Both format packages.
 
 | Concept | TypeScript | Python |
@@ -790,8 +899,7 @@ already says what was cut), and a player method (the transcript is text, not aud
 
 ## Opus encoding: `OpusEncoder`, `OpusDecoder`
 
-PCM to Opus and back for a server-side talker such as a voice bot
-([issue #320](https://github.com/muxinc/relay-sdks/issues/320)). Python only, in `moq_media.opus`,
+PCM to Opus and back for a server-side talker such as a voice bot. Python only, in `moq_media.opus`,
 on PyAV's libopus and installed with the `opus` extra (`caprid-moq-media[opus]`, [ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
 A browser has WebCodecs' `AudioEncoder` and `AudioDecoder`, which the TypeScript helpers already
 take.
@@ -819,8 +927,8 @@ a resampler's output length varies from packet to packet.
 ## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 
 The media publishing policy the Video.js example proved, lifted into each product package
-([issue #84](https://github.com/muxinc/relay-sdks/issues/84) for Python as `caprid_relay.media`,
-[issue #263](https://github.com/muxinc/relay-sdks/issues/263) for TypeScript as the
+(for Python as `caprid_relay.media`,
+for TypeScript as the
 `@caprid/relay/media` subpath); its contract is the "Media publishing" section of
 [behavior.md](behavior.md#media-publishing). Neither root package exports these names; the
 `media` exports are pinned by `python/packages/caprid-relay/tests/test_exports.py` and by the
@@ -839,9 +947,11 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
 | What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |
 | One encoded frame as the writer sees it | `Frame { payload, key, properties?, discontinuity? }`; `@caprid/moq-media`'s `LocFrame` qualifies | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
-| Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
+| Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8; none under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
+| A subscription's or a want's handlers that deliver only the newest value of a latest-wins track | `createLatestValueReader({ onValue, late?, onCatchUp? })` → `LatestValueReader` (`LatestValueReaderOptions`); spread into `subscribe` or `want` handlers | `LatestValueReader(on_value, *, late=None, on_catch_up=None)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)` |
+| What a latest-value reader dropped and delivered | `reader.stats`: `LatestValueStats { delivered, superseded, late, catchUps }` | `reader.stats`: `LatestValueStats(delivered, superseded, late, catch_ups)` |
 | A media track's default delivery timeout and publisher priority, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs, publisherPriority })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None, publisher_priority=None)` (`MediaKind`) |
 | The writer ended, and how | `writer.closed`, `writer.ended` | `writer.closed`, `writer.ended` |
 | Groups opened and objects accepted | `writer.groups`, `writer.objects` | `writer.groups`, `writer.objects` |
@@ -860,7 +970,7 @@ own clock. "Backlog", not "queue": the writer queues nothing it would rather sen
 bound is what it drops at. "Keyframe needed", not "keyframe request": NEW_GROUP_REQUEST is the
 relay's request, which the SDKs do not send.
 
-Not adopted from [issue #263](https://github.com/muxinc/relay-sdks/issues/263): `createMediaSink`
+Not adopted: `createMediaSink`
 and `push()` (the frame writer already is that concept, and `write` is the SDK's one verb for
 sending); `sink.hasDemand` (the track has it, and its `demandChanges()`); `sink.attach(writer)` (a
 supervised publisher's writers outlive its generations, and a move to a new one is a demand change);
@@ -868,7 +978,7 @@ supervised publisher's writers outlive its generations, and a move to a new one 
 
 `mediaTrackProperties` says what it returns, like `locTrackProperties`, and what it is for: the
 media tier's part of a media track's properties. "Target latency" is the reader's name for the same
-budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)), so one setting reads the same on
+budget, so one setting reads the same on
 both sides. Not adopted: a `timescale` option returning the LOC Timescale too (the product package
 does not depend on `@caprid/moq-media`, so the caller adds `locTrackProperties()`); an option on
 `registerTrack` (it knows nothing about media); an option on the frame writer (it receives a track
@@ -878,16 +988,52 @@ timeout (see behavior.md).
 
 `publisherPriority` is draft-22's name for what `0x0E` carries (Default Publisher Priority), so it
 reads as the protocol value it sets, not as a scheduling promise: on moq-relay 0.17 only the
-viewer's subscriber priority orders delivery ([#316](https://github.com/muxinc/relay-sdks/issues/316)), which
-`mediaSubscribeParameters` sets ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
+viewer's subscriber priority orders delivery, which
+`mediaSubscribeParameters` sets.
 
 Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`
 (redundant on a type named for frames); an events iterator for the catalog service (two counters
 answer what the example's `finished` line asks); exceptions for interrupted and ended frames (see
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
-changes, gets `DocumentService` instead of a mode). The `register_media` handle in
-[media-layer.md](media-layer.md) remains a proposal.
+changes, gets `DocumentService` instead of a mode).
+
+"Latest-value reader" pairs with the frame reader and with the document service it reads. The
+publisher sends the latest value, and the reader delivers it. "Superseded", not "stale" or "old",
+because a newer value was already judged, whatever its age. The predicate is `late`, as in the
+sequencer's late drop, because the value arrived too late to act on. Not adopted: `maxAge` (the MoQ Timestamp
+extension's subscription parameter, which a relay acts on); `stale` (a want's `staleAfterMs` is
+silence, not lateness); the reader calling `catchUp` itself (it would need the subscriber and the
+key, and a plain subscription has no catch-up, so `onCatchUp` stays the application's, as on a frame
+reader).
+
+## Presence: `publishPresence`, `createPresenceView`, `PRESENCE_TRACK`
+
+The [presence track](media-layer.md#presence-track) convention and its TypeScript helpers in
+`@caprid/relay/media` ([issue #422](https://github.com/muxinc/relay-sdks/issues/422)). Presence is
+the per-participant document that the publishing-roots section above leaves to a later helper. Here a
+member is a publishing root with a presence document, so the helper keeps `PresenceMember` and the
+roster words `joined` and `left`. The publisher side is a verb, because the call starts serving at
+once and has no `serve()` to run. The listener side is a factory that returns a view, as the other
+media helpers do, and it reports through one synchronous `onChanged`, as `publishingRoots` does.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The presence track's default name | `PRESENCE_TRACK` (`'presence'`) | not yet (TypeScript only) |
+| The default heartbeat | `PRESENCE_HEARTBEAT_MS` (2000) | not yet (TypeScript only) |
+| Serve this member's presence document on its supervised publisher | `publishPresence(publisher, document, { track, heartbeatMs })` → `PresencePublisher` (`document`, `update(document)`; `PublishPresenceOptions`) | not yet (TypeScript only) |
+| Follow who is present under a prefix and what each member says | `createPresenceView(subscriber, { prefix, track, heartbeatMs, parse }, { onChanged, onError })` → `PresenceView` (`loaded`, `present`, `close()`; `PresenceViewOptions`, `PresenceViewHandlers`) | not yet (TypeScript only) |
+| One member on the roster | `PresenceMember` (`id`, `namespace`, `document`, `since`, `stale`) | not yet (TypeScript only) |
+| The roster loaded or changed | `onChanged(change)` with `PresenceChange` (`joined`, `left`, `updated`, `stale`, `resumed`, `present`, `initial`) | not yet (TypeScript only) |
+
+Not adopted: `createPresenceService` (a service in this package is something whose `serve()` the
+caller runs); `memberPresence()` and `presence()` (they name the data, not the view the call
+returns); `roster` (the application's list, which may hold more than the relay knows); a
+`PresenceFormat` codec (presence is JSON, and `parse` is the typed boundary); an envelope with a
+sequence number, a sender time or the heartbeat interval (the transport orders a member's
+documents already, and the fields would be wire rules every port must keep); `generation` on
+`PresenceMember` (it changes on every rotation, which reports nothing).
+
 
 ## Client diagnostics: `createDiagnostics`, `publishDiagnostics`, `followDiagnostics`
 

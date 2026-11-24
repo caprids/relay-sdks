@@ -37,7 +37,11 @@ class SequencedFrame:
     timestamp_us: int
     """The LOC timestamp in microseconds on the broadcast timeline."""
     key: bool
-    """Whether the frame starts its group: a keyframe under keyframe grouping, every frame under frame grouping."""
+    """Whether the frame starts its group (object 0): a keyframe under keyframe grouping.
+
+    Under frame grouping every frame decodes on its own, and this is ``True`` for every frame only when each group
+    holds one, as a frame writer sends them.
+    """
     payload: bytes
     properties: list[KeyValuePair]
     discontinuity: FrameDiscontinuity | None = None
@@ -62,7 +66,11 @@ class FrameSequencerStats:
     delivered: int = 0
     """Frames returned by ``poll()``."""
     late: int = 0
-    """Frames discarded: too late, or behind what was already delivered."""
+    """Frames discarded as too late against the clock's position, and frames dropped when more were held than the
+    bound allows."""
+    behind: int = 0
+    """Frames discarded on arrival because a later frame was already delivered or their group was already passed over:
+    out of order."""
     skipped_groups: int = 0
     """Groups abandoned or passed over without being delivered whole."""
     resyncs: int = 0
@@ -152,7 +160,7 @@ class FrameSequencer:
                 self._bound_held()
             return
         if self._behind(obj.group_id, obj.object_id):
-            self.stats.late += 1
+            self.stats.behind += 1
             return
         group = self._group_of(obj.group_id)
         if obj.object_id in group.frames:

@@ -61,6 +61,9 @@ class ControlledDataStream:
     async def write(self, data: bytes) -> None:
         await self._writer.write(data)
 
+    async def close(self) -> None:
+        await self._writer.close()
+
     def reset(self, error: object = None) -> None:
         self._writer.abort(error)
 
@@ -228,6 +231,35 @@ class FakeTransport:
                 chunks.append(chunk)
 
         return asyncio.get_running_loop().create_task(collect())
+
+    def open_incoming_request(self, data: bytes) -> ReceiveStream:
+        """Open a server-initiated bidirectional stream carrying ``data`` then FIN.
+
+        Returns the client's response direction unread: a response write settles only once the test reads it.
+        """
+        server_to_client = self._pipe()
+        client_to_server = self._pipe()
+        self._incoming_bidi.push(BidirectionalStream(readable=server_to_client, writable=client_to_server))
+
+        async def write_and_close() -> None:
+            await self._write_quietly(server_to_client, data)
+            try:
+                await server_to_client.close()
+            except Exception:
+                pass
+
+        asyncio.get_running_loop().create_task(write_and_close())
+        return client_to_server
+
+    def open_controlled_incoming_request(self) -> tuple[ControlledDataStream, ReceiveStream]:
+        """Open a server-initiated bidirectional stream the test writes to and never FINs.
+
+        Returns the server's sending direction and the client's response direction, unread.
+        """
+        server_to_client = self._pipe()
+        client_to_server = self._pipe()
+        self._incoming_bidi.push(BidirectionalStream(readable=server_to_client, writable=client_to_server))
+        return ControlledDataStream(server_to_client), client_to_server
 
     def drop_transport(self) -> None:
         """Simulate a transport-side drop (peer/network close, not a local ``close()``)."""

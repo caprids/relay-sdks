@@ -14,6 +14,7 @@ VECTORS = json.loads((SPEC / "vectors/frame-sequencer.json").read_text())
 STATS = {
     "delivered": "delivered",
     "late": "late",
+    "behind": "behind",
     "skippedGroups": "skipped_groups",
     "resyncs": "resyncs",
     "untimed": "untimed",
@@ -207,7 +208,7 @@ def test_drops_a_group_older_than_the_one_being_delivered() -> None:
     sequencer.object(obj(10, 0, stamp(10_000_000)))
     sequencer.poll()
     sequencer.object(obj(9, 0, stamp(9_900_000)))
-    assert sequencer.stats.late == 1
+    assert (sequencer.stats.late, sequencer.stats.behind) == (0, 1)
     assert clock.target_latency_us == 2_000_000
 
 

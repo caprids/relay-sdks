@@ -1,5 +1,5 @@
-"""Scripted connections for the supervisor tests: each fake stands in for one ``connect_relay_publisher``
-or ``connect_relay_subscriber`` result, and the test drives what the relay would do to it.
+"""Scripted connections for the supervisor tests: each fake stands in for one ``connect_relay_publisher``,
+``connect_relay_subscriber`` or ``connect_relay`` result, and the test drives what the relay would do to it.
 
 Mirrors ``ts/tests/helpers/supervision-fakes.ts``.
 """
@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from caprid_relay import (
     NamespaceEvent,
@@ -19,6 +20,7 @@ from caprid_relay import (
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
 )
+from caprid_relay.namespace_events import _RequestMarks
 from moq_core import Closed, KeyValuePair, MoqtObject, PublishDone, RequestError, SubscribeOk
 
 
@@ -266,12 +268,19 @@ class FakeDiscovery:
     _queue: list[NamespaceEvent] = field(default_factory=list)
     _failure: list[BaseException] = field(default_factory=list)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
+    _marks: _RequestMarks = field(default_factory=lambda: _RequestMarks(lambda: False))
 
-    def push(self, kind: str, namespace: Sequence[str]) -> None:
-        self._queue.append(NamespaceEvent(kind, tuple(namespace)))  # ty: ignore[invalid-argument-type]
+    @property
+    def failed(self) -> bool:
+        return bool(self._failure)
+
+    def push(self, kind: Literal["announced", "unannounced", "loaded"], namespace: Sequence[str] | None = None) -> None:
+        event = NamespaceEvent(kind, None if namespace is None else tuple(namespace))
+        self._queue.append(event)
         self._wake.set()
 
     def fail(self, error: BaseException) -> None:
+        self._marks.stopped = True
         self._failure.append(error)
         self._wake.set()
 
@@ -293,8 +302,8 @@ class FakeDiscovery:
         self._wake.set()
 
 
-class FakeSubscriber:
-    """A subscriber connection the test ends at will."""
+class _FakeSubscribing:
+    """What a fake subscriber and a fake session share: the subscribing side of a connection the test ends at will."""
 
     def __init__(self, expires_at: datetime | None = None) -> None:
         self.expires_at = expires_at
@@ -318,9 +327,6 @@ class FakeSubscriber:
             if not discovery.closed:
                 discovery.fail(SubscriptionConnectionClosedError(error))
         self._closed.set_result(Closed(error))
-
-    def close(self) -> None:
-        self.end()
 
     def subscribe(
         self,
@@ -354,4 +360,44 @@ class FakeSubscriber:
         return self.subscriptions[-1]
 
 
-__all__ = ["FakeDiscovery", "FakeGroup", "FakePublisher", "FakeSubscriber", "FakeSubscription", "FakeTrack", "until"]
+class FakeSubscriber(_FakeSubscribing):
+    """A subscriber connection the test ends at will."""
+
+    def close(self) -> None:
+        self.end()
+
+
+class FakeSession(_FakeSubscribing):
+    """A connection that publishes and subscribes: a fake subscriber plus one fake publisher per published namespace."""
+
+    def __init__(self, expires_at: datetime | None = None) -> None:
+        super().__init__(expires_at)
+        self.publications: dict[str, FakePublisher] = {}
+        """Each publication made on this connection, by its namespace joined with ``/``."""
+
+    def publish(self, namespace: Sequence[str]) -> FakePublisher:
+        key = "/".join(namespace)
+        if key in self.publications:
+            raise ValueError("Namespace is already published on this connection")
+        publisher = FakePublisher(namespace, self.expires_at)
+        self.publications[key] = publisher
+        # The connection's end ends its publications.
+        self.closed.add_done_callback(lambda done: publisher.end(done.result().error))
+        return publisher
+
+    async def close(self) -> None:
+        for publisher in self.publications.values():
+            publisher.end()
+        self.end()
+
+
+__all__ = [
+    "FakeDiscovery",
+    "FakeGroup",
+    "FakePublisher",
+    "FakeSession",
+    "FakeSubscriber",
+    "FakeSubscription",
+    "FakeTrack",
+    "until",
+]

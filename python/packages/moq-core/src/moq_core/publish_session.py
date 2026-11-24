@@ -4,10 +4,10 @@ The publish-side sibling of the subscribe-only driver in ``session``.
 
 Owns the protocol mechanics over an established transport: the SETUP exchange on paired
 unidirectional control streams (§6.3), and the announce-and-serve ingest flow. The peer's
-SUBSCRIBE_NAMESPACE solicitation is answered with REQUEST_OK and a NAMESPACE entry for the announced
-namespace (§9.15, §9.16), then the per-track SUBSCRIBEs the peer routes back are served (answered with
-SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each subscription's
-request stream stays open. A TRACK_STATUS for a registered track is answered as its SUBSCRIBE would
+SUBSCRIBE_NAMESPACE solicitation is answered with REQUEST_OK and a NAMESPACE entry for each announced
+namespace it covers (§9.15, §9.16), then the per-track SUBSCRIBEs the peer routes back are served
+(answered with SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each
+subscription's request stream stays open. A TRACK_STATUS for a registered track is answered as its SUBSCRIBE would
 be, with TRACK_STATUS_OK and no subscription (§9.13); every other request is refused.
 
 Flow choice: the publisher initiates no request streams at all. moq-relay 0.14.7 removed
@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 from ._tasks import observe, spawn
 from .bytes import StreamReader, utf8_encode
@@ -96,12 +97,13 @@ from .transport import (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AnnounceEnded:
-    """What ``on_announce_ended`` receives: no solicitation stream carries the announce any more.
+    """What ``on_announce_ended`` receives when no solicitation stream carries an announced namespace any more.
 
     ``error`` is a :class:`MoqtProtocolError` whose ``__cause__`` is the stream failure, if any, that
     ended the last carrier.
     """
 
+    namespace: TrackNamespace
     error: BaseException | None = None
 
 
@@ -121,6 +123,7 @@ class TrackBinding:
     either is reported as a binding with the same alias.
     """
 
+    track_namespace: TrackNamespace
     track_name: str
     track_alias: int | None
     object_delivery_timeout: int | None = None
@@ -150,6 +153,7 @@ class SubscribeFailed:
     """
 
     request_id: int
+    track_namespace: TrackNamespace
     track_name: str
     error: BaseException
 
@@ -163,16 +167,17 @@ class MoqtPublishSessionCallbacks:
     on_goaway: Callable[[Goaway], None] | None = None
     """GOAWAY (control stream or a request stream): stop initiating, migrate."""
     on_announced: Callable[[TrackNamespace], None] | None = None
-    """The announced namespace reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation.
+    """An announced namespace first reached the wire on an accepted SUBSCRIBE_NAMESPACE solicitation.
 
     The peer can now route SUBSCRIBEs to it. NAMESPACE entries have no acknowledgement of their own;
-    this is the strongest "announced" fact the transport draft offers.
+    this is the strongest "announced" fact the transport draft offers. It runs once per namespace per
+    ``announce()``.
     """
     on_announce_ended: Callable[[AnnounceEnded], None] | None = None
-    """The solicitation stream carrying the announce ended while the session was still live.
+    """The last solicitation stream carrying an announced namespace ended while the session was still live.
 
     The peer rejected the announce (unauthorized suffix) or withdrew its namespace interest. Either
-    way the ingest path is gone.
+    way that namespace's ingest path is gone. It does not run for a namespace that ``withdraw()`` removed.
     """
     on_subscribe: Callable[[Subscribe], None] | None = None
     """The peer subscribed to a registered track (already answered SUBSCRIBE_OK)."""
@@ -185,7 +190,12 @@ class MoqtPublishSessionCallbacks:
     on_request_update: Callable[[IncomingRequestUpdate], None] | None = None
     """The peer sent REQUEST_UPDATE on one of its requests; see :class:`IncomingRequestUpdate`."""
     on_closed: Callable[[Closed], None] | None = None
-    """The session ended: transport closed, or a fatal protocol error."""
+    """The session ended: transport closed, or a fatal protocol error.
+
+    It is the last callback. From ``close()`` or ``destroy()`` until it runs, the session takes no new work and reports
+    only ends (``on_subscribe_end``, an ``on_track_binding`` with no alias): SUBSCRIBE, TRACK_STATUS and
+    SUBSCRIBE_NAMESPACE are refused with GOING_AWAY, and a GOAWAY, an update or an announce is not reported.
+    """
 
 
 DEFAULT_IMPLEMENTATION_NAME = "moq-core (Python) publisher"
@@ -225,6 +235,12 @@ class MoqtPublishSessionConfig:
     """Extra Setup Options to send (an implementation identifier is added automatically)."""
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
     """Identifies this implementation in SETUP (§9.1.5)."""
+    peer_request_ids: set[int] | None = None
+    """The peer's consumed Request IDs (§6.4.2.1). With ``None``, the session keeps a set of its own.
+
+    Sessions that share one transport pass the same set, so an ID one of them consumed is a reuse to the
+    other. :func:`moq_core.create_moqt_duplex_session` passes one.
+    """
     callbacks: MoqtPublishSessionCallbacks = field(default_factory=MoqtPublishSessionCallbacks)
 
 
@@ -300,7 +316,7 @@ class _SubscriberStream:
     finished: bool = False
     """The subscription is ending or over; no new data stream may open on its alias."""
     writer_closed: bool = False
-    """Our direction of the request stream was FINed (after PUBLISH_DONE); it is never reset afterwards."""
+    """The transport took our direction's FIN, after PUBLISH_DONE; it is never reset afterwards."""
     stream_count: int = 0
     """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§9.9)."""
     data_streams: set[_DataStream] = field(default_factory=set)
@@ -324,6 +340,7 @@ class _SubscriberStream:
 
     def cancel(self) -> None:
         self.finished = True
+        self.reset_data_streams()
 
         # A request stream whose PUBLISH_DONE and FIN were handed over is complete: resetting it now
         # (a send stream's abort resets until the FIN is acknowledged) would destroy that end.
@@ -375,10 +392,17 @@ class _DataStream:
         await wait_acknowledged(self._stream)
 
 
+_NamespaceKey: TypeAlias = tuple[str, ...]
+"""A namespace as a dict key. A tuple of its fields keeps the fields apart whatever characters they hold."""
+
+_TrackKey: TypeAlias = tuple[_NamespaceKey, str]
+"""A track as a key: its namespace and its name."""
+
+
 @dataclass(slots=True, kw_only=True)
 class _TrackRecord:
     track_properties: list[KeyValuePair]
-    key: str
+    namespace: _NamespaceKey
     track_name: str
     subscribers: list[_SubscriberStream] = field(default_factory=list)
     done: bool = False
@@ -402,12 +426,17 @@ class _NamespaceStream:
 
     prefix: TrackNamespace
     writer: SendStream
-    announced: list[TrackNamespace] = field(default_factory=list)
-    """Suffixes announced on this stream (for NAMESPACE_DONE at close)."""
+    announced: list[_NamespaceKey] = field(default_factory=list)
+    """Suffixes announced on this stream (for NAMESPACE_DONE at withdrawal and close)."""
 
 
-def _track_key(namespace: Sequence[str], name: str) -> str:
-    return f"{'/'.join(namespace)}--{name}"
+@dataclass(slots=True)
+class _AnnounceRecord:
+    """One namespace the session announces."""
+
+    namespace: _NamespaceKey
+    fired: bool = False
+    """Whether ``on_announced`` has run for this announce."""
 
 
 def _is_namespace_prefix(prefix: Sequence[str], namespace: Sequence[str]) -> bool:
@@ -449,7 +478,7 @@ class MoqtPublishSession:
         self._config = config or MoqtPublishSessionConfig()
         self._callbacks = self._config.callbacks
 
-        self._tracks: dict[str, _TrackRecord] = {}
+        self._tracks: dict[_TrackKey, _TrackRecord] = {}
         self._namespace_streams: list[_NamespaceStream] = []
         # Prefixes whose solicitation is mid-acceptance. Request handlers run concurrently and
         # registration happens only after the REQUEST_OK write settles, so an overlapping solicitation
@@ -458,9 +487,18 @@ class MoqtPublishSession:
         # Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§6.4.2.1), and because
         # aliases ARE the peer's request IDs, a reused ID would hand two subscriptions the same alias
         # and make their subgroup streams indistinguishable: session-fatal, per the draft.
-        self._peer_request_ids: set[int] = set()
-        self._desired_namespace: TrackNamespace | None = None
-        self._announced_fired = False
+        self._peer_request_ids: set[int] = (
+            self._config.peer_request_ids if self._config.peer_request_ids is not None else set()
+        )
+        self._announces: dict[_NamespaceKey, _AnnounceRecord] = {}
+        """The namespaces to announce."""
+        self._pending_withdrawals: set[asyncio.Task[None]] = set()
+        """NAMESPACE_DONE writes that ``withdraw()`` started.
+
+        An orderly close waits for them with its own retractions.
+        """
+        self._track_namespaces: set[_NamespaceKey] = set()
+        """Namespaces with at least one registered track. A namespace's announce waits for its first track."""
         self._received_namespace_solicitation = False
 
         loop = asyncio.get_running_loop()
@@ -476,18 +514,33 @@ class MoqtPublishSession:
         self._closing = False
         self._close_error: BaseException | None = None
         self._destroyed = False
-        self._end_acknowledgements: set[asyncio.Task[None]] = set()
-        """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet."""
+        self._end_acknowledgements: dict[asyncio.Task[None], tuple[_NamespaceKey, _SubscriberStream]] = {}
+        """One task per subscription end still in flight, with its track's namespace and its subscription, which the
+        end of the session cancels even after it has left its track: PUBLISH_DONE and FIN until the peer acknowledges
+        them, or a cancelled subscription's FIN until the transport takes it."""
+        self._incoming_streams: dict[StreamReader, SendStream | None] = {}
+        """Every incoming stream still being read but the control stream, from its first read on, with the response
+        direction the end of the session aborts: a request's until a subscription or a namespace carrier takes it
+        over, and again once the carrier is over; None for a unidirectional stream."""
 
         spawn(self._start())
 
     @property
     def namespace_solicited(self) -> bool | None:
-        """Whether a current solicitation covers our namespace; None before any is accepted."""
-        namespace = self._desired_namespace
-        if namespace is None or not self._received_namespace_solicitation:
+        """Whether a current solicitation covers an announced namespace.
+
+        ``None`` before any solicitation is accepted or while nothing is announced. With several
+        namespaces announced, use :meth:`is_solicited` for one of them.
+        """
+        if not self._announces or not self._received_namespace_solicitation:
             return None
-        return any(_is_namespace_prefix(stream.prefix, namespace) for stream in self._namespace_streams)
+        return any(self.is_solicited(namespace) for namespace in self._announces)
+
+    def is_solicited(self, track_namespace: Sequence[str]) -> bool | None:
+        """Whether a current solicitation covers ``track_namespace``; ``None`` before any solicitation is accepted."""
+        if not self._received_namespace_solicitation:
+            return None
+        return any(_is_namespace_prefix(stream.prefix, track_namespace) for stream in self._namespace_streams)
 
     # ---------------------------------------------------------------------------
     # Session lifecycle
@@ -553,6 +606,12 @@ class MoqtPublishSession:
             for subscriber in track.subscribers:
                 subscriber.cancel()
 
+        for _, subscriber in self._end_acknowledgements.values():
+            subscriber.cancel()
+
+        for reader in list(self._incoming_streams):
+            self._drop_incoming(reader)
+
         self._tracks.clear()
         self._namespace_streams.clear()
         self._control_writer = None
@@ -607,7 +666,7 @@ class MoqtPublishSession:
         for track in self._tracks.values():
             self._end_track(track)
 
-        writes: set[asyncio.Future[None]] = set()
+        writes: set[asyncio.Future[None]] = set(self._pending_withdrawals)
 
         for track in self._tracks.values():
             if track.done_flushed is not None:
@@ -618,7 +677,7 @@ class MoqtPublishSession:
 
         for stream in self._namespace_streams:
             for suffix in stream.announced:
-                writes.add(spawn(_swallow(stream.writer.write(encode_namespace_done(suffix)))))
+                writes.add(spawn(_swallow(stream.writer.write(encode_namespace_done(list(suffix))))))
 
             stream.announced = []
 
@@ -657,96 +716,197 @@ class MoqtPublishSession:
         """Drain outgoing streams, preserving an optional local closure error."""
         self._close(SESSION_ERROR.NO_ERROR, "", error)
 
+    def _drop_incoming(self, reader: StreamReader) -> None:
+        """Stop reading an incoming stream still registered, and abort its response direction."""
+        if reader not in self._incoming_streams:
+            return
+
+        response = self._incoming_streams.pop(reader)
+        reader.cancel()
+        if response is not None:
+            response.abort()
+
+    def _serving(self) -> bool:
+        """Whether the session takes new work. Once closing it takes none and reports only ends."""
+        return not self._destroyed and not self._closing
+
+    def _report_goaway(self, goaway: Goaway) -> None:
+        """The peer is migrating. A session already closing has nothing to move, so its application is not told."""
+        self._received_goaway = True
+        if self._serving():
+            _call(self._callbacks.on_goaway, goaway)
+
+    def _report_binding(self, track: _TrackRecord, subscriber: _SubscriberStream | None) -> None:
+        """Report ``track``'s binding to ``subscriber``. An unbinding is an end, reported until ``on_closed``."""
+        if self._destroyed or (subscriber is not None and not self._serving()):
+            return
+
+        _call(self._callbacks.on_track_binding, _binding_of(track, subscriber))
+
     # ---------------------------------------------------------------------------
     # Announcing and the track registry
     # ---------------------------------------------------------------------------
 
     def announce(self, track_namespace: Sequence[str]) -> None:
-        """Announce the namespace on every matching solicitation, current and future.
+        """Announce a namespace on every matching solicitation, current and future.
 
-        The wire write additionally waits for the first :meth:`register_track`: an announce invites
-        immediate SUBSCRIBEs, and an empty registry would answer them with a terminal DOES_NOT_EXIST.
-        Result via ``on_announced`` / ``on_announce_ended``.
+        A session announces any number of namespaces. Announcing one already announced does nothing.
+        The wire write also waits for the first :meth:`register_track` in that namespace, because an
+        announce invites immediate SUBSCRIBEs and an empty registry would answer them with a terminal
+        DOES_NOT_EXIST. The result arrives through ``on_announced`` or ``on_announce_ended``.
         """
         if self._destroyed or self._closing:
             return
 
-        self._desired_namespace = list(track_namespace)
+        key = tuple(track_namespace)
+        if key in self._announces:
+            return
+
+        record = _AnnounceRecord(key)
+        self._announces[key] = record
 
         for stream in list(self._namespace_streams):
-            self._reconcile_announce(stream)
+            self._announce_on(stream, record)
+
+    def withdraw(self, track_namespace: Sequence[str]) -> None:
+        """Stop announcing a namespace by sending NAMESPACE_DONE on every solicitation that carried it.
+
+        Its tracks stay registered, and withdrawing does not touch their subscriptions, so end them first.
+        Withdrawing a namespace that is not announced does nothing.
+        """
+        if self._destroyed or self._closing:
+            return
+
+        record = self._announces.pop(tuple(track_namespace), None)
+        if record is None:
+            return
+
+        for stream in list(self._namespace_streams):
+            suffix = self._suffix_on(stream, record.namespace)
+            if suffix is None or suffix not in stream.announced:
+                continue
+
+            stream.announced.remove(suffix)
+            withdrawal = spawn(self._write_or_drop(stream, encode_namespace_done(list(suffix))))
+            self._pending_withdrawals.add(withdrawal)
+            withdrawal.add_done_callback(self._pending_withdrawals.discard)
+
+    @staticmethod
+    def _suffix_on(stream: _NamespaceStream, namespace: _NamespaceKey) -> _NamespaceKey | None:
+        """``namespace`` relative to the stream's solicited prefix; ``None`` when the prefix does not cover it."""
+        if not _is_namespace_prefix(stream.prefix, namespace):
+            return None
+        return namespace[len(stream.prefix) :]
 
     def _reconcile_announce(self, stream: _NamespaceStream) -> None:
-        """Write the desired namespace onto a solicitation stream whose prefix covers it.
+        """Write every announced namespace the solicitation covers onto it."""
+        for record in list(self._announces.values()):
+            self._announce_on(stream, record)
 
-        Solicitations, ``announce()``, and the first ``register_track()`` arrive in any order (the
-        relay's SUBSCRIBE_NAMESPACE races our post-SETUP setup), so all three paths funnel here. The
-        announce is deferred until at least one track is registered: an announced namespace invites
-        immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on moq-lite-rs, so
-        advertising an empty registry would permanently break the first viewer in the
+    def _announce_on(self, stream: _NamespaceStream, record: _AnnounceRecord) -> None:
+        """Write one announced namespace onto a solicitation stream whose prefix covers it.
+
+        Solicitations, ``announce()``, and each namespace's first ``register_track()`` arrive in any
+        order (the relay's SUBSCRIBE_NAMESPACE races our post-SETUP setup), so all three paths funnel
+        here. A namespace's announce waits until a track in it is registered. An announced namespace
+        invites immediate SUBSCRIBEs, and answering one with DOES_NOT_EXIST is terminal on moq-lite-rs,
+        so advertising an empty registry would permanently break the first viewer in the
         pre-registration window.
         """
-        namespace = self._desired_namespace
-        if namespace is None or len(self._tracks) == 0:
+        if record.namespace not in self._track_namespaces:
             return
 
-        if not _is_namespace_prefix(stream.prefix, namespace):
-            return
-
-        suffix = namespace[len(stream.prefix) :]
-        if any("/".join(existing) == "/".join(suffix) for existing in stream.announced):
+        suffix = self._suffix_on(stream, record.namespace)
+        if suffix is None or suffix in stream.announced:
             return
 
         stream.announced.append(suffix)
 
         async def write_entry() -> None:
-            try:
-                await stream.writer.write(encode_namespace(suffix))
-            except Exception as error:  # the response half died alone
-                # A reset the request half may never mirror: the entry never reached the peer, no
-                # future write can, and the read loop may stay open forever. The carrier is dead.
-                # Deregister it so the peer's replacement solicitation is a fresh start rather than a
-                # PREFIX_OVERLAP against a corpse; if another path already swept it, the loss was
-                # reported there.
-                if stream not in self._namespace_streams:
-                    return
-
-                self._namespace_streams.remove(stream)
-                stream.announced = [existing for existing in stream.announced if existing is not suffix]
-                spawn(_swallow(stream.writer.close()))
-                self._report_announce_loss(error)
+            if not await self._write_or_drop(stream, encode_namespace(list(suffix))):
                 return
 
-            if self._destroyed or self._announced_fired:
+            if not self._serving() or record.fired or self._announces.get(record.namespace) is not record:
                 return
 
-            self._announced_fired = True
-            _call(self._callbacks.on_announced, namespace)
+            record.fired = True
+            _call(self._callbacks.on_announced, list(record.namespace))
 
         spawn(write_entry())
 
-    def _report_announce_loss(self, cause: BaseException | None) -> None:
-        """Fire ``on_announce_ended`` when no solicitation carries the announce anymore.
+    async def _write_or_drop(self, stream: _NamespaceStream, entry: bytes) -> bool:
+        """Write a NAMESPACE or NAMESPACE_DONE entry and return whether it was written. A failed write drops the
+        carrier."""
+        try:
+            await stream.writer.write(entry)
+        except Exception as error:  # the response half died alone
+            self._drop_carrier(stream, error)
+            return False
+
+        return True
+
+    def _drop_carrier(self, stream: _NamespaceStream, error: BaseException) -> None:
+        """Drop a solicitation stream whose write failed, and report the namespaces it carried.
+
+        The response half failed alone, with a reset the request half may never mirror. No future write
+        can reach the peer, and the read loop may stay open forever. Deregistering the stream lets the
+        peer's replacement solicitation start fresh instead of failing with PREFIX_OVERLAP against a
+        stream that can carry nothing. If another path already removed it, that path reported the loss.
+        """
+        if stream not in self._namespace_streams:
+            return
+
+        self._namespace_streams.remove(stream)
+        lost = self._carried_by(stream)
+        stream.announced = []
+        spawn(_swallow(stream.writer.close()))
+        self._report_announce_loss(error, lost)
+
+    def _carried_by(self, stream: _NamespaceStream) -> list[_AnnounceRecord]:
+        """The announced namespaces a solicitation stream carries entries for."""
+        return [
+            record
+            for record in self._announces.values()
+            if self._suffix_on(stream, record.namespace) in stream.announced
+        ]
+
+    def _report_announce_loss(self, cause: BaseException | None, lost: list[_AnnounceRecord]) -> None:
+        """Fire ``on_announce_ended`` for each of ``lost`` that no solicitation carries anymore.
 
         Shared by the read-loop cleanup and the response-write failure path; ``cause`` is the stream
         failure that ended the carrier. Silent while closing, destroyed, or migrating (a GOAWAY makes
         the peer's streams ending the orderly drain), and once the transport has ended: an ended
         transport fails every stream before the session learns of it, and that is connection loss,
         which ``_handle_closed`` reports, not a withdrawal. A ``source="session"`` failure (TA-23) or the
-        transport's own flag decides, not which of the two wakes first.
+        transport's own flag decides, not which of the two wakes first. It does not report a namespace
+        withdrawn meanwhile.
         """
-        if self._destroyed or self._closing or self._received_goaway:
+        if self._announce_loss_silenced():
             return
 
         if is_session_error(cause) or transport_ended(self._transport):
             return
 
-        if any(len(stream.announced) > 0 for stream in self._namespace_streams):
-            return
+        for record in lost:
+            # A handler may withdraw another namespace or end the session, so check each again before reporting it.
+            if self._announce_loss_silenced() or not self._still_lost(record):
+                continue
 
-        error = MoqtProtocolError("the namespace solicitation carrying the announce ended")
-        error.__cause__ = cause
-        _call(self._callbacks.on_announce_ended, AnnounceEnded(error=error))
+            error = MoqtProtocolError("the namespace solicitation carrying the announce ended")
+            error.__cause__ = cause
+            _call(self._callbacks.on_announce_ended, AnnounceEnded(namespace=list(record.namespace), error=error))
+
+    def _announce_loss_silenced(self) -> bool:
+        return self._destroyed or self._closing or self._received_goaway
+
+    def _still_lost(self, record: _AnnounceRecord) -> bool:
+        """Whether ``record`` is still announced and no solicitation carries it."""
+        if self._announces.get(record.namespace) is not record:
+            return False
+
+        return not any(
+            self._suffix_on(stream, record.namespace) in stream.announced for stream in self._namespace_streams
+        )
 
     def register_track(self, options: RegisterTrackOptions) -> RegisteredTrack:
         """Register one servable track; the peer's SUBSCRIBEs are answered from this registry."""
@@ -755,18 +915,23 @@ class MoqtPublishSession:
             # callers still get the RegisteredTrack shape.
             return RegisteredTrack(options.track_name, lambda: None)
 
+        namespace = tuple(options.track_namespace)
         track = _TrackRecord(
             track_properties=list(options.track_properties),
-            key=_track_key(options.track_namespace, options.track_name),
+            namespace=namespace,
             track_name=options.track_name,
         )
 
-        self._tracks[track.key] = track
+        self._tracks[(namespace, options.track_name)] = track
 
-        # The first registration may be what the deferred announce was waiting for.
-        if len(self._tracks) == 1:
-            for stream in list(self._namespace_streams):
-                self._reconcile_announce(stream)
+        # The namespace's first registration may be what its deferred announce was waiting for.
+        if namespace not in self._track_namespaces:
+            self._track_namespaces.add(namespace)
+            record = self._announces.get(namespace)
+
+            if record is not None:
+                for stream in list(self._namespace_streams):
+                    self._announce_on(stream, record)
 
         def object_published(location: Location) -> None:
             if track.largest_object is None or compare_locations(location, track.largest_object) > 0:
@@ -803,7 +968,7 @@ class MoqtPublishSession:
                     _call(self._callbacks.on_subscribe_end, subscriber.request_id)
 
         if had_reported and not self._destroyed:
-            _call(self._callbacks.on_track_binding, TrackBinding(track_name=track.track_name, track_alias=None))
+            _call(self._callbacks.on_track_binding, _binding_of(track, None))
 
         writes: list[asyncio.Task[None]] = list(track.pending_ends)
 
@@ -827,18 +992,14 @@ class MoqtPublishSession:
         """
         subscriber.finished = True
 
-        fin_written = False
-
         async def end() -> None:
-            nonlocal fin_written
             if subscriber.opening:
                 await asyncio.wait(set(subscriber.opening))
 
             subscriber.reset_data_streams()
             await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
-            subscriber.writer_closed = True
             await subscriber.writer.close()
-            fin_written = True
+            subscriber.writer_closed = True
 
         ended = spawn(_swallow(end()))
         track.pending_ends.append(ended)
@@ -852,22 +1013,32 @@ class MoqtPublishSession:
         async def acknowledged() -> None:
             await ended
 
-            if fin_written:
+            if subscriber.writer_closed:
                 await wait_acknowledged(subscriber.writer)
 
-        acknowledging = spawn(_swallow(acknowledged()))
-        self._end_acknowledgements.add(acknowledging)
-        acknowledging.add_done_callback(self._end_acknowledgements.discard)
+        self._hold_end(spawn(_swallow(acknowledged())), track, subscriber)
 
-    async def wait_ends_acknowledged(self) -> None:
+    def _hold_end(self, ending: asyncio.Task[None], track: _TrackRecord, subscriber: _SubscriberStream) -> None:
+        """Keep ``subscriber`` within reach of the end of the session until ``ending`` settles."""
+        self._end_acknowledgements[ending] = (track.namespace, subscriber)
+        ending.add_done_callback(lambda done: self._end_acknowledgements.pop(done, None))
+
+    async def wait_ends_acknowledged(self, track_namespace: Sequence[str] | None = None) -> None:
         """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
 
-        An end that failed, or whose stream was reset, counts as done. On a transport that does not
-        report acknowledgement, an end counts once its FIN was written. Never raises; the caller bounds
-        the wait.
+        With ``track_namespace``, it waits only for the ends of that namespace's tracks. An end that
+        failed, or whose stream was reset, counts as done. On a transport that does not report
+        acknowledgement, an end counts once its FIN was written. Never raises; the caller bounds the wait.
         """
-        if self._end_acknowledgements:
-            await asyncio.wait(set(self._end_acknowledgements))
+        namespace = None if track_namespace is None else tuple(track_namespace)
+        ends = {
+            ending
+            for ending, (ended_namespace, _) in self._end_acknowledgements.items()
+            if namespace is None or ended_namespace == namespace
+        }
+
+        if ends:
+            await asyncio.wait(ends)
 
     def _live_subscription(self, track_alias: int) -> _SubscriberStream | None:
         for track in self._tracks.values():
@@ -927,7 +1098,19 @@ class MoqtPublishSession:
 
     async def _handle_unidirectional_stream(self, stream: ReceiveStream) -> None:
         reader = StreamReader(stream)
-        stream_type = await reader.read_varint()
+        if self._destroyed:
+            reader.cancel()
+            return
+
+        self._incoming_streams[reader] = None
+
+        try:
+            stream_type = await reader.read_varint()
+        except BaseException:
+            self._drop_incoming(reader)
+            raise
+        finally:
+            self._incoming_streams.pop(reader, None)
 
         if stream_type == STREAM_TYPE.SETUP:
             await self._run_control_stream(reader)
@@ -963,7 +1146,8 @@ class MoqtPublishSession:
         self._received_server_setup = True
         if not self.ready.done():
             self.ready.set_result(None)
-        _call(self._callbacks.on_ready, setup.options)
+        if self._serving():
+            _call(self._callbacks.on_ready, setup.options)
 
         while not await reader.at_end():
             message_type = await reader.read_varint()
@@ -975,8 +1159,7 @@ class MoqtPublishSession:
                 raise MoqtProtocolError("received more than one GOAWAY on the control stream")
 
             self._received_control_goaway = True
-            self._received_goaway = True
-            _call(self._callbacks.on_goaway, message)
+            self._report_goaway(message)
 
         # A closed control stream ends the session (§6.3).
         if not self._destroyed:
@@ -995,6 +1178,23 @@ class MoqtPublishSession:
 
     async def _handle_incoming_request(self, stream: BidirectionalStream) -> None:
         reader = StreamReader(stream.readable)
+        if self._destroyed:
+            reader.cancel()
+            stream.writable.abort()
+            return
+
+        self._incoming_streams[reader] = stream.writable
+
+        try:
+            await self._serve_request(stream, reader)
+        except BaseException:
+            # A protocol error closes the session only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
+            raise
+        finally:
+            self._incoming_streams.pop(reader, None)
+
+    async def _serve_request(self, stream: BidirectionalStream, reader: StreamReader) -> None:
         message_type = await reader.read_varint()
         message = await self._read_control_frame(reader, message_type)
 
@@ -1059,6 +1259,11 @@ class MoqtPublishSession:
         writer = stream.writable
         prefix = subscribe_namespace.track_namespace_prefix
 
+        # A carrier accepted now would miss the drain's NAMESPACE_DONE retractions.
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
+
         # §9.17: a solicitation overlapping an established one (either prefix containing the other)
         # is refused with PREFIX_OVERLAP. Announcing on both would hand the peer duplicate namespace
         # state with inconsistent withdrawals.
@@ -1099,6 +1304,14 @@ class MoqtPublishSession:
             reader.cancel()
             return
 
+        # The close began during the write: the accepted solicitation ends empty, with nothing announced on it.
+        if not self._serving():
+            await _swallow(writer.close())
+            reader.cancel()
+            return
+
+        # The carrier's NAMESPACE_DONE retractions are written by the drain, and an abort would discard them.
+        self._incoming_streams[reader] = None
         record = _NamespaceStream(prefix=prefix, writer=writer)
         self._received_namespace_solicitation = True
         self._namespace_streams.append(record)
@@ -1114,29 +1327,22 @@ class MoqtPublishSession:
                 message = await self._read_control_frame(reader, message_type)
 
                 if isinstance(message, Goaway):
-                    self._received_goaway = True
-                    _call(self._callbacks.on_goaway, message)
+                    self._report_goaway(message)
                 elif isinstance(message, RequestUpdate):
                     self._claim_peer_request_id(message.request_id)
                     # Namespace subscriptions may legally be updated (§9.5). v1 applies none of it (a
                     # prefix change would re-base every entry), so per §9.5.1 the update is answered
                     # with an error and the request stream closes below: never session-fatal (only the
                     # reused Request ID above is).
-                    _call(
-                        self._callbacks.on_request_update,
-                        IncomingRequestUpdate(
-                            request_id=subscribe_namespace.request_id,
-                            update_request_id=message.request_id,
-                            parameters=message.parameters,
-                        ),
-                    )
-                    spawn(
-                        _swallow(
-                            writer.write(
-                                encode_request_error(REQUEST_ERROR_CODE.NOT_SUPPORTED, "namespace update not supported")
-                            )
+                    if self._serving():
+                        _call(
+                            self._callbacks.on_request_update,
+                            IncomingRequestUpdate(
+                                request_id=subscribe_namespace.request_id,
+                                update_request_id=message.request_id,
+                                parameters=message.parameters,
+                            ),
                         )
-                    )
                     failed_update = True
                     break
                 else:
@@ -1158,10 +1364,23 @@ class MoqtPublishSession:
         if record in self._namespace_streams:
             self._namespace_streams.remove(record)
 
-        spawn(_swallow(writer.close()))
+        lost = self._carried_by(record)
+        record.announced = []
+        if lost:
+            self._report_announce_loss(cause, lost)
 
-        if len(record.announced) > 0:
-            self._report_announce_loss(cause)
+        # No longer a carrier, the stream is the end of the session's to reset until the transport takes its FIN.
+        reader.cancel()
+        if self._destroyed:
+            writer.abort()
+            return
+
+        self._incoming_streams[reader] = writer
+        if failed_update:
+            await _swallow(
+                writer.write(encode_request_error(REQUEST_ERROR_CODE.NOT_SUPPORTED, "namespace update not supported"))
+            )
+        await _swallow(writer.close())
 
     async def _handle_track_status(
         self, stream: BidirectionalStream, reader: StreamReader, request: TrackStatus
@@ -1178,8 +1397,12 @@ class MoqtPublishSession:
         behalf of a relay that has no subscription, and fails the downstream request on a refusal, so
         answering it is what lets a track cross two relays there.
         """
-        track = self._tracks.get(_track_key(request.track_namespace, request.track_name))
+        track = self._tracks.get((tuple(request.track_namespace), request.track_name))
         writer = stream.writable
+
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
 
         if track is None or track.done:
             await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
@@ -1206,8 +1429,12 @@ class MoqtPublishSession:
     async def _handle_incoming_subscribe(
         self, stream: BidirectionalStream, reader: StreamReader, subscribe: Subscribe
     ) -> None:
-        track = self._tracks.get(_track_key(subscribe.track_namespace, subscribe.track_name))
+        track = self._tracks.get((tuple(subscribe.track_namespace), subscribe.track_name))
         writer = stream.writable
+
+        if not self._serving():
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.GOING_AWAY, "the session is closing")
+            return
 
         if track is None or track.done:
             await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
@@ -1225,10 +1452,15 @@ class MoqtPublishSession:
         except Exception as error:  # the encoder refused the response; the peer did nothing wrong
             await _refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, "could not encode SUBSCRIBE_OK")
 
-            if not self._destroyed:
+            if self._serving():
                 _call(
                     self._callbacks.on_subscribe_failed,
-                    SubscribeFailed(request_id=subscribe.request_id, track_name=track.track_name, error=error),
+                    SubscribeFailed(
+                        request_id=subscribe.request_id,
+                        track_namespace=list(track.namespace),
+                        track_name=track.track_name,
+                        error=error,
+                    ),
                 )
             return
 
@@ -1245,6 +1477,8 @@ class MoqtPublishSession:
         )
 
         track.subscribers.append(subscriber)
+        # Ending the session cancels the subscriber, which spares a request stream whose FIN was handed over.
+        self._incoming_streams[reader] = None
 
         try:
             await writer.write(subscribe_ok)
@@ -1260,7 +1494,7 @@ class MoqtPublishSession:
         # was still in flight. A stale completion must not steal the binding back onto an alias whose
         # stream is already ending, and a subscription that was never live is never reported
         # (`on_subscribe_end` pairs on the same flag, keeping subscriber counts balanced).
-        if not subscriber.finished:
+        if not subscriber.finished and self._serving():
             subscriber.reported = True
             _call(self._callbacks.on_subscribe, subscribe)
 
@@ -1281,7 +1515,7 @@ class MoqtPublishSession:
                     track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
                 )
 
-            _call(self._callbacks.on_track_binding, _binding_of(track, subscriber if subscriber.forwarding else None))
+            self._report_binding(track, subscriber if subscriber.forwarding else None)
 
         # Keep serving the request stream: REQUEST_UPDATEs arrive here.
         try:
@@ -1314,19 +1548,17 @@ class MoqtPublishSession:
                         rebind = True
 
                     if rebind and not subscriber.finished and subscriber.accepted:
-                        _call(
-                            self._callbacks.on_track_binding,
-                            _binding_of(track, subscriber if subscriber.forwarding else None),
-                        )
+                        self._report_binding(track, subscriber if subscriber.forwarding else None)
 
-                    _call(
-                        self._callbacks.on_request_update,
-                        IncomingRequestUpdate(
-                            request_id=subscribe.request_id,
-                            update_request_id=message.request_id,
-                            parameters=parameters,
-                        ),
-                    )
+                    if self._serving():
+                        _call(
+                            self._callbacks.on_request_update,
+                            IncomingRequestUpdate(
+                                request_id=subscribe.request_id,
+                                update_request_id=message.request_id,
+                                parameters=parameters,
+                            ),
+                        )
 
                     if not subscriber.finished:
                         if unsupported:
@@ -1357,8 +1589,7 @@ class MoqtPublishSession:
                             # it cancels) never sees a trailing byte.
                             spawn(_swallow(writer.write(encode_request_ok(None, self._protocol))))
                 elif isinstance(message, Goaway):
-                    self._received_goaway = True
-                    _call(self._callbacks.on_goaway, message)
+                    self._report_goaway(message)
                 else:
                     raise MoqtProtocolError(f"unexpected {message.kind} on an incoming subscribe stream")
             # The peer FINed its direction while the subscription was still ours to end. moq-relay
@@ -1387,7 +1618,7 @@ class MoqtPublishSession:
                 # unclosed response direction would leak a half-open stream per cancelled request
                 # until the transport closes. An already-aborted writer fails harmlessly. A
                 # subscription this side ended closes its writer after PUBLISH_DONE instead.
-                spawn(_swallow(writer.close()))
+                self._hold_end(spawn(_swallow(writer.close())), track, subscriber)
 
             if not self._destroyed and subscriber.reported:
                 _call(self._callbacks.on_subscribe_end, subscribe.request_id)
@@ -1399,15 +1630,16 @@ class MoqtPublishSession:
 
     def _emit_binding(self, track: _TrackRecord) -> None:
         live = [s for s in track.subscribers if not s.finished and s.accepted and s.forwarding]
-        _call(self._callbacks.on_track_binding, _binding_of(track, live[-1] if live else None))
+        self._report_binding(track, live[-1] if live else None)
 
 
 def _binding_of(track: _TrackRecord, subscriber: _SubscriberStream | None) -> TrackBinding:
     """The track's binding to ``subscriber``, or no binding."""
     if subscriber is None:
-        return TrackBinding(track_name=track.track_name, track_alias=None)
+        return TrackBinding(track_namespace=list(track.namespace), track_name=track.track_name, track_alias=None)
 
     return TrackBinding(
+        track_namespace=list(track.namespace),
         track_name=track.track_name,
         track_alias=subscriber.track_alias,
         object_delivery_timeout=subscriber.object_delivery_timeout,

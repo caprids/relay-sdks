@@ -82,6 +82,11 @@ export interface WriteSlot {
   bind(trackAlias: number | undefined): void;
   /** The publisher connection ended; `error` is its failure, absent after a clean shutdown. */
   disconnect(error?: unknown): void;
+  /**
+   * The track ends while the connection lives, as `writer.close()` ends it, except that an operation in flight fails
+   * with `error`. Groups already handed to the transport keep their delivery timeouts.
+   */
+  end(error: unknown): void;
 }
 
 /** The reason a stream reset hands the transport (TA-17): see `streamResetReason`. */
@@ -131,6 +136,15 @@ export const CALL_STARTED_AT: unique symbol = Symbol('callStartedAt');
 
 /** Options carrying {@link CALL_STARTED_AT}. */
 export type CallStarted = { readonly [CALL_STARTED_AT]?: number };
+
+/**
+ * An internal property of a supervised publisher's group writer: true once a rotation moved the group's track to
+ * another generation. The group still finishes on its own, but it no longer reaches the track's subscribers.
+ */
+export const MOVED_OFF: unique symbol = Symbol('movedOff');
+
+/** A group writer that may carry {@link MOVED_OFF}. */
+export type MaybeMovedOff = { readonly [MOVED_OFF]?: boolean };
 
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const {
@@ -611,6 +625,9 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       alias = nextAlias;
       if (alias !== undefined) active?.wake();
       if (changed && !ended) notify(alias !== undefined);
+    },
+    end(error) {
+      close(error, RESET_CODE.CANCELLED);
     },
     disconnect(error) {
       close(error, connectionResetCode(error));

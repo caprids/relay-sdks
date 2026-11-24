@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "notes": [
+    "Read by hermoq's merge-policy check from main, never from the pull request (relay-dev: hermoq/sprite-gateway/policy.mjs has the full rule).",
+    "Advisory in this repo: merge-policy posts in shadow mode, neutral unless it would merge, and never blocks. A person merges.",
+    "Adam, 2026-11-16: docs, tests and very safe changes may go without a person; anything touching security, the product interface or behaviour needs one.",
+    "No quick_checks: every workflow here runs only for the paths it covers (ts.yml, python.yml, relay-quic-binaries.yml, the release dry runs), so none reports on every pull request, and one named here would hold every other pull request at Not yet. So merge-policy cannot see a red SDK test run, and everything those workflows cover is high risk until quick checks can be scoped to paths (relay-z1de.22).",
+    "spec/ is the contract every SDK implements (protocol pins, the behavior contract, the public vocabulary, the vectors), so it is high risk.",
+    "ts/ and python/ are high risk: the SDKs' exported API, protocol and transport code (the native QUIC addon included), examples, release scripts, build and lint config, and their tests.",
+    "tools/ and LICENSE are high risk: tools/ is code nobody reviews in CI, and LICENSE is a legal term.",
+    "Low risk: README.md, CONTEXT.md and docs/.",
+    "Adam, 2026-11-16: agent instruction files need a person. AGENTS.md, CLAUDE.md and docs/agents/ instruct the agents that work here, so they are high risk.",
+    "Always high risk regardless of this file: anything under .github/, dependency and build files (package.json, pnpm-lock.yaml, pyproject.toml, uv.lock, mise.toml, Cargo.toml), large changes. Shrinking or deleted tests are medium risk."
+  ],
+  "review_checks": [
+    "Cursor Bugbot"
+  ],
+  "high_risk": [
+    "spec/**",
+    "ts/**",
+    "python/**",
+    "tools/**",
+    "LICENSE",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/agents/**"
+  ]
+}

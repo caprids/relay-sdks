@@ -23,7 +23,7 @@ datagram reception, or automatic session recovery.
 The implementation is a port of `ts/packages/moq-core`, which is itself an attributed snapshot of the
 Video.js protocol modules under Apache-2.0. See `NOTICE` and `UPSTREAM.json`.
 
-To use Relay from an application, start with the [Python quickstart](https://github.com/caprids/relay-sdks/blob/main/python/README.md#first-round-trip).
+To use Relay from an application, start with the [Quickstart](https://www.caprid.com/docs/getting-started/quickstart/).
 
 The distribution on PyPI is `caprid-moq-core`, and the import name is `moq_core`.
 

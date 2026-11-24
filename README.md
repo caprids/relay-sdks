@@ -1,6 +1,6 @@
 # Relay SDKs
 
-Client SDKs for Relay, Mux's Media over QUIC (MoQ) relay service, in every language we support.
+Client SDKs for Relay, Caprid's Media over QUIC (MoQ) relay service, in every language we support.
 Each SDK connects to a Relay endpoint, subscribes to tracks, and publishes data, with the same
 protocol pin and the same observable behavior. The SDKs share no code. They share a specification.
 
@@ -9,15 +9,15 @@ can break the API.
 
 | Directory | Contents | Status |
 | --- | --- | --- |
+| `docs/guides/` | Unified TypeScript + Python task guides synced to [caprid.com/docs](https://www.caprid.com/docs/) | Source of truth |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
-| `ts/` | TypeScript SDK `@caprid/relay`, the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, the optional `@caprid/moq-mediabunny` file-input adapter, and the `@caprid/relay-quic` and `@caprid/relay-websocket` transport adapters, as a pnpm workspace | Working. Live-tested against Mux's relays |
-| `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Feature-complete with `ts/`, and live-tested against Mux's relays |
+| `ts/` | TypeScript SDK `@caprid/relay`, the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, the optional `@caprid/moq-mediabunny` file-input adapter, and the `@caprid/relay-quic` and `@caprid/relay-websocket` transport adapters, as a pnpm workspace | Working. Live-tested against Caprid's relays |
+| `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Live-tested against Caprid's relays. What it does not have yet is marked "TypeScript only" in [spec/vocabulary.md](spec/vocabulary.md) |
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
-Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (Node; browsers use WebTransport) or
-[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one installs the
-published packages into a new project and runs a short publish and subscribe round trip. Each guide
-then runs the repository's fuller demo from a checkout.
+Start with the [Quickstart](https://www.caprid.com/docs/getting-started/quickstart/) or the unified
+[Relay guides](docs/guides/connecting.md) (TypeScript + Python side by side). For working from a
+local checkout of this repository, see [ts/GUIDE.md](ts/GUIDE.md) and [python/README.md](python/README.md).
 
 ## Development
 
@@ -92,7 +92,7 @@ another relay to put the subscribers there. Namespace fields are relative to the
 path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
-each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
+each other's tracks and discovery.
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
 on `status`, with the second status object delivered after the events track closed.
@@ -136,7 +136,7 @@ another relay to put the subscribers there. Namespace fields are relative to the
 path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
-each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
+each other's tracks and discovery.
 
 The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC
 transport: three objects on `events` and two on `status`, with the second status object delivered
@@ -169,8 +169,8 @@ versions speak which draft:
 
 | SDK | Version | MOQT draft |
 | --- | --- | --- |
-| `@caprid/relay` (`ts/`) | 0.1.0, 0.1.1 | `moqt-22`, falling back to `moqt-20` |
-| `caprid-relay` (`python/`) | 0.1.0 | `moqt-22`, falling back to `moqt-20` |
+| `@caprid/relay` (`ts/`) | 0.1.0 to 0.4.1 | `moqt-22`, falling back to `moqt-20` |
+| `caprid-relay` (`python/`) | 0.1.0 to 0.4.0 | `moqt-22`, falling back to `moqt-20` |
 
 Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later. On 0.15.1 to
 0.15.3, every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and

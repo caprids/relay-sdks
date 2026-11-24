@@ -26,7 +26,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field, fields, replace
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from ._tasks import call_later, observe, spawn
 from .bytes import StreamReader, utf8_encode
@@ -80,7 +80,7 @@ from .object_stream import (
     read_subgroup_objects,
 )
 from .request_stream import RequestStream, RequestStreamHandlers, open_request_stream
-from .transport import BidirectionalStream, MoqtTransport, ReceiveStream
+from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 
 # ============================================================================
 # Public session surface
@@ -198,8 +198,18 @@ class NamespaceSubscriptionHandlers:
     prefix; an empty suffix is the prefix itself.
     """
 
-    on_ok: Callable[[], None] | None = None
-    """REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream."""
+    on_ok: Callable[[int | None], None] | None = None
+    """REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream.
+
+    The argument is MoQ Active Count's promise, how many NAMESPACE messages come before the first change; ``None``
+    when the session did not negotiate the extension.
+    """
+    on_synced: Callable[[], None] | None = None
+    """MoQ Active Count only: the NAMESPACE messages REQUEST_OK promised have all been passed to ``on_namespace``.
+
+    Repeats count, so the peer's view as of its answer is complete. Called right after the last of them, or right
+    after ``on_ok`` on a count of 0. Never called when ``on_ok`` had no count.
+    """
     on_error: Callable[[RequestError], None] | None = None
     """The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure or timeout."""
     on_namespace: Callable[[list[str]], None] | None = None
@@ -207,11 +217,12 @@ class NamespaceSubscriptionHandlers:
 
     A peer may name one again (moq-relay does when its route changes); each call is passed on.
     """
-    on_namespace_done: Callable[[list[str]], None] | None = None
+    on_namespace_done: Callable[[list[str], bool], None] | None = None
     """NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available.
 
     Also called for each namespace still active when the accepted request ends (§9.15), just before
-    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§9.15).
+    ``on_end``, with the second argument (``request_ended``) true. One for a namespace never named
+    closes the session with PROTOCOL_VIOLATION (§9.15).
     """
     on_end: Callable[[BaseException | None], None] | None = None
     """The accepted request ended; no entry follows.
@@ -268,7 +279,11 @@ class MoqtSessionCallbacks:
     Absent, the session rejects with UNINTERESTED (a subscribe-only client).
     """
     on_closed: Callable[[Closed], None] | None = None
-    """The session ended: transport closed, or a fatal protocol error."""
+    """The session ended: transport closed, or a fatal protocol error.
+
+    It is the last callback: no session callback and no request handler runs after it, and a request started
+    afterwards does nothing.
+    """
 
 
 DEFAULT_UNKNOWN_ALIAS_TIMEOUT = 2.0
@@ -295,6 +310,12 @@ class MoqtSessionConfig:
     The draft expects implementations to bound control exchanges (§12.2's CONTROL_MESSAGE_TIMEOUT);
     without this a relay that accepts the stream and then goes quiet leaves the request pending
     forever.
+    """
+    peer_request_ids: set[int] | None = None
+    """The peer's consumed Request IDs (§6.4.2.1). With ``None``, the session keeps a set of its own.
+
+    Sessions that share one transport pass the same set, so an ID one of them consumed is a reuse to the
+    other. :func:`moq_core.create_moqt_duplex_session` passes one.
     """
     callbacks: MoqtSessionCallbacks = field(default_factory=MoqtSessionCallbacks)
 
@@ -420,6 +441,10 @@ class _SubscriptionRecord(_RequestRecord):
 class _FetchRecord(_RequestRecord):
     handlers: FetchHandlers
     group_order: GroupOrder = "ascending"
+    reader: StreamReader | None = None
+    """The data stream being read, so a cancel stops it at once rather than at the next entry."""
+    # The data stream ended or reset. The session forgets the fetch once its request is answered too (#419).
+    data_ended: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -434,6 +459,37 @@ class _NamespaceSubscriptionRecord(_RequestRecord):
     """REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too."""
     active: dict[tuple[str, ...], list[str]] = field(default_factory=dict)
     """Suffixes named by NAMESPACE and not yet withdrawn."""
+    owed: int = 0
+    """NAMESPACE messages ACTIVE_COUNT promised that have not arrived yet."""
+
+
+_RequestKind: TypeAlias = Literal["subscribe", "fetch", "track-status", "subscribe-namespace"]
+
+
+def _declares(options: Sequence[KeyValuePair], option_type: int) -> bool:
+    return any(option.type == option_type for option in options)
+
+
+def _active_count_violation(answers: _RequestKind, negotiated: bool, parameters: MessageParameters) -> str | None:
+    carried = parameters.active_count is not None
+
+    if answers != "subscribe-namespace":
+        return f"ACTIVE_COUNT on a REQUEST_OK answering {answers}" if carried else None
+
+    if negotiated and not carried:
+        return "REQUEST_OK omits ACTIVE_COUNT, which the session negotiated"
+    if not negotiated and carried:
+        return "REQUEST_OK carries ACTIVE_COUNT, which the session did not negotiate"
+    return None
+
+
+_CountedInput: TypeAlias = Literal["namespace", "namespace-done", "goaway", "fin"]
+
+_COUNTED_SET_VIOLATIONS: dict[_CountedInput, str] = {
+    "namespace-done": "NAMESPACE_DONE inside the ACTIVE_COUNT set",
+    "goaway": "GOAWAY inside the ACTIVE_COUNT set",
+    "fin": "subscribe-namespace stream finished inside the ACTIVE_COUNT set",
+}
 
 
 @dataclass(slots=True)
@@ -534,13 +590,21 @@ class MoqtSession:
 
         self._next_request_id = 0  # client request IDs: even, starting at 0 (§6.4.2.1)
         # Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§6.4.2.1).
-        self._peer_request_ids: set[int] = set()
+        self._peer_request_ids: set[int] = (
+            self._config.peer_request_ids if self._config.peer_request_ids is not None else set()
+        )
         self._subscriptions: dict[int, _SubscriptionRecord] = {}
         self._fetches: dict[int, _FetchRecord] = {}
         self._track_statuses: dict[int, _TrackStatusRecord] = {}
         self._namespace_subscriptions: dict[int, _NamespaceSubscriptionRecord] = {}
         self._alias_routes: dict[int, _SubscriptionRecord] = {}
         self._alias_waiters: dict[int, list[_AliasWaiter]] = {}
+        # Every request stream with a direction still open, answered or not: teardown cancels them all, whatever the
+        # maps hold. One leaves once both directions are over, so a completed fetch is still forgotten (#419).
+        self._request_streams: set[RequestStream] = set()
+        # Every incoming stream still being read but the control stream, from its first read on, with the response
+        # direction teardown aborts: an incoming request's until its response has been written, None for a data stream.
+        self._incoming_streams: dict[StreamReader, SendStream | None] = {}
 
         loop = asyncio.get_running_loop()
         self.ready: asyncio.Future[None] = loop.create_future()
@@ -551,6 +615,7 @@ class MoqtSession:
         self._control_writer = None
         self._received_server_setup = False
         self._max_age_supported = False
+        self._active_count_negotiated = False
         self._received_control_goaway = False
         self._destroyed = False
 
@@ -665,8 +730,12 @@ class MoqtSession:
 
         for record in records:
             self._settle_request(record)
-            if record.stream is not None:
-                record.stream.cancel(error)
+
+        for stream in list(self._request_streams):
+            stream.cancel(error)
+
+        for reader in list(self._incoming_streams):
+            self._drop_incoming(reader, error)
 
         for record in list(self._subscriptions.values()):
             self._remove_subscription(record)
@@ -755,6 +824,9 @@ class MoqtSession:
             self._protocol,
         )
         record = _SubscriptionRecord(request_id=request_id, handlers=handlers)
+        if self._destroyed:
+            return Subscription(self, record)
+
         self._subscriptions[request_id] = record
 
         def on_failure(error: RequestError) -> None:
@@ -769,7 +841,12 @@ class MoqtSession:
 
         spawn(
             self._open_request(
-                message, record, lambda msg: self._handle_subscription_message(record, msg), on_failure, on_end
+                "subscribe",
+                message,
+                record,
+                lambda msg: self._handle_subscription_message(record, msg),
+                on_failure,
+                on_end,
             )
         )
 
@@ -796,18 +873,33 @@ class MoqtSession:
         record = _FetchRecord(
             request_id=request_id, handlers=handlers, group_order=parameters.group_order or "ascending"
         )
+        if self._destroyed:
+            return FetchHandle(self, record)
+
         self._fetches[request_id] = record
 
         def on_failure(error: RequestError) -> None:
             self._fetches.pop(request_id, None)
             _call(handlers.on_error, error)
 
-        spawn(self._open_request(message, record, lambda msg: self._handle_fetch_message(record, msg), on_failure))
+        def on_end() -> None:
+            # §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request.
+            if record.stream is not None:
+                spawn(record.stream.fin_write())
+
+        spawn(
+            self._open_request(
+                "fetch", message, record, lambda msg: self._handle_fetch_message(record, msg), on_failure, on_end
+            )
+        )
 
         return FetchHandle(self, record)
 
     def track_status(self, options: MoqtSubscribeOptions, handlers: TrackStatusHandlers | None = None) -> None:
         """Send TRACK_STATUS (§9.13) on a new request stream; the answer arrives through ``handlers``."""
+        if self._destroyed:
+            return
+
         handlers = handlers or TrackStatusHandlers()
         request_id = self._allocate_request_id()
         message = encode_track_status(
@@ -844,7 +936,7 @@ class MoqtSession:
             self._track_statuses.pop(request_id, None)
             _call(handlers.on_error, error)
 
-        spawn(self._open_request(message, record, on_message, on_failure))
+        spawn(self._open_request("track-status", message, record, on_message, on_failure))
 
     def subscribe_namespace(
         self, options: MoqtSubscribeNamespaceOptions, handlers: NamespaceSubscriptionHandlers | None = None
@@ -866,6 +958,9 @@ class MoqtSession:
             self._protocol,
         )
         record = _NamespaceSubscriptionRecord(request_id=request_id, handlers=handlers)
+        if self._destroyed:
+            return NamespaceSubscription(self, record)
+
         self._namespace_subscriptions[request_id] = record
 
         def end(error: BaseException | None) -> None:
@@ -879,7 +974,9 @@ class MoqtSession:
             active = list(record.active.values())
             record.active.clear()
             for suffix in active:
-                _call(handlers.on_namespace_done, list(suffix))
+                _call(handlers.on_namespace_done, list(suffix), True)
+                if not self._live(record):
+                    return
             _call(handlers.on_end, error)
 
         def on_failure(error: RequestError) -> None:
@@ -890,6 +987,8 @@ class MoqtSession:
             _call(handlers.on_error, error)
 
         def on_end() -> None:
+            if self._count(record, "fin") is None:
+                return
             # §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request.
             if record.stream is not None:
                 spawn(record.stream.fin_write())
@@ -897,6 +996,7 @@ class MoqtSession:
 
         spawn(
             self._open_request(
+                "subscribe-namespace",
                 message,
                 record,
                 lambda msg: self._handle_namespace_message(record, msg),
@@ -910,6 +1010,7 @@ class MoqtSession:
 
     async def _open_request(
         self,
+        kind: _RequestKind,
         message: bytes,
         record: _RequestRecord,
         on_message: Callable[[ControlMessage], None],
@@ -933,6 +1034,9 @@ class MoqtSession:
                 return
 
             self._settle_request(record)
+            # A request that died unanswered keeps no stream: its sending direction would otherwise stay open.
+            if record.stream is not None:
+                record.stream.cancel(error)
             on_failure(error)
 
         try:
@@ -944,6 +1048,12 @@ class MoqtSession:
             if not self._destroyed:
                 self._fatal(error)
 
+            return
+
+        # The session ended while the stream was opening: nothing is sent on it, and nothing it carries is reported.
+        if self._destroyed:
+            stream.readable.cancel()
+            stream.writable.abort()
             return
 
         timeout = self._config.request_timeout
@@ -968,6 +1078,10 @@ class MoqtSession:
                 self._fatal(error)
                 return
 
+            # The response direction failed, so the request is over: its sending direction goes with it.
+            if record.stream is not None:
+                record.stream.cancel(error)
+
             if record.settled:
                 if on_settled_error is not None and not record.cancelled and not self._destroyed:
                     on_settled_error(error)
@@ -981,20 +1095,49 @@ class MoqtSession:
             elif on_end is not None and not record.cancelled and not self._destroyed:
                 on_end()
 
-        record.stream = open_request_stream(
+        def on_any_message(msg: ControlMessage) -> None:
+            violation = (
+                _active_count_violation(kind, self._active_count_negotiated, msg.parameters)
+                if isinstance(msg, RequestOk)
+                else None
+            )
+
+            if violation is None:
+                on_message(msg)
+            else:
+                self._fatal(MoqtProtocolError(violation))
+
+        request_stream = open_request_stream(
             stream,
             message,
             RequestStreamHandlers(
-                on_message=on_message,
+                on_message=on_any_message,
                 on_fin=on_fin,
                 on_error=on_error,
+                on_closed=lambda: self._request_streams.discard(request_stream),
             ),
             self._protocol,
         )
+        record.stream = request_stream
+        self._request_streams.add(request_stream)
 
         # A cancel that raced the stream opening lands here.
         if record.cancelled:
             record.stream.cancel(record.pending_cancel_reason)
+
+    def _drop_incoming(self, reader: StreamReader, reason: object = None) -> None:
+        """Stop reading an incoming stream still registered, and abort its response direction."""
+        if reader not in self._incoming_streams:
+            return
+
+        response = self._incoming_streams.pop(reader)
+        reader.cancel(reason)
+        if response is not None:
+            response.abort()
+
+    def _live(self, record: _RequestRecord) -> bool:
+        """Whether ``record``'s handlers may still be called: not after its cancel, and not after ``on_closed``."""
+        return not record.cancelled and not self._destroyed
 
     def _settle_request(self, record: _RequestRecord) -> None:
         """Mark a request answered (or dead) and disarm its response timeout."""
@@ -1055,7 +1198,7 @@ class MoqtSession:
     def _handle_fetch_message(self, record: _FetchRecord, message: ControlMessage) -> None:
         match message:
             case FetchOk():
-                self._settle_request(record)
+                self._settle_fetch(record)
                 _call(record.handlers.on_ok, message)
             case RequestOk():
                 # Some deployed relays accept a FETCH with the generic REQUEST_OK instead of the
@@ -1064,11 +1207,13 @@ class MoqtSession:
                 # stream. It is still the response, so it has to settle the request: leaving the timer
                 # armed would fail an answered fetch (and drop its data stream) once the deadline
                 # passed.
-                self._settle_request(record)
+                self._settle_fetch(record)
             case RequestError():
                 self._settle_request(record)
                 self._fetches.pop(record.request_id, None)
                 _call(record.handlers.on_error, message)
+                if record.stream is not None:
+                    spawn(record.stream.fin_write())
             case Goaway():
                 _call(record.handlers.on_goaway, message)
             case _:
@@ -1086,7 +1231,10 @@ class MoqtSession:
 
                 self._settle_request(record)
                 record.accepted = True
-                _call(record.handlers.on_ok)
+                record.owed = message.parameters.active_count or 0
+                _call(record.handlers.on_ok, message.parameters.active_count)
+                if message.parameters.active_count == 0 and self._live(record):
+                    _call(record.handlers.on_synced)
             case RequestError():
                 # After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
                 if record.settled:
@@ -1109,21 +1257,44 @@ class MoqtSession:
                     )
                     return
 
+                synced = self._count(record, "namespace" if isinstance(message, Namespace) else "namespace-done")
+                if synced is None:
+                    return
+
                 suffix = list(message.track_namespace_suffix)
                 if isinstance(message, Namespace):
                     record.active[tuple(suffix)] = suffix
                     _call(record.handlers.on_namespace, list(suffix))
+                    if synced and self._live(record):
+                        _call(record.handlers.on_synced)
                 elif record.active.pop(tuple(suffix), None) is not None:
-                    _call(record.handlers.on_namespace_done, suffix)
+                    _call(record.handlers.on_namespace_done, suffix, False)
                 else:
                     # §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
                     self._fatal(
                         MoqtProtocolError("NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream")
                     )
             case Goaway():
+                if self._count(record, "goaway") is None:
+                    return
                 _call(record.handlers.on_goaway, message)
             case _:
                 self._fatal(MoqtProtocolError(f"unexpected {message.kind} on a subscribe-namespace request stream"))
+
+    def _count(self, record: _NamespaceSubscriptionRecord, step: _CountedInput) -> bool | None:
+        """Advance the ACTIVE_COUNT set by one message.
+
+        True when it was the last NAMESPACE owed; ``None`` when it broke the set, which closes the session.
+        """
+        if record.owed == 0:
+            return False
+
+        if step != "namespace":
+            self._fatal(MoqtProtocolError(_COUNTED_SET_VIOLATIONS[step]))
+            return None
+
+        record.owed -= 1
+        return record.owed == 0
 
     def _cancel_namespace_subscription(self, record: _NamespaceSubscriptionRecord, reason: object = None) -> None:
         if record.cancelled:
@@ -1165,6 +1336,12 @@ class MoqtSession:
         if record.track_alias is not None and self._alias_routes.get(record.track_alias) is record:
             del self._alias_routes[record.track_alias]
 
+    def _settle_fetch(self, record: _FetchRecord) -> None:
+        """A fetch's response arrived: settle it, and forget it if its data stream has already ended (#419)."""
+        self._settle_request(record)
+        if record.data_ended:
+            self._fetches.pop(record.request_id, None)
+
     def _cancel_fetch(self, record: _FetchRecord, reason: object = None) -> None:
         if record.cancelled:
             return
@@ -1174,6 +1351,8 @@ class MoqtSession:
         self._settle_request(record)
         if record.stream is not None:
             record.stream.cancel(reason)
+        if record.reader is not None:
+            record.reader.cancel(reason)
         self._fetches.pop(record.request_id, None)
 
     # --------------------------------------------------------------------------
@@ -1189,28 +1368,41 @@ class MoqtSession:
 
     async def _handle_unidirectional_stream(self, stream: ReceiveStream) -> None:
         reader = StreamReader(stream)
-        stream_type = await reader.read_varint()
-
-        if stream_type == STREAM_TYPE.SETUP:
-            await self._run_control_stream(reader)
-            return
-
-        if is_subgroup_header_type(stream_type):
-            header = await read_subgroup_header(reader, stream_type)
-            await self._run_subgroup_stream(reader, header)
-            return
-
-        if stream_type == STREAM_TYPE.FETCH_HEADER:
-            request_id = await read_fetch_header(reader)
-            await self._run_fetch_stream(reader, request_id)
-            return
-
-        if stream_type == STREAM_TYPE.PADDING:
+        if self._destroyed:
             reader.cancel()
             return
 
-        reader.cancel()
-        raise MoqtProtocolError(f"unknown unidirectional stream type 0x{stream_type:x}")
+        self._incoming_streams[reader] = None
+
+        try:
+            stream_type = await reader.read_varint()
+
+            if stream_type == STREAM_TYPE.SETUP:
+                self._incoming_streams.pop(reader, None)
+                await self._run_control_stream(reader)
+                return
+
+            if is_subgroup_header_type(stream_type):
+                header = await read_subgroup_header(reader, stream_type)
+                await self._run_subgroup_stream(reader, header)
+                return
+
+            if stream_type == STREAM_TYPE.FETCH_HEADER:
+                request_id = await read_fetch_header(reader)
+                await self._run_fetch_stream(reader, request_id)
+                return
+
+            if stream_type == STREAM_TYPE.PADDING:
+                reader.cancel()
+                return
+
+            raise MoqtProtocolError(f"unknown unidirectional stream type 0x{stream_type:x}")
+        except BaseException:
+            # A protocol error closes the session only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
+            raise
+        finally:
+            self._incoming_streams.pop(reader, None)
 
     async def _read_control_frame(self, reader: StreamReader, message_type: int) -> ControlMessage:
         """Read one control-message frame using the pull-based stream reader."""
@@ -1222,6 +1414,10 @@ class MoqtSession:
     async def _run_control_stream(self, reader: StreamReader) -> None:
         # The stream-type varint (0x2F00) doubles as the first message's type.
         setup = await self._read_control_frame(reader, MESSAGE_TYPE.SETUP)
+        # The adapter's close drains before it ends the connection, so the control stream can still deliver after
+        # `on_closed`.
+        if self._destroyed:
+            return
         if not isinstance(setup, Setup):
             raise MoqtProtocolError("control stream did not begin with SETUP")
 
@@ -1230,7 +1426,10 @@ class MoqtSession:
 
         self._received_server_setup = True
         # The option's value is reserved and ignored on receipt: its presence is the declaration.
-        self._max_age_supported = any(option.type == SETUP_OPTION.MAX_AGE for option in setup.options)
+        self._max_age_supported = _declares(setup.options, SETUP_OPTION.MAX_AGE)
+        self._active_count_negotiated = _declares(self._config.setup_options, SETUP_OPTION.ACTIVE_COUNT) and _declares(
+            setup.options, SETUP_OPTION.ACTIVE_COUNT
+        )
         if not self.ready.done():
             self.ready.set_result(None)
         _call(self._callbacks.on_ready, setup.options)
@@ -1239,6 +1438,8 @@ class MoqtSession:
         while not await reader.at_end():
             message_type = await reader.read_varint()
             message = await self._read_control_frame(reader, message_type)
+            if self._destroyed:
+                return
             if not isinstance(message, Goaway):
                 raise MoqtProtocolError(f"unexpected {message.kind} on the control stream")
 
@@ -1322,21 +1523,36 @@ class MoqtSession:
             reader.cancel()
             return
 
+        record.reader = reader
+
         try:
             async with aclosing(read_fetch_entries(reader, record.group_order)) as entries:
                 async for entry in entries:
-                    if record.cancelled:
+                    if record.cancelled or self._destroyed:
                         reader.cancel()
                         return
 
                     _call(record.handlers.on_entry, entry)
 
-            _call(record.handlers.on_end)
+            # Teardown's or the fetch's own cancel of this reader reads as a clean end.
+            if not self._destroyed and not record.cancelled:
+                _call(record.handlers.on_end)
         except MoqtProtocolError:
-            raise
+            if not record.cancelled:
+                raise
         except Exception as error:  # a reset mid-replay means entries may be missing
             # Never report it as the clean FIN `on_end` promises.
-            _call(record.handlers.on_reset, FetchReset(error=error))
+            if not self._destroyed and not record.cancelled:
+                _call(record.handlers.on_reset, FetchReset(error=error))
+        finally:
+            # Nothing more arrives for the fetch once its data stream and its response have, so the
+            # session forgets it then (#419): kept, the record's handlers held everything they had
+            # collected for the session's life. Data can beat the response; until the response, or the
+            # request timeout, the record stays for teardown to fail.
+            record.data_ended = True
+            record.reader = None
+            if record.settled:
+                self._fetches.pop(request_id, None)
 
     # --------------------------------------------------------------------------
     # Incoming bidirectional streams (server-initiated requests)
@@ -1351,8 +1567,27 @@ class MoqtSession:
 
     async def _handle_incoming_request(self, stream: BidirectionalStream) -> None:
         reader = StreamReader(stream.readable)
-        message_type = await reader.read_varint()
-        message = await self._read_control_frame(reader, message_type)
+        if self._destroyed:
+            reader.cancel()
+            stream.writable.abort()
+            return
+
+        # Until its response has been written, the request is teardown's to drop: nothing is answered after
+        # `on_closed`.
+        self._incoming_streams[reader] = stream.writable
+
+        try:
+            message_type = await reader.read_varint()
+            message = await self._read_control_frame(reader, message_type)
+        except BaseException:
+            # Ended or reset before a whole message, there is no request to answer. A protocol error closes the session
+            # only once this task is over, so its teardown cannot reach the stream.
+            self._drop_incoming(reader)
+            raise
+
+        # Teardown dropped the request while its message was arriving.
+        if self._destroyed:
+            return
 
         # Before answering: a request this client rejects still consumes its id.
         if isinstance(message, Subscribe | SubscribeNamespace | Publish | PublishNamespace | TrackStatus | Fetch):
@@ -1362,9 +1597,10 @@ class MoqtSession:
             try:
                 await stream.writable.write(data)
                 await stream.writable.close()
-            except Exception:  # peer cancelled; nothing to clean up
+            except Exception:  # peer cancelled, or teardown dropped the request
                 pass
 
+            self._incoming_streams.pop(reader, None)
             reader.cancel()
 
         if isinstance(message, Publish):

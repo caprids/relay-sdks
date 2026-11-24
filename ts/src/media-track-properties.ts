@@ -25,7 +25,7 @@ export interface MediaTrackPropertiesOptions {
   publisherPriority?: number;
 }
 
-/** Audio's default subgroup timeout: measured under a 2 s uplink stall to sjc ([#302](https://github.com/muxinc/relay-sdks/issues/302)). */
+/** Audio's default subgroup timeout: measured under a 2 s uplink stall to sjc. */
 const AUDIO_SUBGROUP_TIMEOUT_US = 500_000;
 /** Default Publisher Priority per kind, lower being more urgent: audio ahead of video, as Huddle sets them by hand. */
 const PUBLISHER_PRIORITY: Readonly<Record<MediaKind, number>> = { audio: 16, video: 96 };

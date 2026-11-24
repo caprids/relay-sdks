@@ -234,8 +234,10 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             try:
                 async with discovery:
                     async for event in discovery:
+                        if event.namespace is None:
+                            continue
                         if event.type == "announced":
-                            announced_namespaces.add(tuple(event.namespace))
+                            announced_namespaces.add(event.namespace)
                         if list(event.namespace) == namespace:
                             discovered.append(event.type)
                 if not closing:
@@ -639,8 +641,8 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             try:
                 async with room_discovery:
                     async for event in room_discovery:
-                        if event.type == "announced":
-                            room_discovered.add(tuple(event.namespace))
+                        if event.type == "announced" and event.namespace is not None:
+                            room_discovered.add(event.namespace)
             except Exception as error:
                 if not closing:
                     errors.append(f"room discovery: {error!r}")

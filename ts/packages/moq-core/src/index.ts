@@ -25,6 +25,8 @@ export {
   SETUP_OPTION,
   TRACK_PROPERTY,
 } from './protocol/control-messages.js';
+export type { MoqtDuplexSession, MoqtDuplexSessionConfig } from './protocol/duplex-session.js';
+export { createMoqtDuplexSession } from './protocol/duplex-session.js';
 export type { SessionErrorCode } from './protocol/errors.js';
 export { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './protocol/errors.js';
 export type { FetchEndOfRangeStatus, FetchStreamEntry, MoqtObject, ObjectStatus } from './protocol/object-stream.js';

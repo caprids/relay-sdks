@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
@@ -51,6 +52,7 @@ from moq_core.control_messages import (
     encode_publish_state_notify,
     encode_request_error,
     encode_request_ok,
+    encode_request_update,
     encode_setup,
     encode_subscribe,
     encode_subscribe_ok,
@@ -358,6 +360,31 @@ class TestEncodeMessageParameters:
 
         with pytest.raises(MoqtProtocolError, match="MAX_AGE"):
             decode_message_parameters(ByteReader(writer.to_bytes()))
+
+    def test_frames_active_count_as_a_bare_varint_and_decodes_it_from_a_request_ok(self) -> None:
+        assert SETUP_OPTION.ACTIVE_COUNT == 0x40B64
+        assert PARAMETER_TYPE.ACTIVE_COUNT == 0x40B66
+        assert encode_parameters(MessageParameters(active_count=3)) == bytes([0x01, 0xC4, 0x0B, 0x66, 0x03])
+        assert decode_all(encode_request_ok(MessageParameters(active_count=3))) == [
+            RequestOk(parameters=MessageParameters(active_count=3), track_properties=[])
+        ]
+
+    @pytest.mark.parametrize(
+        "encoded",
+        [
+            pytest.param(lambda: encode_subscribe_ok(1, MessageParameters(active_count=0)), id="SUBSCRIBE_OK"),
+            pytest.param(lambda: encode_request_update(2, MessageParameters(active_count=0)), id="REQUEST_UPDATE"),
+        ],
+    )
+    def test_refuses_active_count_outside_a_request_ok_as_an_unknown_parameter_type(
+        self, encoded: Callable[[], bytes]
+    ) -> None:
+        with pytest.raises(MoqtProtocolError, match="unknown message parameter type"):
+            decode_all(encoded())
+
+    def test_refuses_active_count_in_a_bare_parameter_list(self) -> None:
+        with pytest.raises(MoqtProtocolError, match="unknown message parameter type"):
+            decode_message_parameters(ByteReader(encode_parameters(MessageParameters(active_count=0))))
 
     def test_raises_on_an_unknown_parameter_type(self) -> None:
         # Hand-craft: 1 parameter, type 0x99 (unknown).

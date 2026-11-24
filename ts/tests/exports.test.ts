@@ -16,22 +16,26 @@ import type { DocumentService, FrameOutcomeKind, FrameWriter, FrameWriterOptions
  * and nothing else, so a rename in the source fails to compile here until the record is updated.
  */
 describe('public vocabulary', () => {
-  it('exports one entry point per connection role and nothing under the old names', () => {
+  it('exports one entry point per connection kind', () => {
     expect(Object.keys(relay).sort()).toEqual([
       'DEFAULT_ENDPOINT',
       'RelayError',
+      'SNAPSHOT_LIMIT_MS',
+      'SNAPSHOT_QUIET_MS',
       'SubscriptionConnectionClosedError',
       'SubscriptionOverflowError',
       'SubscriptionRequestError',
+      'connectRelay',
       'connectRelayPublisher',
       'connectRelaySubscriber',
       'connectSupervisedPublisher',
+      'connectSupervisedRelay',
       'connectSupervisedSubscriber',
       'readJSON',
       'readText',
       'roomEndpoint',
+      'webTransport',
     ]);
-    expect(relay).not.toHaveProperty('connectRelay');
   });
 
   it('spells subscription events after what happened, not after the protocol message', () => {
@@ -121,16 +125,21 @@ describe('diagnostics vocabulary', () => {
 
 /** `@caprid/relay/media`: the media policy, which the root does not export (spec/vocabulary.md). */
 describe('media vocabulary', () => {
-  it('exports factories for the frame writer, the frame reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
+  it('exports factories for the frame writer, the frame reader, the latest-value reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
     const media = await import('../src/media.js');
     expect(Object.keys(media).sort()).toEqual([
+      'PRESENCE_HEARTBEAT_MS',
+      'PRESENCE_TRACK',
       'createCatalogService',
       'createDocumentService',
       'createFrameReader',
       'createFrameWriter',
+      'createLatestValueReader',
+      'createPresenceView',
       'createReplaceableTrack',
       'mediaSubscribeParameters',
       'mediaTrackProperties',
+      'publishPresence',
     ]);
     expect(relay).not.toHaveProperty('createFrameWriter');
   });

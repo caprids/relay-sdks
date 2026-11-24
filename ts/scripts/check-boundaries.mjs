@@ -30,7 +30,7 @@ assert.deepEqual(quic.dependencies, { [core.name]: 'workspace:*' }, 'The native 
 // wrapped to the transport adapter contract. The SDK never imports it; the application passes its factory.
 assert.deepEqual(
   websocket.dependencies,
-  { '@moq/qmux': '0.3.3', [core.name]: 'workspace:*' },
+  { '@moq/qmux': '0.3.5', [core.name]: 'workspace:*' },
   'The WebSocket adapter depends on the core and an exact @moq/qmux only',
 );
 // `@caprid/relay/node` loads the adapter when it is installed (#196): an optional peer, never a dependency.
@@ -130,16 +130,21 @@ const sdkExports = await import('../dist/index.js');
 assert.deepEqual(Object.keys(sdkExports).sort(), [
   'DEFAULT_ENDPOINT',
   'RelayError',
+  'SNAPSHOT_LIMIT_MS',
+  'SNAPSHOT_QUIET_MS',
   'SubscriptionConnectionClosedError',
   'SubscriptionOverflowError',
   'SubscriptionRequestError',
+  'connectRelay',
   'connectRelayPublisher',
   'connectRelaySubscriber',
   'connectSupervisedPublisher',
+  'connectSupervisedRelay',
   'connectSupervisedSubscriber',
   'readJSON',
   'readText',
   'roomEndpoint',
+  'webTransport',
 ]);
 // The Node entry point exports what the root does, with its own connect functions (#196).
 const nodeExports = await import('../dist/node.js');
@@ -155,13 +160,18 @@ for (const name of Object.keys(sdkExports)) {
 // The media entry point exports only the media policy, which the root leaves out (#263, #303).
 const mediaPolicy = await import('../dist/media.js');
 assert.deepEqual(Object.keys(mediaPolicy).sort(), [
+  'PRESENCE_HEARTBEAT_MS',
+  'PRESENCE_TRACK',
   'createCatalogService',
   'createDocumentService',
   'createFrameReader',
   'createFrameWriter',
+  'createLatestValueReader',
+  'createPresenceView',
   'createReplaceableTrack',
   'mediaSubscribeParameters',
   'mediaTrackProperties',
+  'publishPresence',
 ]);
 // The core's wire entry point exports the codec a test relay drives a session with, and only that (#367).
 assert.deepEqual(core.exports['./wire'], { types: './dist/wire.d.ts', import: './dist/wire.js' });

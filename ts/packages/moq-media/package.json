@@ -1,7 +1,7 @@
 {
   "name": "@caprid/moq-media",
-  "version": "0.3.0",
-  "description": "Transport-independent LOC and MSF media format helpers",
+  "version": "0.5.0",
+  "description": "LOC and MSF media formats, playout clocks, and headless audio and video players for MoQ",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

@@ -99,7 +99,7 @@ export interface ScenarioResult {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A synthetic microphone: a gated 1 kHz tone, with emission times known on `performance.now()`'s clock. */
-async function syntheticMicrophone(sampleRate: number) {
+export async function syntheticMicrophone(sampleRate: number) {
   const context = new AudioContext({ sampleRate });
   await context.resume();
   const destination = context.createMediaStreamDestination();

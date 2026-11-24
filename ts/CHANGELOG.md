@@ -7,12 +7,196 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay-websocket`: `@moq/qmux` 0.3.3 to 0.3.5, which fixes a connection flow-control leak. In 0.3.3, a
+  receive stream cancelled with data still in flight was forgotten at once, so the data that arrived after the
+  cancel, and the gap up to a RESET_STREAM's final size, were never credited back to the connection's window
+  (MAX_DATA). Each mid-group unsubscribe leaked its in-flight bytes, and once about one window had leaked, the
+  relay could send nothing more on that WebSocket connection, with the session still open and no error. 0.3.5 keeps
+  a cancelled stream registered until FIN or RESET and credits both. It is the same bug moq-relay 0.17.17 fixed on
+  the relay's side (qmux 0.5.4). Nothing to change in an application.
 - `@caprid/relay/diagnostics`, a new subpath: client diagnostics (#435). `createDiagnostics()` records events, each
   with a sequence number, holding the last 10 minutes, and stats sections read at each snapshot.
   `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of the client's own
   broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
   `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
   that publish. Nothing to change in an application.
+
+## 0.5.0
+
+- `@caprid/moq-core`: after a session's `onClosed`, none of its callbacks run (#527). A subscribe session that has ended
+  starts no request, and at its end it stops every request stream and data stream it was reading, so a fetch reports
+  no entry and a namespace subscription no end after `onClosed`. A publish session that is closing refuses SUBSCRIBE,
+  TRACK_STATUS and SUBSCRIBE_NAMESPACE with `GOING_AWAY`, and from `close()` to `onClosed` reports only ends
+  (`onSubscribeEnd`, an `onTrackBinding` with no alias); a track ended with `end({ after })` is served until that end.
+  On a duplex session, `subscriber.close()` and `subscriber.destroy()` now end the session in order, as `destroy()`
+  does: the publisher drains before the transport closes, with the code and reason `close()` was given.
+- `@caprid/relay`: `connectSupervisedRelay(options)` supervises one connection that publishes and
+  subscribes. It returns a `SupervisedRelay`: the supervised subscriber's `want`, `unwant`, `catchUp`
+  and `publishingRoots`, plus `publish(root)`, which returns a `SupervisedPublication` whose track
+  writers outlive the connections. Each connection is one generation, and every root is served as the
+  root followed by its field, so a reconnect or rotation moves every root, track and want together.
+  A root the relay stops soliciting replaces the whole connection. `@caprid/relay/node` exports it over
+  native QUIC. The supervised publisher and subscriber now run on the same supervision loop, with no
+  change in behaviour.
+- `@caprid/relay`: `connectRelay(options)` opens one connection that publishes and subscribes. It returns a
+  `RelaySession`: everything a `RelaySubscriber` does, plus `publish(namespace)`, which announces a namespace and returns
+  a `RelayPublication` (`registerTrack`, `announced`, `closed`, `close`). A connection announces any number of
+  namespaces with one token. A namespace the relay stops soliciting ends only its publication, with `NAMESPACE_ENDED`.
+  The relay does not route a connection's own announcements back to it: its discovery leaves them out, and a
+  subscribe to its own track is refused. `@caprid/relay/node` exports it over native QUIC. `connectRelay` was the
+  subscriber's name before it became `connectRelaySubscriber`; it now means a connection that does both (see
+  spec/vocabulary.md, "Connections"). `connectRelayPublisher` behaves as before. The connection does not declare MoQ
+  Active Count, so its `namespaceEvents` loads by the timing rules, as against every deployed moq-relay.
+- `@caprid/moq-core`: `createMoqtDuplexSession(transport, config)` runs the subscribe and publish drivers on one
+  transport. `MoqtPublishSession` announces several namespaces: `announce()` now adds a namespace instead of replacing
+  the one announced, `withdraw(namespace)` sends NAMESPACE_DONE, and `isSolicited(namespace)` reports coverage for one
+  namespace. Each namespace announces once a track in it is registered. `onAnnounced` runs once per namespace,
+  `onAnnounceEnded` gets the `namespace` it lost, and `onTrackBinding` and `onSubscribeFailed` carry `trackNamespace`.
+  Code that called `announce()` twice to move to another namespace must `withdraw()` the first.
+- `@caprid/moq-core`, `@caprid/relay`: a subscriber connection ends at once when the relay stops its control stream
+  (§6.3: the control stream lives as long as the session), as a publisher connection already did, instead of carrying
+  on until the transport's own close.
+- `@caprid/relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when a want's track has delivered nothing, such as an interrupt or transcript track before its first object (#524).
+  Such a want now moves when the replacement's SUBSCRIBE is accepted. On ord the old connection closed 10.1 s after
+  `rotate()` before, in 12 of 12 rotations, and 0.13 to 0.15 s after (median 0.14 s, 12 rotations). A first object
+  written during the rotation was delivered once in 82 of 82 trials. Nothing to change in an application.
+- `@caprid/relay`: a supervised subscriber's rotation no longer holds the old connection open for the 10 s overlap
+  when the old connection delivers every object first (#430). A want whose target is unchanged now cuts over at the
+  replacement's first object, not at the first object the old subscription had not delivered. Both connections
+  receive each object within a fraction of a millisecond, so the old rule could wait out the whole overlap, and did whenever the track sent nothing new during it. Objects are still delivered once each, and a subgroup
+  end the old subscription reported is not reported again. On ord, with one want on a track written every 100 ms,
+  the old connection closed 0.2 to 2.3 s after `rotate()` before (median 0.36 s, over 1 s in 6 of 23 rotations) and
+  0.18 to 0.28 s after (median 0.19 s, 72 rotations). Nothing to change in an application.
+- `@caprid/relay`: `SupervisedSubscriber.publishingRoots({ prefix }, { onChanged, onError })` reports the roots that
+  are publishing now under a prefix, across reconnects and the subscriber's own rotations (#422). Publishing means
+  announced, not necessarily sending objects. Each namespace one field below the prefix is a root, and one a field
+  below a root is read as that root's generation, so a supervised publisher's rotations and reconnects report nothing. The
+  first `onChanged` is the load (`initial: true`, every root publishing in `added`, possibly none), and
+  `PublishingRoots.loaded` tells "no root here" from "not loaded yet". After a reconnect or rotation the view reports
+  only the roots added or removed meanwhile. New roots come in one call at the load. A root the new discovery misses
+  is removed in a later call, once the new discovery has shown it nothing for 100 ms, so a snapshot taken inside a
+  publisher rotation's gap reports nothing (#427). An application can build a room roster with no roster server.
+- `@caprid/relay/media`: presence, a live room roster with no roster server (#422). Each participant calls
+  `publishPresence(publisher, document)` on its supervised publisher: the document (JSON) goes out on every relay
+  subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls
+  `createPresenceView(subscriber, { prefix }, { onChanged })`, which reports each member once its document arrives,
+  with `joined`, `left`, `updated`, `stale` (no new document for three heartbeats, before the relay's ~10 s
+  withdrawal of a frozen publisher) and `resumed`. A publisher's rotations and the subscriber's own reconnects and
+  rotations report nothing. A publisher's reconnect is not make-before-break, so it can show as `left` then `joined`,
+  or as `stale` then `resumed`. The track convention is in spec/media-layer.md, "Presence track".
+- `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
+  between every want that follows generations, every want waiting for its namespace to be announced again (0.4.0),
+  and every publishing-roots view. A want under another want's root or a view's prefix no longer fails with
+  `PREFIX_OVERLAP`, and a view refused on its prefix leaves the wants under it alone. A want waiting on a fixed
+  namespace is still woken by its announcement when a followed root or a publishing-roots view covers the namespace;
+  before, a followed root closed its watch and the want waited out the whole backoff. Nothing to change in an
+  application.
+- `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
+  relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
+  (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported. `loaded`
+  takes no `capacity`, so a snapshot that fills the queue still loads. **Breaking:** `NamespaceEvent` is now a union, and `loaded` has no `namespace`. TypeScript that reads
+  `event.namespace` without checking `event.type` no longer compiles, and JavaScript gets `undefined` on `loaded`; check
+  `event.type` first.
+- `@caprid/relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
+  error. It did when the stream failed before the connection's end was seen, which made a lost connection read as
+  everyone leaving. Every error ending still means every namespace is withdrawn, and a clean end still yields
+  `unannounced` for each one first. `@caprid/moq-core`'s `onNamespaceDone` gains a second argument,
+  `{ requestEnded }`, true for the withdrawals the session reports itself when a request ends.
+- `@caprid/moq-core`: MoQ Active Count (draft-lcurley-moq-active-count): `SETUP_OPTION.ACTIVE_COUNT`,
+  `PARAMETER_TYPE.ACTIVE_COUNT` and `MessageParameters.activeCount` (decoded only on REQUEST_OK). A session that
+  declared the option and whose peer declared it too passes the count to `NamespaceSubscriptionHandlers.onOk({
+  activeCount })` and calls the new `onSynced()` after the counted NAMESPACE messages; the session closes with
+  PROTOCOL_VIOLATION when the peer breaks the extension's rules. `@caprid/relay`'s subscriber connection declares it.
+  No deployed moq-relay does, so nothing changes against them.
+
+## 0.4.1
+
+- `@caprid/moq-media`: a headless video player (#478). `createVideoPlayer({ clock, decoderConfig, render })` decodes a
+  frame reader's frames with WebCodecs and calls `render(frame)` when the playout clock says each is due. Video then
+  follows the audio that drives the clock, or the wall clock without audio. `render` borrows the frame. The player
+  closes it when `render` returns, and a sink that keeps one keeps `frame.clone()`. `canvasRenderer(canvas)` draws onto
+  an `HTMLCanvasElement` or an `OffscreenCanvas`, and `videoDecoderConfigFromTrack(track)` reads the decoder config from
+  the catalog. A decoder that fails before its first frame, or with `NotSupportedError`, fails for good. The player
+  reports it once and decodes nothing until `configure()`. `reset()` drops the frames waiting and what the decoder holds
+  at once, as at a restart the app learns of before the next frame. A gap flushes the decoder, so the frames before it
+  still come out, and a frame marked key that the decoder finds is not one is reported and skipped to the next keyframe.
+  The player runs in a dedicated worker as it is. The WebCodecs example's `watchVideo` is built on it. Through the
+  in-memory hub in headless Chromium, players paced by the wall clock, by audio, and in a worker each showed all 241
+  frames published over 8 s (`mise run ts:test:video-player`).
+
+## 0.4.0
+
+- Voice bot and WebCodecs examples: `listenAudio`, `watchVideo` and `talkToBot` take a supervised subscriber
+  (`connectSupervisedSubscriber`) instead of a plain one, and keep playing when the talker restarts (#404). Before, a
+  listener built on `connectRelaySubscriber` went silent for good when its talker restarted. Each track is now a want:
+  a start waits for a publisher that has not announced yet instead of failing on the announce race, so the callers'
+  retry loops are gone. A restart cuts what the player held, and the new subscription plays live. `listenAudio`'s new
+  `onRestarted({ reason, namespace })` reports it. The new `generations: true` option follows a supervised publisher's
+  newest generation under the namespace, which `talkToBot` turns on. `talkToBot` replaces #442's own discovery loop
+  with it and calls `onListening` once, then `onRestarted` on each move. The page no longer waits up to 5 s on a
+  crashed generation that is still announced. To update a copy: pass a supervised subscriber, drop the start retries,
+  and handle `onRestarted` where you handled a second `onListening`. One window remains in the supervised subscriber:
+  after discovery ends or a reconnect, it can play an older generation that is still announced until the newer one is
+  announced again (#482).
+- `@caprid/relay/media`: `createLatestValueReader({ onValue, late, onCatchUp })` reads a latest-wins track, such as
+  telemetry or a control, as its newest values (#447). Spread it into `subscribe` or `want` handlers. It drops an
+  object that arrives after a newer one, drops a value the `late` predicate rejects, and calls `onCatchUp` once when
+  values start arriving late, typically to call a supervised subscriber's `catchUp(key)`. A want's restart or move
+  starts it over. `reader.stats` counts what it delivered and dropped. Before, a viewer kept its own "newest group
+  applied" marker and had no trigger to skip past a relay backlog.
+- `@caprid/moq-core`: a FETCH is removed from its session once its data stream has ended (`onEnd`) or reset (`onReset`)
+  and its response has arrived (#419). Before, only a REQUEST_ERROR or `cancel()` removed it, so its handlers, and every
+  payload they had collected, stayed in memory for the session's life: each group a VOD consumer fetched through
+  `trackSource.fetch` stayed. Through relay.mux.global (moq-relay 0.17.9), 30 FETCHes of 2 MiB groups whose results were
+  dropped left 60 MiB of `arrayBuffers` after `gc()` in Node; now 2 MiB. No API change: `cancel()` after the end is
+  still allowed, and code that called it to free the fetch can stop.
+- Voice bot example: `talkToBot` follows the bot's newest generation (#442). The Python bot now publishes through a
+  supervised publisher, one generation below `botNamespace`, so it survives a lost connection. The page finds the
+  newest generation with namespace discovery and moves to each new one, calling `onListening` again. A page copied
+  from an earlier version listens at `botNamespace` itself and does not hear this bot.
+- `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
+  rotation moves the track to the new generation (#444). Before, it waited for the encoder's next scheduled keyframe,
+  so viewers switched up to one keyframe interval late. An encoder that makes keyframes only on request switched only
+  when the 10 s overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
+- `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
+  left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
+  ([Test recovery by dropping the transport](../docs/guides/errors-and-recovery.md#test-recovery-by-dropping-the-transport)), instead of
+  re-implementing it. The wrapper keeps the default's `TRANSPORT_UNAVAILABLE` checks and needs no casts.
+- `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
+  clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a
+  later target, `behind` a longer `reorderWindowUs`. In a two-browser call with frame-grouped audio and no reorder
+  window, nearly all of the 1.9% counted as late was frames swapped with the next one within 5 ms. A reader that
+  reported `late` as one number adds `behind` to keep the old total.
+- `@caprid/relay`: under frame grouping the frame writer no longer drops the oldest frame once 25 wait; the backlog has
+  no default bound. Those drops were all of a no-limit voice talker's loss in uplink outages of 2 s or more (A-14).
+  Pass `maxBacklog: 25` for the old behavior. Keyframe grouping keeps its default of 8.
+- `@caprid/relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connectSupervisedSubscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`onPublisherDone`) and never subscribes again.
+- Docs only, no code change:
+  - [Connecting & authentication](../docs/guides/connecting.md#content-security-policy) lists the Content Security Policy a page needs (#385): `connect-src`
+    for each relay's `https:` and `wss:` origins, and `blob:` and `'wasm-unsafe-eval'` in `script-src`. Without
+    `'wasm-unsafe-eval'` the audio player loses Opus loss concealment with no error; only
+    `player.joinPhases.opusLoadedUs === null` shows it.
+  - The GUIDE's `openGroup()` example carries on after `SUBSCRIPTION_CHANGED`, which a first viewer on another relay
+    causes, instead of rethrowing it.
+  - The GUIDE points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for Client
+    tokens.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
+  - Corrected: frame grouping no longer drops the oldest frame by default (`spec/media-layer.md`, the WebCodecs
+    example); `SequencedFrame.key` is set on a group's first frame; `@caprid/relay/node` loads `@caprid/relay-quic`
+    when no `createTransport` is given.
 
 ## 0.3.0
 

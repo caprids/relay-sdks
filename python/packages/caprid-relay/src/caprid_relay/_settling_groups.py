@@ -44,12 +44,23 @@ async def _settled(acknowledged: Awaitable[None]) -> None:
 class SettlingGroups:
     """The settling groups of one publisher connection, shared by every track on it."""
 
-    __slots__ = ("_limit", "_settling", "_waiting")
+    __slots__ = ("_limit", "_settling", "_waiting", "_whole")
 
     def __init__(self, limit: int = SETTLING_GROUP_LIMIT) -> None:
         self._limit = limit
         self._settling: set[asyncio.Task[None]] = set()
         self._waiting: deque[asyncio.Future[None]] = deque()
+        self._whole: SettlingGroups | None = None
+
+    def subset(self) -> SettlingGroups:
+        """A set for some of this connection's groups, such as one publication's.
+
+        Its groups count against this set's limit, and it waits here for room. Its ``drain`` waits only for its
+        own groups.
+        """
+        part = SettlingGroups(self._limit)
+        part._whole = self
+        return part
 
     @property
     def size(self) -> int:
@@ -58,6 +69,8 @@ class SettlingGroups:
 
     def has_room(self) -> bool:
         """Whether a new stream may open now: the connection is below the limit."""
+        if self._whole is not None:
+            return self._whole.has_room()
         return len(self._settling) < self._limit
 
     async def wait_for_room(self, interrupted: asyncio.Future[None]) -> None:
@@ -66,6 +79,10 @@ class SettlingGroups:
         Raises the exception ``interrupted`` settles with, if that comes first; the wait then gives up
         its place in the queue.
         """
+        if self._whole is not None:
+            await self._whole.wait_for_room(interrupted)
+            return
+
         if self.has_room():
             return
 
@@ -96,8 +113,11 @@ class SettlingGroups:
         ``acknowledged`` with the reset.
         """
         tracked = spawn(_settled(acknowledged))
-        self._settling.add(tracked)
-        tracked.add_done_callback(self._settle)
+
+        for groups in (self, self._whole):
+            if groups is not None:
+                groups._settling.add(tracked)
+                tracked.add_done_callback(groups._settle)
 
         if timeout is not None and on_timeout is not None:
             timer = asyncio.get_running_loop().call_later(timeout, on_timeout)
