@@ -1847,9 +1847,14 @@ The SDK reports into the recorder when you give it one: the supervised connectio
 the transport they ended up on, generations, and every want's subscribe, restart, move and error),
 frame writers (what became of each frame), frame readers (arrival gaps and the sequencer's counters)
 and, through `watchAudioInput`, audio player inputs (their counters, and each stretch of concealed
-audio). Give each writer and reader a scope of its own, and a second subscriber too:
+audio). A supervised publisher reports under the scope `publisher`, a supervised subscriber under
+`subscriber`, and a supervised relay, which carries the links and wants of both, under `relay`. Give
+each writer and reader a scope of its own, and a second subscriber too:
 
 ```ts
+const relay = await connectSupervisedRelay({ getToken, diagnostics });
+publishDiagnostics(diagnostics, relay.publish(root));
+// Or, on separate connections:
 const subscriber = await connectSupervisedSubscriber({ getToken, diagnostics });
 const roster = await connectSupervisedSubscriber({ getToken, diagnostics: diagnostics.scope('roster') });
 const audio = createFrameWriter(track, { grouping: 'frame', diagnostics: diagnostics.scope('audio') });

@@ -6,13 +6,17 @@ import { describeFailure } from '../src/diagnostics-report.js';
 import { RelayError } from '../src/errors.js';
 import { createFrameReader, createFrameWriter } from '../src/media.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
+import type { RelaySession } from '../src/relay-session.js';
 import { superviseRelayPublisher } from '../src/supervised-publisher.js';
+import { superviseRelay } from '../src/supervised-relay.js';
 import { superviseRelaySubscriber, type WantHandlers } from '../src/supervised-subscriber.js';
 import { settle, slotTrack } from './helpers/slot-track.js';
 import {
   type FakePublisher,
+  type FakeSession,
   type FakeSubscriber,
   fakePublisher,
+  fakeSession,
   fakeSubscriber,
   until,
 } from './helpers/supervision-fakes.js';
@@ -166,6 +170,105 @@ describe('a supervised publisher with diagnostics', () => {
       generation,
       connects: 1,
     });
+  });
+});
+
+describe('a supervised relay with diagnostics', () => {
+  async function start() {
+    const diagnostics = createDiagnostics();
+    const connections: FakeSession[] = [];
+    const relay = await superviseRelay(
+      async (options) => {
+        const session = fakeSession();
+        connections.push(session);
+        (options as { [reportEndpoint]?: (endpoint: string, framing: string) => void })[reportEndpoint]?.(
+          url,
+          'native-quic',
+        );
+        return session as unknown as RelaySession;
+      },
+      { url, reconnect: fast, diagnostics },
+    );
+    cleanup.push(() => relay.close());
+    return { diagnostics, relay, connections };
+  }
+  const of = (events: DiagnosticEvent[], kind: string) => events.filter((event) => event.kind === kind);
+
+  it('reports its link with the carrier, each generation, and a want’s life across a reconnect', async () => {
+    const { diagnostics, relay, connections } = await start();
+    relay.publish(['room', 'p1']);
+    const seen: string[] = [];
+    relay.want(
+      'p2/audio',
+      { namespace: ['room', 'p2'], track: 'audio', retry: fast },
+      { onRestarted: ({ reason }) => seen.push(`restarted ${reason}`) },
+    );
+    await until(() => connections[0]?.subscriptions.length === 1, 'subscribe');
+    connections[0]?.subscriptions[0]?.accept();
+    connections[0]?.subscriptions[0]?.object(0);
+    const first = relay.generation;
+    expect(diagnostics.snapshot()['relay.wants']).toEqual({
+      'p2/audio': { track: 'audio', subscribed: true, objects: 1, restarts: 0 },
+    });
+
+    connections[0]?.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+    await until(() => relay.status === 'live' && connections.length === 2, 'reconnect');
+    await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+    connections[1]?.subscriptions[0]?.accept();
+    const second = relay.generation;
+    expect(second).not.toEqual(first);
+    expect(seen).toEqual(['restarted connection']);
+
+    const events = diagnostics.events();
+    expect(brief(of(events, 'link'), 'status', 'carrier', 'error')).toEqual([
+      ['relay', 'link', 'live', 'native-quic', undefined],
+      ['relay', 'link', 'reconnecting', undefined, 'TRANSPORT_ERROR (connection): lost'],
+      ['relay', 'link', 'live', 'native-quic', undefined],
+    ]);
+    expect(brief(of(events, 'generation'), 'generation')).toEqual([
+      ['relay', 'generation', first],
+      ['relay', 'generation', second],
+    ]);
+    expect(brief(of(events, 'want'), 'want', 'what', 'reason', 'namespace')).toEqual([
+      ['relay', 'want', 'p2/audio', 'subscribed', undefined, 'room/p2'],
+      ['relay', 'want', 'p2/audio', 'restarted', 'connection', undefined],
+      ['relay', 'want', 'p2/audio', 'subscribed', undefined, 'room/p2'],
+    ]);
+    expect(diagnostics.snapshot()['relay.link']).toEqual({
+      status: 'live',
+      carrier: 'native-quic',
+      generation: second,
+      connects: 2,
+    });
+    expect(diagnostics.snapshot()['relay.wants']).toEqual({
+      'p2/audio': { track: 'audio', subscribed: true, objects: 1, restarts: 1, lastRestart: 'connection' },
+    });
+
+    relay.unwant('p2/audio');
+    expect(diagnostics.snapshot()['relay.wants']).toEqual({});
+  });
+
+  it('reports a generation for a rotation, and empties the wants section when it closes', async () => {
+    const { diagnostics, relay, connections } = await start();
+    relay.want('p2/audio', { namespace: ['room', 'p2'], track: 'audio', retry: fast });
+    await until(() => connections[0]?.subscriptions.length === 1, 'subscribe');
+    connections[0]?.subscriptions[0]?.accept();
+    const first = relay.generation;
+    relay.rotate();
+    await until(() => relay.generation !== first, 'rotation');
+    expect(brief(of(diagnostics.events(), 'generation'), 'generation')).toEqual([
+      ['relay', 'generation', first],
+      ['relay', 'generation', relay.generation],
+    ]);
+    await relay.close();
+    expect(diagnostics.snapshot()['relay.wants']).toEqual({});
+    expect(of(diagnostics.events(), 'link').at(-1)?.['status']).toBe('closed');
+  });
+
+  it('refuses a diagnostics option that is not a recorder', async () => {
+    await expect(
+      superviseRelay(async () => fakeSession() as unknown as RelaySession, { url, diagnostics: {} as never }),
+    ).rejects.toThrow(TypeError);
   });
 });
 

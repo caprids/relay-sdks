@@ -2142,17 +2142,19 @@ nobody watches sends nothing.
 - What the SDK reports into a `diagnostics` option. An error in an event is a RelayError's code and
   phase, or an error's name, then its message, with `jwt=` values and JWT-shaped strings redacted,
   at most 300 characters.
-  - A supervised publisher, under its scope `publisher`, and a supervised subscriber, under
-    `subscriber`: a `link` event on each status change (`status`; `carrier`, the transport's
-    framing, when it goes live; `error`, what ended the last connection), and a `link` section
-    (`status`, `carrier`, `connects`, and the publisher's `generation`). The publisher adds a
-    `generation` event for each generation it serves.
-  - The supervised subscriber also reports a `want` event at each turn of a want's life: `what` is
-    `subscribed` (with the `namespace`), `publisher-done` (`statusCode`), `restarted` (`reason`),
-    `switched` (`from` and `to`) or `error`. Its `wants` section has each want's `track`, whether it
-    is `subscribed`, the `objects` delivered, its `restarts` and the last restart's reason. A want
-    that is unwanted or fails for good leaves the section, and every want leaves it when the
-    subscriber closes.
+  - A supervised publisher, under its scope `publisher`, a supervised subscriber, under
+    `subscriber`, and a supervised relay, under `relay`: a `link` event on each status change
+    (`status`; `carrier`, the transport's framing, when it goes live; `error`, what ended the last
+    connection), and a `link` section (`status`, `carrier`, `connects`, and the `generation` of a
+    publisher or relay). The publisher and the relay add a `generation` event for each generation
+    they serve, a reconnect's or a rotation's; a subscriber's connections serve no namespace, so it
+    reports none.
+  - The supervised subscriber and the supervised relay also report a `want` event at each turn of
+    a want's life: `what` is `subscribed` (with the `namespace`), `publisher-done` (`statusCode`),
+    `restarted` (`reason`), `switched` (`from` and `to`) or `error`. Their `wants` section has each
+    want's `track`, whether it is `subscribed`, the `objects` delivered, its `restarts` and the last
+    restart's reason. A want that is unwanted or fails for good leaves the section, and every want
+    leaves it when the subscriber or relay closes.
   - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
     writer's `objects`, `groups` and `backlog`, how many frames ended each way (`outcomes`), and
     `slowWrites`, writes that took over 100 ms from the call to the outcome. Removed when the writer

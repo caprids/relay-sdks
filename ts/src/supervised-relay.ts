@@ -5,7 +5,9 @@
  * generation together, and every want and publishing-roots view moves with them. See spec/behavior.md, "Supervised
  * connections".
  */
+import type { Diagnostics } from './client-diagnostics.js';
 import type { RelaySessionHooks } from './connect-session.js';
+import { diagnosticsOption } from './diagnostics-report.js';
 import type { RegisterTrackOptions, RelayTrackWriter } from './publish.js';
 import { type ConnectRelaySessionOptions, connectRelay, type RelaySession } from './relay-session.js';
 import { createWantSurface, type WantSurface } from './supervised-subscriber.js';
@@ -41,6 +43,13 @@ export interface ConnectSupervisedRelayOptions extends ConnectRelaySessionOption
    * it. A throw reporting `closed` rejects the `close()` that caused it; `closed` resolves either way.
    */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
+  /**
+   * A recorder, or a scope of one, from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"): the
+   * supervisor reports under its scope `relay` a `link` event on each status change, a `generation` event for each
+   * connection, a `want` event at each turn of a want's life, and the `link` and `wants` sections. Publishing the
+   * recorder is `publishDiagnostics` on one of its publications, separately.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /**
@@ -130,8 +139,17 @@ export async function superviseRelay(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedRelay takes an options object');
   }
-  const { reconnect, rotateBeforeMs: rotateBefore, onGeneration, onStatus, signal, ...connection } = options;
+  const {
+    reconnect,
+    rotateBeforeMs: rotateBefore,
+    onGeneration,
+    onStatus,
+    signal,
+    diagnostics,
+    ...connection
+  } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const reporting = diagnosticsOption(diagnostics)?.scope('relay');
   const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
@@ -156,9 +174,10 @@ export async function superviseRelay(
       rotateBeforeMs,
       onStatus,
       onGeneration: onGeneration ? (generation) => onGeneration({ generation }) : undefined,
+      diagnostics: reporting,
     },
   );
-  const wants = createWantSurface(supervisor);
+  const wants = createWantSurface(supervisor, reporting);
   await supervisor.start();
 
   return {
