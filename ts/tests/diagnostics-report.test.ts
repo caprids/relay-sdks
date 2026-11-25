@@ -1,8 +1,9 @@
 import type { MoqtObject } from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { reportEndpoint } from '../src/connect-session.js';
-import { createDiagnostics, type DiagnosticEvent, watchAudioInput } from '../src/diagnostics.js';
-import { describeFailure, endpointHost } from '../src/diagnostics-report.js';
+import { connectRelaySubscriber } from '../src/connect.js';
+import { type DialReport, reportDial, reportEndpoint, type TransportFallback } from '../src/connect-session.js';
+import { createDiagnostics, type DiagnosticEvent, type Diagnostics, watchAudioInput } from '../src/diagnostics.js';
+import { describeFailure, endpointHost, transportStats } from '../src/diagnostics-report.js';
 import { RelayError } from '../src/errors.js';
 import { createFrameReader, createFrameWriter } from '../src/media.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
@@ -10,6 +11,7 @@ import type { RelaySession } from '../src/relay-session.js';
 import { superviseRelayPublisher } from '../src/supervised-publisher.js';
 import { superviseRelay } from '../src/supervised-relay.js';
 import { superviseRelaySubscriber, type WantHandlers } from '../src/supervised-subscriber.js';
+import { createFakeTransport } from './helpers/relay.js';
 import { settle, slotTrack } from './helpers/slot-track.js';
 import {
   type FakePublisher,
@@ -29,6 +31,9 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+/** What the pieces under test recorded: every event but the recorder's own `start`. */
+const recorded = (diagnostics: Diagnostics) => diagnostics.events().filter((event) => event.kind !== 'start');
 
 /** The events' kinds and chosen fields, without times and sequence numbers. */
 const brief = (events: DiagnosticEvent[], ...fields: string[]) =>
@@ -58,8 +63,9 @@ describe('a supervised subscriber with diagnostics', () => {
     const { diagnostics, connections } = await start();
     connections[0]?.end(new RelayError('TRANSPORT_ERROR', 'lost https://r/moq?jwt=abc.def.ghi', 'connection'));
     await until(() => connections.length === 2, 'reconnect');
-    await until(() => diagnostics.events().filter((event) => event.kind === 'link').length === 3, 'live again');
-    expect(brief(diagnostics.events(), 'status', 'carrier', 'error')).toEqual([
+    await until(() => recorded(diagnostics).filter((event) => event.kind === 'link').length === 3, 'live again');
+    const links = recorded(diagnostics).filter((event) => event.kind === 'link');
+    expect(brief(links, 'status', 'carrier', 'error')).toEqual([
       ['roster/subscriber', 'link', 'live', 'websocket', undefined],
       [
         'roster/subscriber',
@@ -100,11 +106,11 @@ describe('a supervised subscriber with diagnostics', () => {
     first?.done();
     await until(() => connections[0]?.subscriptions.length === 2, 'resubscribe');
     connections[0]?.subscriptions[1]?.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
-    await until(() => brief(diagnostics.events(), 'what').some(([, , what]) => what === 'error'), 'error');
+    await until(() => brief(recorded(diagnostics), 'what').some(([, , what]) => what === 'error'), 'error');
     expect(seen).toEqual(['subscribed', 'restarted publisher-done']);
     expect(
       brief(
-        diagnostics.events().filter((event) => event.kind === 'want'),
+        recorded(diagnostics).filter((event) => event.kind === 'want'),
         'want',
         'what',
         'reason',
@@ -167,7 +173,7 @@ describe('a supervised subscriber with diagnostics', () => {
     connections[0]?.subscriptions[1]?.accept();
     vi.advanceTimersByTime(700);
     connections[0]?.subscriptions[1]?.object(5);
-    const wants = diagnostics.events().filter((event) => event.kind === 'want');
+    const wants = recorded(diagnostics).filter((event) => event.kind === 'want');
     expect(brief(wants, 'what', 'firstObjectMs', 'to')).toEqual([
       ['roster/subscriber', 'want', 'subscribed', undefined, undefined],
       ['roster/subscriber', 'want', 'first-object', 150, undefined],
@@ -191,8 +197,8 @@ describe('a supervised subscriber with diagnostics', () => {
       vi.advanceTimersByTime(i < 2 ? 20 : 520);
     }
     subscriber.catchUp('p2/audio');
-    await until(() => diagnostics.events().some((event) => event['what'] === 'restarted'), 'catch-up');
-    const restarted = diagnostics.events().find((event) => event['what'] === 'restarted');
+    await until(() => recorded(diagnostics).some((event) => event['what'] === 'restarted'), 'catch-up');
+    const restarted = recorded(diagnostics).find((event) => event['what'] === 'restarted');
     expect(restarted).toMatchObject({ reason: 'catch-up', behindMs: 1_500 });
   });
 
@@ -218,6 +224,239 @@ describe('a supervised subscriber with diagnostics', () => {
   });
 });
 
+describe('dial attempts', () => {
+  /** One scripted attempt: the report the connection would make, and how it ends. */
+  type Attempt = { report?: DialReport; fail?: unknown };
+
+  async function supervise(attempts: Attempt[]) {
+    const diagnostics = createDiagnostics();
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async (options) => {
+        const attempt = attempts.shift() ?? {};
+        const hooks = options as { [reportDial]?: (report: DialReport) => void };
+        if (attempt.report) hooks[reportDial]?.(attempt.report);
+        if (attempt.fail !== undefined) throw attempt.fail;
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url, reconnect: fast, diagnostics },
+    );
+    cleanup.push(() => subscriber.close());
+    return { diagnostics, connections };
+  }
+
+  it('reports each attempt: its number, carrier, relay host, time and outcome, and a fallback first', async () => {
+    const endpoint = 'https://relay.example.com:4443/moq/room?jwt=abc.def.ghi';
+    const slow: TransportFallback = { from: 'webtransport', to: 'websocket', reason: 'slow' };
+    const { diagnostics, connections } = await supervise([
+      { report: { endpoint, framing: 'webtransport' } },
+      {
+        report: { endpoint, framing: 'webtransport', fallback: slow },
+        fail: new RelayError('CONNECTION_TIMEOUT', 'Relay connection timed out', 'connecting'),
+      },
+      {
+        report: { endpoint, framing: 'webtransport' },
+        fail: new RelayError('UNAUTHORIZED', 'Relay refused the token eyJa.eyJb.sig', 'connecting'),
+      },
+      { report: { endpoint }, fail: new TypeError('fetch failed') },
+      {
+        report: {
+          endpoint,
+          framing: 'websocket',
+          fallback: { from: 'webtransport', to: 'websocket', reason: 'failed', error: new Error('handshake failed') },
+        },
+      },
+    ]);
+    connections[0]?.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+    await until(() => connections.length === 2, 'the fifth attempt');
+    const dials = recorded(diagnostics).filter((event) => event.kind === 'dial' || event.kind === 'fallback');
+    expect(brief(dials, 'attempt', 'carrier', 'relay', 'outcome', 'reason', 'error')).toEqual([
+      ['subscriber', 'dial', 1, 'webtransport', 'relay.example.com:4443', 'ok', undefined, undefined],
+      ['subscriber', 'fallback', 2, undefined, undefined, undefined, 'slow', undefined],
+      [
+        'subscriber',
+        'dial',
+        2,
+        // On a failure after a fallback, the carrier last dialed.
+        'websocket',
+        'relay.example.com:4443',
+        'timeout',
+        undefined,
+        'CONNECTION_TIMEOUT (connecting): Relay connection timed out',
+      ],
+      [
+        'subscriber',
+        'dial',
+        3,
+        'webtransport',
+        'relay.example.com:4443',
+        'refused',
+        undefined,
+        'UNAUTHORIZED (connecting): Relay refused the token [jwt]',
+      ],
+      ['subscriber', 'dial', 4, undefined, 'relay.example.com:4443', 'error', undefined, 'TypeError: fetch failed'],
+      ['subscriber', 'fallback', 5, undefined, undefined, undefined, 'failed', 'Error: handshake failed'],
+      ['subscriber', 'dial', 5, 'websocket', 'relay.example.com:4443', 'ok', undefined, undefined],
+    ]);
+    for (const dial of dials.filter((event) => event.kind === 'dial')) expect(dial['ms']).toBeGreaterThanOrEqual(0);
+    expect(dials.find((event) => event.kind === 'fallback')).toMatchObject({ from: 'webtransport', to: 'websocket' });
+  });
+
+  it('hears from a real connection what it dialed, whether it times out or comes up', async () => {
+    const fallback: TransportFallback = { from: 'webtransport', to: 'websocket', reason: 'unavailable' };
+    const reports: DialReport[] = [];
+    const hooks = { [reportDial]: (report: DialReport) => reports.push(report) };
+    // A dial that never completes its handshake.
+    const stuck = createFakeTransport();
+    await expect(
+      connectRelaySubscriber({
+        url: 'https://relay.example.com/moq?room=1',
+        getToken: () => 'token',
+        connectTimeoutMs: 20,
+        createTransport: () => ({ transport: stuck.transport, ready: new Promise<void>(() => {}), fallback }),
+        ...hooks,
+      }),
+    ).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });
+    // The endpoint before the token went into it, and the factory's framing, WebTransport when it names none.
+    expect(reports).toEqual([{ endpoint: 'https://relay.example.com/moq?room=1', framing: 'webtransport', fallback }]);
+
+    const fake = createFakeTransport();
+    const connecting = connectRelaySubscriber({
+      url: 'https://relay.example.com/moq',
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve(), framing: 'websocket' }),
+      ...hooks,
+    });
+    fake.sendServerSetup();
+    const connection = await connecting;
+    cleanup.push(() => connection.close());
+    expect(reports[1]).toEqual({
+      endpoint: 'https://relay.example.com/moq',
+      framing: 'websocket',
+      transport: fake.transport,
+    });
+  });
+});
+
+describe('transport stats', () => {
+  async function supervise(transport: unknown) {
+    const diagnostics = createDiagnostics();
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async (options) => {
+        const hooks = options as { [reportDial]?: (report: DialReport) => void };
+        hooks[reportDial]?.({ endpoint: url, framing: 'webtransport', transport: transport as never });
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url, reconnect: fast, diagnostics: diagnostics.scope('roster') },
+    );
+    cleanup.push(() => subscriber.close());
+    return { diagnostics, connections };
+  }
+
+  it('reads getStats() while the connection is live, about once a second, into a transport section', async () => {
+    // What Chromium gives: the three RTTs and the estimated send rate, and datagram counters.
+    let stats: Record<string, unknown> = {
+      smoothedRtt: 31.27,
+      rttVariation: 4.44,
+      minRtt: 20,
+      estimatedSendRate: 2_500_000,
+      datagrams: { droppedIncoming: 0, expiredOutgoing: 0, lostOutgoing: 0 },
+    };
+    let calls = 0;
+    const { diagnostics, connections } = await supervise({
+      getStats: async () => {
+        calls++;
+        return stats;
+      },
+    });
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] !== undefined, 'the first read');
+    await until(() => calls === 1 && 'rttMs' in (diagnostics.snapshot()['roster/subscriber.transport'] as object));
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toEqual({
+      rttMs: 31.3,
+      rttVarMs: 4.4,
+      minRttMs: 20,
+      sendRateKbps: 2_500,
+    });
+    // What the spec adds, where a runtime gives it.
+    stats = { ...stats, bytesSent: 1_000, bytesReceived: 9_000, packetsSent: 10, packetsReceived: 20, packetsLost: 1 };
+    await until(() => calls === 2, 'the next read', 2_000);
+    await until(() => 'sentBytes' in (diagnostics.snapshot()['roster/subscriber.transport'] as object));
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toMatchObject({
+      sentBytes: 1_000,
+      receivedBytes: 9_000,
+      sentPackets: 10,
+      receivedPackets: 20,
+      lostPackets: 1,
+    });
+    // The section goes with the connection.
+    connections[0]?.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] === undefined, 'the section removed');
+  });
+
+  it('never blocks a snapshot on a pending read, and does not stack reads', async () => {
+    let calls = 0;
+    const { diagnostics } = await supervise({
+      getStats: () => {
+        calls++;
+        return new Promise(() => {});
+      },
+    });
+    await until(() => calls === 1, 'the first read');
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(calls).toBe(1);
+  });
+
+  it('adds no section while getStats() gives none of its fields, as on a WebSocket behind a fallback', async () => {
+    // What a FallbackTransport that ended up on WebSocket used to give, then a runtime with only datagram counters.
+    let stats: unknown;
+    let calls = 0;
+    const { diagnostics } = await supervise({
+      getStats: async () => {
+        calls++;
+        return stats;
+      },
+    });
+    await until(() => calls === 1, 'the first read');
+    await settle();
+    expect(diagnostics.snapshot()).not.toHaveProperty(['roster/subscriber.transport']);
+    stats = { datagrams: { droppedIncoming: 0 }, estimatedSendRate: null };
+    await until(() => calls === 2, 'the next read', 2_000);
+    await settle();
+    expect(diagnostics.snapshot()).not.toHaveProperty(['roster/subscriber.transport']);
+    // Fields that arrive later add it, and fields that go away remove it again.
+    stats = { smoothedRtt: 40 };
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] !== undefined, 'the section', 2_000);
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toEqual({ rttMs: 40 });
+    stats = undefined;
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] === undefined, 'the section gone', 2_000);
+  });
+
+  it('adds no section for a transport without getStats()', async () => {
+    const { diagnostics } = await supervise({});
+    await settle();
+    expect(Object.keys(diagnostics.snapshot())).toEqual(['roster/subscriber.link', 'roster/subscriber.wants']);
+  });
+
+  it('keeps only finite numbers and the send-capacity flag, under unit names', () => {
+    expect(
+      transportStats({
+        smoothedRtt: Number.NaN,
+        minRtt: 2.04,
+        bytesLost: 12n,
+        estimatedSendRate: null,
+        atSendCapacity: true,
+        extra: 1,
+      }),
+    ).toEqual({ minRttMs: 2, lostBytes: 12, atSendCapacity: true });
+    expect(transportStats(undefined)).toEqual({});
+  });
+});
+
 describe('a supervised publisher with diagnostics', () => {
   it('reports going live with its carrier, and each generation it serves', async () => {
     const diagnostics = createDiagnostics();
@@ -236,9 +475,11 @@ describe('a supervised publisher with diagnostics', () => {
     );
     cleanup.push(() => publisher.close());
     const generation = publisher.generation?.generation;
-    expect(brief(diagnostics.events(), 'status', 'carrier', 'generation')).toEqual([
-      ['publisher', 'link', 'live', 'webtransport', undefined],
-      ['publisher', 'generation', undefined, undefined, generation],
+    expect(brief(recorded(diagnostics), 'status', 'carrier', 'generation', 'what', 'namespace', 'outcome')).toEqual([
+      ['publisher', 'publication', undefined, undefined, undefined, 'published', 'room/p1', undefined],
+      ['publisher', 'dial', undefined, undefined, undefined, undefined, undefined, 'ok'],
+      ['publisher', 'link', 'live', 'webtransport', undefined, undefined, undefined, undefined],
+      ['publisher', 'generation', undefined, undefined, generation, undefined, undefined, undefined],
     ]);
     expect(diagnostics.snapshot()['publisher.link']).toEqual({
       status: 'live',
@@ -297,7 +538,7 @@ describe('a supervised relay with diagnostics', () => {
     expect(second).not.toEqual(first);
     expect(seen).toEqual(['restarted connection']);
 
-    const events = diagnostics.events();
+    const events = recorded(diagnostics);
     expect(brief(of(events, 'link'), 'status', 'carrier', 'error')).toEqual([
       ['relay', 'link', 'live', 'native-quic', undefined],
       ['relay', 'link', 'reconnecting', undefined, 'TRANSPORT_ERROR (connection): lost'],
@@ -336,13 +577,13 @@ describe('a supervised relay with diagnostics', () => {
     const first = relay.generation;
     relay.rotate();
     await until(() => relay.generation !== first, 'rotation');
-    expect(brief(of(diagnostics.events(), 'generation'), 'generation')).toEqual([
+    expect(brief(of(recorded(diagnostics), 'generation'), 'generation')).toEqual([
       ['relay', 'generation', first],
       ['relay', 'generation', relay.generation],
     ]);
     await relay.close();
     expect(diagnostics.snapshot()['relay.wants']).toEqual({});
-    expect(of(diagnostics.events(), 'link').at(-1)?.['status']).toBe('closed');
+    expect(of(recorded(diagnostics), 'link').at(-1)?.['status']).toBe('closed');
   });
 
   it('refuses a diagnostics option that is not a recorder', async () => {
@@ -402,7 +643,7 @@ describe('a frame writer with diagnostics', () => {
     });
     await writer.write(loc(1_060));
     await writer.write(loc(3_060));
-    expect(brief(diagnostics.events(), 'ms')).toEqual([
+    expect(brief(recorded(diagnostics), 'ms')).toEqual([
       ['audio', 'input-gap', 800],
       ['audio', 'input-gap', 2_000],
     ]);
@@ -427,13 +668,13 @@ describe('a frame writer with diagnostics', () => {
       for (let b = p - 40; b > p - 320; b -= 40) await at(b);
     }
     // Measured from the last B-frame, the next P-frame would be 600 ms on: past eight usual intervals.
-    expect(diagnostics.events()).toEqual([]);
+    expect(recorded(diagnostics)).toEqual([]);
     // A real gap after B-frames still counts.
     await at(4_000);
     // A step back of over a second is a new timeline, followed from there.
     for (let ms = 0; ms <= 120; ms += 40) await at(ms);
     await at(2_120);
-    expect(brief(diagnostics.events(), 'ms')).toEqual([
+    expect(brief(recorded(diagnostics), 'ms')).toEqual([
       [undefined, 'input-gap', 3_000],
       [undefined, 'input-gap', 2_000],
     ]);
@@ -485,7 +726,7 @@ describe('a frame reader with diagnostics', () => {
     reader.onRestarted();
     vi.advanceTimersByTime(2_000);
     reader.onObject(object(0));
-    expect(brief(diagnostics.events(), 'ms')).toEqual([['p2/audio', 'arrival-gap', 420]]);
+    expect(brief(recorded(diagnostics), 'ms')).toEqual([['p2/audio', 'arrival-gap', 420]]);
     expect(diagnostics.snapshot()['p2/audio.receive']).toEqual({
       objects: 22,
       bytes: 0,
@@ -507,10 +748,10 @@ describe('a frame reader with diagnostics', () => {
       reader.onObject(object(group));
       vi.advanceTimersByTime(500);
     }
-    expect(diagnostics.events()).toEqual([]);
+    expect(recorded(diagnostics)).toEqual([]);
     vi.advanceTimersByTime(4_500);
     reader.onObject(object(10));
-    expect(brief(diagnostics.events(), 'ms')).toEqual([[undefined, 'arrival-gap', 5_000]]);
+    expect(brief(recorded(diagnostics), 'ms')).toEqual([[undefined, 'arrival-gap', 5_000]]);
   });
 
   it('allows a slow track its own interval: eight of them before a gap', () => {
@@ -523,7 +764,7 @@ describe('a frame reader with diagnostics', () => {
     }
     vi.advanceTimersByTime(1_000);
     reader.onObject(object(30));
-    expect(diagnostics.events()).toEqual([]);
+    expect(recorded(diagnostics)).toEqual([]);
   });
 });
 
@@ -613,7 +854,7 @@ describe('watchAudioInput', () => {
     vi.advanceTimersByTime(500);
     stats.synthesizedUs += 20_000;
     vi.advanceTimersByTime(500);
-    expect(brief(diagnostics.events(), 'ms', 'concealedMs', 'synthesizedMs', 'underruns')).toEqual([
+    expect(brief(recorded(diagnostics), 'ms', 'concealedMs', 'synthesizedMs', 'underruns')).toEqual([
       ['p2/audio', 'audio-dropout', 400, 80, 320, 1],
       ['p2/audio', 'audio-conceal', 100, 0, 70, 0],
     ]);

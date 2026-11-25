@@ -9,16 +9,19 @@ import {
   type DiagnosticsStatsObject,
   followDiagnostics,
   publishDiagnostics,
+  watchPage,
 } from '../src/diagnostics.js';
 import type { RegisterTrackOptions, WantHandlers, WantOptions } from '../src/index.js';
 import type { RelaySession } from '../src/relay-session.js';
 import { superviseRelay } from '../src/supervised-relay.js';
+import { SDK_VERSION } from '../src/version.js';
 import { type RecordedGroup, settle, slotTrack } from './helpers/slot-track.js';
 import { type FakeSession, fakeSession, until } from './helpers/supervision-fakes.js';
 
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const decoder = new TextDecoder();
@@ -67,13 +70,15 @@ describe('createDiagnostics', () => {
   it('numbers events from 0, stamps them, and keeps the recorder’s own fields', () => {
     vi.useFakeTimers({ now: 1_000 });
     const diagnostics = createDiagnostics();
+    const [start] = diagnostics.events();
     const first = diagnostics.event('link', { link: 'publisher', status: 'live' });
     vi.setSystemTime(1_500);
     const second = diagnostics.event('app.joined', { t: 0, seq: 99, kind: 'forged', who: 'p1' });
-    expect(first).toEqual({ t: 1_000, seq: 0, kind: 'link', link: 'publisher', status: 'live' });
-    expect(second).toEqual({ t: 1_500, seq: 1, kind: 'app.joined', who: 'p1' });
-    expect(diagnostics.events()).toEqual([first, second]);
-    expect(diagnostics.events(1)).toEqual([second]);
+    expect(start).toMatchObject({ t: 1_000, seq: 0, kind: 'start' });
+    expect(first).toEqual({ t: 1_000, seq: 1, kind: 'link', link: 'publisher', status: 'live' });
+    expect(second).toEqual({ t: 1_500, seq: 2, kind: 'app.joined', who: 'p1' });
+    expect(diagnostics.events()).toEqual([start, first, second]);
+    expect(diagnostics.events(2)).toEqual([second]);
     expect(diagnostics.instance).toMatch(/^[0-9a-z]{12}$/);
     expect(createDiagnostics().instance).not.toBe(diagnostics.instance);
   });
@@ -82,10 +87,11 @@ describe('createDiagnostics', () => {
     vi.useFakeTimers({ now: 0 });
     const diagnostics = createDiagnostics({ keepEvents: 3, keepMs: 10_000 });
     for (let i = 0; i < 5; i++) diagnostics.event('tick');
-    expect(diagnostics.events().map((event) => event.seq)).toEqual([2, 3, 4]);
+    // The start event (0) is held for the recorder's life, outside keepEvents.
+    expect(diagnostics.events().map((event) => event.seq)).toEqual([0, 3, 4, 5]);
     vi.setSystemTime(10_001);
     diagnostics.event('tick');
-    expect(diagnostics.events().map((event) => event.seq)).toEqual([5]);
+    expect(diagnostics.events().map((event) => event.seq)).toEqual([0, 6]);
   });
 
   it('tells listeners each event, survives one that throws, and stops one that unlistens', () => {
@@ -122,11 +128,12 @@ describe('createDiagnostics', () => {
     roster.event('link', { status: 'live', source: 'forged' });
     audio.event('audio-dropout', { ms: 400 });
     expect(diagnostics.events().map((event) => [event.seq, event.source, event.kind])).toEqual([
-      [0, undefined, 'app.joined'],
-      [1, 'roster', 'link'],
-      [2, 'p2/audio', 'audio-dropout'],
+      [0, undefined, 'start'],
+      [1, undefined, 'app.joined'],
+      [2, 'roster', 'link'],
+      [3, 'p2/audio', 'audio-dropout'],
     ]);
-    expect(roster.events()).toHaveLength(3);
+    expect(roster.events()).toHaveLength(4);
     expect(roster.instance).toBe(diagnostics.instance);
     audio.section('sequencer', () => ({ late: 1 }));
     roster.section('link', () => ({ status: 'live' }));
@@ -143,6 +150,139 @@ describe('createDiagnostics', () => {
     expect(() => diagnostics.event('x', null as never)).toThrow(TypeError);
     expect(() => diagnostics.section('', () => 0)).toThrow(TypeError);
     expect(() => diagnostics.listen(3 as never)).toThrow(TypeError);
+  });
+});
+
+describe('the start event', () => {
+  it('names the SDK, the app and its build, the browser by its client hints, and whether it has WebTransport', () => {
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Macintosh) Chrome/131.0.0.0',
+      userAgentData: {
+        brands: [
+          { brand: 'Not_A Brand', version: '8' },
+          { brand: 'Chromium', version: '131' },
+          { brand: 'Google Chrome', version: '131' },
+        ],
+        platform: 'macOS',
+        mobile: false,
+      },
+    });
+    vi.stubGlobal('WebTransport', class {});
+    const diagnostics = createDiagnostics({ app: { name: 'huddle', build: '4f2a9c1' } });
+    expect(diagnostics.events()[0]).toEqual({
+      t: expect.any(Number),
+      seq: 0,
+      kind: 'start',
+      sdk: SDK_VERSION,
+      app: 'huddle',
+      build: '4f2a9c1',
+      brands: ['Chromium 131', 'Google Chrome 131'],
+      platform: 'macOS',
+      mobile: false,
+      node: process.versions.node,
+      webTransport: true,
+    });
+  });
+
+  it('falls back to the user agent without client hints, and is held for the recorder’s life', () => {
+    vi.useFakeTimers({ now: 0 });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone) Version/18.4 Mobile Safari/604.1' });
+    vi.stubGlobal('WebTransport', undefined);
+    const diagnostics = createDiagnostics({ keepEvents: 1, keepMs: 1_000 });
+    const [start] = diagnostics.events();
+    expect(start).toMatchObject({ kind: 'start', userAgent: expect.stringContaining('iPhone'), webTransport: false });
+    expect(start).not.toHaveProperty('app');
+    vi.setSystemTime(60_000);
+    diagnostics.event('a');
+    diagnostics.event('b');
+    expect(diagnostics.events().map((event) => event.kind)).toEqual(['start', 'b']);
+  });
+
+  it('checks the app option', () => {
+    expect(() => createDiagnostics({ app: { name: '' } })).toThrow(TypeError);
+    expect(() => createDiagnostics({ app: { name: 'x', build: 3 as never } })).toThrow(TypeError);
+    expect(() => createDiagnostics({ app: 'x' as never })).toThrow(TypeError);
+  });
+});
+
+describe('watchPage', () => {
+  /** A document, window and network connection a test drives. */
+  function page(visibilityState: 'visible' | 'hidden' = 'visible') {
+    const document = Object.assign(new EventTarget(), { visibilityState });
+    const window = new EventTarget();
+    const connection = Object.assign(new EventTarget(), { effectiveType: '4g', rtt: 50, downlink: 10 });
+    vi.stubGlobal('document', document);
+    vi.stubGlobal('addEventListener', window.addEventListener.bind(window));
+    vi.stubGlobal('removeEventListener', window.removeEventListener.bind(window));
+    vi.stubGlobal('navigator', { onLine: true, connection });
+    const pageEvent = (type: string, fields: Record<string, unknown> = {}) =>
+      window.dispatchEvent(Object.assign(new Event(type), fields));
+    return { document, window: { dispatch: pageEvent }, connection };
+  }
+
+  it('records visibility, freezes, the back/forward cache, going offline and network changes', () => {
+    vi.useFakeTimers({ now: 0 });
+    const { document, window, connection } = page();
+    const diagnostics = createDiagnostics();
+    const unwatch = watchPage(diagnostics);
+    document.visibilityState = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(4_000);
+    document.dispatchEvent(new Event('freeze'));
+    document.dispatchEvent(new Event('resume'));
+    document.visibilityState = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatch('pagehide', { persisted: true });
+    window.dispatch('pageshow', { persisted: true });
+    window.dispatch('offline');
+    connection.effectiveType = '2g';
+    connection.rtt = 900;
+    connection.downlink = 0.2;
+    connection.dispatchEvent(new Event('change'));
+    expect(
+      diagnostics
+        .events()
+        .filter((event) => event.kind === 'page')
+        .map(({ t: _t, seq: _seq, kind: _kind, ...fields }) => fields),
+    ).toEqual([
+      { what: 'hidden' },
+      { what: 'freeze' },
+      { what: 'resume' },
+      { what: 'visible' },
+      { what: 'pagehide', persisted: true },
+      { what: 'pageshow', persisted: true },
+      { what: 'offline' },
+      { what: 'connection', effectiveType: '2g', rttMs: 900, downlinkMbps: 0.2 },
+    ]);
+    document.visibilityState = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(1_000);
+    expect(diagnostics.snapshot()['page']).toEqual({
+      visibility: 'hidden',
+      hiddenMs: 5_000,
+      freezes: 1,
+      online: true,
+      effectiveType: '2g',
+      rttMs: 900,
+      downlinkMbps: 0.2,
+    });
+    unwatch();
+    window.dispatch('online');
+    expect(diagnostics.snapshot()).toEqual({});
+    expect(diagnostics.events().some((event) => event['what'] === 'online')).toBe(false);
+  });
+
+  it('counts a page hidden from the start, and does nothing where there is no document', () => {
+    vi.useFakeTimers({ now: 0 });
+    page('hidden');
+    const diagnostics = createDiagnostics();
+    watchPage(diagnostics);
+    vi.advanceTimersByTime(2_000);
+    expect(diagnostics.snapshot()['page']).toMatchObject({ visibility: 'hidden', hiddenMs: 2_000, freezes: 0 });
+    vi.stubGlobal('document', undefined);
+    const bare = createDiagnostics();
+    watchPage(bare)();
+    expect(bare.snapshot()).toEqual({});
   });
 });
 
@@ -163,7 +303,7 @@ describe('publishDiagnostics', () => {
     await settle();
     const sent = bodies(events?.groups ?? []) as DiagnosticsEventsObject[];
     expect(sent.map((body) => [body.backlog ?? false, body.events.map((event) => event.kind)])).toEqual([
-      [true, ['before', 'unwatched']],
+      [true, ['start', 'before', 'unwatched']],
       [false, ['live']],
     ]);
     expect(sent.every((body) => body.instance === diagnostics.instance)).toBe(true);
@@ -180,7 +320,8 @@ describe('publishDiagnostics', () => {
     events?.demand(true);
     await settle(60);
     const sizes = (bodies(events?.groups ?? []) as DiagnosticsEventsObject[]).map((body) => body.events.length);
-    expect(sizes).toEqual([200, 50, 200, 50]);
+    // The recorder's start event and the 250 ticks.
+    expect(sizes).toEqual([200, 51, 200, 51]);
     await publication.close();
   });
 
@@ -199,7 +340,7 @@ describe('publishDiagnostics', () => {
     await settle();
     const sent = bodies(events?.groups ?? []) as DiagnosticsEventsObject[];
     expect(sent.map((body) => [body.backlog ?? false, body.events.map((event) => event.kind)])).toEqual([
-      [true, ['before', 'racing']],
+      [true, ['start', 'before', 'racing']],
       [false, ['after']],
     ]);
     await publication.close();
@@ -213,8 +354,9 @@ describe('publishDiagnostics', () => {
     await settle(1_000);
     const sent = bodies(publisher.tracks.get(DIAGNOSTICS_TRACKS.events)?.groups ?? []) as DiagnosticsEventsObject[];
     expect(sent.length).toBeLessThanOrEqual(32);
-    expect(sent[0]?.events[0]?.seq).toBe(0);
-    expect(sent.reduce((total, body) => total + body.events.length, 0)).toBe(20_000);
+    expect(sent[0]?.events[0]?.kind).toBe('start');
+    expect(sent[0]?.events[1]?.seq).toBe(1);
+    expect(sent.reduce((total, body) => total + body.events.length, 0)).toBe(20_001);
     await publication.close();
   });
 
@@ -332,8 +474,9 @@ describe('publishDiagnostics', () => {
     await settle();
     const sent = bodies(events?.groups ?? []) as DiagnosticsEventsObject[];
     expect(sent.flatMap((body) => body.events)).toEqual([
-      expect.objectContaining({ seq: 0, kind: 'app.bad', error: 'not encodable as JSON' }),
-      expect.objectContaining({ seq: 1, kind: 'app.good', n: 2 }),
+      expect.objectContaining({ seq: 0, kind: 'start' }),
+      expect.objectContaining({ seq: 1, kind: 'app.bad', error: 'not encodable as JSON' }),
+      expect.objectContaining({ seq: 2, kind: 'app.good', n: 2 }),
     ]);
     await until(() => (publisher.tracks.get(DIAGNOSTICS_TRACKS.stats)?.groups.length ?? 0) > 0);
     const [snapshot] = bodies(publisher.tracks.get(DIAGNOSTICS_TRACKS.stats)?.groups ?? []) as DiagnosticsStatsObject[];
@@ -416,9 +559,80 @@ describe('followDiagnostics', () => {
         subscriber.wants.get('p1/diag.events')?.handlers.onObject?.({ payload: object.bytes } as MoqtObject);
       }
     }
-    expect(kinds).toEqual(['link', 'want']);
+    expect(kinds).toEqual(['start', 'link', 'want']);
     await publication.close();
   });
+  it('lets a playback-only client publish its diagnostics on a diag path of its own, and a collector follow it', async () => {
+    const fast = { initialDelayMs: 0, maxDelayMs: 0 };
+    const relay = async (diagnostics?: ReturnType<typeof createDiagnostics>) => {
+      const connections: FakeSession[] = [];
+      const supervised = await superviseRelay(
+        async () => {
+          const session = fakeSession();
+          connections.push(session);
+          return session as unknown as RelaySession;
+        },
+        { url: 'https://relay.example.com/huddle', reconnect: fast, ...(diagnostics ? { diagnostics } : {}) },
+      );
+      return { supervised, connections };
+    };
+    // The viewer reads one participant's audio and publishes no media: only its diagnostics, under the path its
+    // token grants (`put: ["diag/huddle/<room>/<pid>"]`).
+    const diagnostics = createDiagnostics({ app: { name: 'huddle', build: 'test' } });
+    const viewer = await relay(diagnostics);
+    const collector = await relay();
+    const diagPath = ['diag', 'huddle', 'r1', 'c7k2'];
+    try {
+      viewer.supervised.want('p2/audio', { namespace: ['rooms', 'r1', 'p', 'p2'], track: 'audio' });
+      await until(() => viewer.connections[0]!.subscriptions.length === 1, 'the media want');
+      viewer.connections[0]!.subscriptions[0]!.accept();
+      const publication = publishDiagnostics(diagnostics, viewer.supervised.publish(diagPath));
+      const generation = viewer.supervised.generation!;
+      const served = viewer.connections[0]!.publications.get(`${diagPath.join('/')}/${generation}`)!;
+      // Only the two diag tracks are published: no media.
+      expect([...served.tracks.keys()]).toEqual([DIAGNOSTICS_TRACKS.events, DIAGNOSTICS_TRACKS.stats]);
+      served.tracks.get(DIAGNOSTICS_TRACKS.events)!.setDemand(true);
+      await until(() => served.tracks.get(DIAGNOSTICS_TRACKS.events)!.writes.length === 1, 'the replay');
+
+      const seen: DiagnosticEvent[] = [];
+      const unfollow = followDiagnostics(
+        collector.supervised,
+        { namespace: diagPath, generations: true },
+        { onEvents: (events) => seen.push(...events) },
+      );
+      await until(() => collector.connections[0]!.discoveries.length > 0, 'discovery');
+      for (const discovery of collector.connections[0]!.discoveries) {
+        discovery.push({ type: 'announced', namespace: [...diagPath, generation] } as never);
+      }
+      await until(() => collector.connections[0]!.subscriptions.length === 2, 'both tracks wanted');
+      const subscription = collector.connections[0]!.subscriptions.find(
+        (sub) => sub.options.track === DIAGNOSTICS_TRACKS.events,
+      )!;
+      expect(subscription.options.namespace).toEqual([...diagPath, generation]);
+      subscription.accept();
+      for (const [groupId, payload] of served.tracks.get(DIAGNOSTICS_TRACKS.events)!.writes.entries()) {
+        subscription.handlers.onObject?.({ groupId, objectId: 0, status: 'normal', payload } as MoqtObject);
+      }
+      // Which bundle, which relay, what it read and what it published.
+      expect(seen.map((event) => [event.kind, event['what'] ?? event['outcome'] ?? event['status']])).toEqual([
+        ['start', undefined],
+        ['dial', 'ok'],
+        ['link', 'live'],
+        ['generation', undefined],
+        ['want', 'subscribed'],
+        ['publication', 'published'],
+      ]);
+      expect(seen[0]).toMatchObject({ app: 'huddle', build: 'test', sdk: SDK_VERSION });
+      expect(seen[4]).toMatchObject({ source: 'relay', namespace: 'rooms/r1/p/p2', track: 'audio' });
+      expect(seen[5]).toMatchObject({ source: 'relay', namespace: 'diag/huddle/r1/c7k2' });
+      unfollow();
+      await publication.close();
+    } finally {
+      await viewer.supervised.close();
+      await collector.supervised.close();
+    }
+  });
+
   it('publishes on a supervised relay’s publication and follows on another supervised relay', async () => {
     const fast = { initialDelayMs: 0, maxDelayMs: 0 };
     const relay = async () => {
@@ -469,7 +683,7 @@ describe('followDiagnostics', () => {
       for (const [groupId, payload] of [...writes, ...writes].entries()) {
         subscription.handlers.onObject?.({ groupId, objectId: 0, status: 'normal', payload } as MoqtObject);
       }
-      expect(kinds).toEqual(['link', 'want']);
+      expect(kinds).toEqual(['start', 'link', 'want']);
       unfollow();
       await publication.close();
     } finally {

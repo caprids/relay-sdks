@@ -45,10 +45,31 @@ export type RelayTransportFactory = (
    * request carries the URL as a CONNECT does. Read once `ready` has resolved.
    */
   framing?: 'webtransport' | 'native-quic' | 'websocket';
+  /**
+   * For client diagnostics, optional: set by a factory that falls back from one carrier to another, saying why. Read
+   * when the connection attempt ends, ready or failed. `@caprid/relay-websocket`'s `withWebSocketFallback` sets it
+   * once its WebSocket dial starts.
+   */
+  readonly fallback?: TransportFallback | undefined;
 };
 
 /** What carries a connection: a {@link RelayTransportFactory}'s `framing`. */
-export type TransportFraming = NonNullable<ReturnType<RelayTransportFactory>['framing']>;
+export type TransportFraming = 'webtransport' | 'native-quic' | 'websocket';
+
+/** Why a transport factory dialed a second carrier: a {@link RelayTransportFactory}'s `fallback`. */
+export interface TransportFallback {
+  /** The carrier it fell back from. */
+  readonly from: TransportFraming;
+  /** The carrier it dialed instead. Whichever was ready first carries the connection. */
+  readonly to: TransportFraming;
+  /**
+   * `unavailable`: the runtime has no usable `from` carrier. `slow`: its handshake had not completed within the
+   * factory's head start. `failed`: it failed, with `error`.
+   */
+  readonly reason: 'unavailable' | 'slow' | 'failed';
+  /** What the `from` dial failed with, or what refused it: with `failed`, and with `unavailable` when the runtime refused the dial outright. */
+  readonly error?: unknown;
+}
 
 /**
  * A token together with when the relay stops honoring it. moq-relay ends a session at its grant's deadline, which is
@@ -229,10 +250,29 @@ export const resolveTransport = Symbol('resolveTransport');
  */
 export const reportEndpoint = Symbol('reportEndpoint');
 
-/** The options only the SDK's own entry points and supervisors pass: see {@link resolveTransport}, {@link reportEndpoint}. */
+/**
+ * Internal to the supervisors, never part of the public options: told how each connection attempt went, once it ends,
+ * ready or failed, for client diagnostics. See {@link DialReport}.
+ */
+export const reportDial = Symbol('reportDial');
+
+/** What a connection attempt reached, as {@link reportDial} hears it. Each field is absent when the attempt never got that far. */
+export interface DialReport {
+  /** The endpoint dialed, before the provider's token was added. */
+  endpoint?: string;
+  /** What carries the connection, once ready; on a failure, what the factory said at the end. */
+  framing?: TransportFraming;
+  /** Why the factory fell back to a second carrier, if it did. */
+  fallback?: TransportFallback;
+  /** The transport, once the connection is up. */
+  transport?: MoqtTransport;
+}
+
+/** The options only the SDK's own entry points and supervisors pass: see {@link resolveTransport}, {@link reportEndpoint}, {@link reportDial}. */
 export interface RelaySessionHooks {
   [resolveTransport]?: () => Promise<RelayTransportFactory>;
   [reportEndpoint]?: (endpoint: string, framing: TransportFraming) => void;
+  [reportDial]?: (report: DialReport) => void;
 }
 
 /** The options {@link openRelaySession} reads: the public ones, plus the internal hooks. */
@@ -317,6 +357,8 @@ export async function openRelaySession<T extends Session>(
 
   let established = false;
   let usingTransport = false;
+  /** What the attempt reached, for {@link reportDial}. */
+  const dial: { endpoint?: string; created?: ReturnType<RelayTransportFactory> } = {};
   let expiresAt: Date | undefined;
   let peerClose: unknown;
   // Set in the turn server SETUP arrives, ahead of `established`: a failure in between is no credentials refusal.
@@ -338,6 +380,7 @@ export async function openRelaySession<T extends Session>(
     }
     const { url, endpoint, expiresAt: expiry } = dialTarget(given, issued);
     expiresAt = expiry;
+    dial.endpoint = endpoint;
 
     let createTransport = options.createTransport ?? dialWebTransport;
     const resolve = options[resolveTransport];
@@ -349,6 +392,7 @@ export async function openRelaySession<T extends Session>(
     assertOpen();
     usingTransport = true;
     const created = createTransport(url.href, [...MOQT_PROTOCOL_IDS]);
+    dial.created = created;
 
     transport = created.transport;
     // WebTransport.closed may reject alongside ready, before a session can observe it. Registered before the
@@ -416,11 +460,13 @@ export async function openRelaySession<T extends Session>(
   } catch (error) {
     const failure = stopped ? stopError : usingTransport ? connectFailure(error) : error;
     finish({ error: failure });
+    reportAttempt(options, dial);
     throw failure;
   }
 
   clearTimeout(timer);
   established = true;
+  reportAttempt(options, dial, connected.framing, connected.transport);
   options[reportEndpoint]?.(connected.endpoint, connected.framing);
 
   return {
@@ -443,6 +489,40 @@ export async function openRelaySession<T extends Session>(
     assertOpen,
     close: () => finish(),
   };
+}
+
+/**
+ * Tell {@link reportDial} what an attempt reached. A factory's `framing` and `fallback` may be getters: one that throws
+ * reads as absent, and a report that throws is the supervisor's, not the connection's, failure.
+ */
+function reportAttempt(
+  options: RelaySessionOptions,
+  dial: { endpoint?: string; created?: ReturnType<RelayTransportFactory> },
+  framing?: TransportFraming,
+  transport?: MoqtTransport,
+): void {
+  const report = options[reportDial];
+  if (!report) return;
+  const read = <T>(get: () => T): T | undefined => {
+    try {
+      return get();
+    } catch {
+      return undefined;
+    }
+  };
+  const fallback = read(() => dial.created?.fallback);
+  // A factory that names no framing is WebTransport, as a ready connection reads it.
+  const carrier = framing ?? (dial.created ? (read(() => dial.created?.framing) ?? 'webtransport') : undefined);
+  try {
+    report({
+      ...(dial.endpoint === undefined ? {} : { endpoint: dial.endpoint }),
+      ...(carrier === undefined ? {} : { framing: carrier }),
+      ...(fallback ? { fallback } : {}),
+      ...(transport === undefined ? {} : { transport }),
+    });
+  } catch {
+    // Diagnostics never fail a connection.
+  }
 }
 
 /** A token the provider returned, and its expiry if the provider gave one. */

@@ -6,10 +6,12 @@ import { encodeJSON, readJSON } from './payload.js';
 import type { RegisterTrackOptions, RelayTrackWriter } from './publish.js';
 import type { SupervisedSubscriber } from './supervised-subscriber.js';
 import { DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY } from './validation.js';
+import { SDK_VERSION } from './version.js';
 
 /**
  * Client diagnostics (spec/behavior.md, "Client diagnostics"; TypeScript only): a recorder that holds what a client
- * saw, published on two tracks of the client's own broadcast while something subscribes, and followed from elsewhere.
+ * saw, published on two tracks of a publication of the client's own (by convention `<account>/diag/<app>/<group>/<client>`)
+ * while something subscribes, and followed from elsewhere. Every client can report, whether it publishes media or not.
  * `diag.events` carries events, each with a sequence number; `diag.stats` carries a snapshot of every stats section
  * once a second.
  */
@@ -40,6 +42,19 @@ export interface DiagnosticsOptions {
   keepMs?: number;
   /** The most events held, oldest dropped first. A positive integer; default 5000. */
   keepEvents?: number;
+  /**
+   * The application and its build, for the `start` event: a follower then knows which bundle a client ran without
+   * asking. `name` is a non-empty string; `build` any string the app keeps, such as a commit or a release.
+   */
+  app?: DiagnosticsApp;
+}
+
+/** The application a recorder runs in, for its `start` event. */
+export interface DiagnosticsApp {
+  /** The application's name, such as `huddle`. Non-empty. */
+  name: string;
+  /** Its build: a commit, a release, whatever the application keeps. */
+  build?: string;
 }
 
 /**
@@ -54,7 +69,10 @@ export interface Diagnostics {
    * `kind`, which the recorder sets, and in a scope `source`. Keep them to ids and counters: they leave the client.
    */
   event(kind: string, fields?: Readonly<Record<string, unknown>>): DiagnosticEvent;
-  /** The events still held whose sequence number is at least `seq`, oldest first. */
+  /**
+   * The events still held whose sequence number is at least `seq`, oldest first: the `start` event, which is held for
+   * the recorder's life, then the rest. Also what an app can send its own server when the client never connects.
+   */
   events(seq?: number): DiagnosticEvent[];
   /** Call `listener` with each event as it is recorded. Returns the function that stops it. */
   listen(listener: (event: DiagnosticEvent) => void): () => void;
@@ -97,15 +115,19 @@ export function createDiagnostics(options: DiagnosticsOptions = {}): Diagnostics
   if (!Number.isSafeInteger(keepEvents) || keepEvents < 1) {
     throw new RangeError('keepEvents must be a positive integer');
   }
+  const app = appOption(options.app);
   const instance = randomId();
   const held: DiagnosticEvent[] = [];
   const listeners = new Set<(event: DiagnosticEvent) => void>();
   const sections = new Map<string, () => unknown>();
   let next = 0;
+  /** The `start` event: held apart from the others and never dropped, so a follower who comes late still gets it. */
+  let start: DiagnosticEvent | undefined;
 
   const events = (seq = 0) => {
     if (typeof seq !== 'number' || Number.isNaN(seq)) throw new TypeError('seq must be a number');
-    return held.filter((event) => event.seq >= seq);
+    const rest = held.filter((event) => event.seq >= seq);
+    return start && start.seq >= seq ? [start, ...rest] : rest;
   };
   const listen = (listener: (event: DiagnosticEvent) => void) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
@@ -139,7 +161,8 @@ export function createDiagnostics(options: DiagnosticsOptions = {}): Diagnostics
         ...own,
         ...(source === undefined ? {} : { source }),
       };
-      held.push(event);
+      if (start === undefined && kind === 'start' && source === undefined) start = event;
+      else held.push(event);
       const cutoff = event.t - keepMs;
       let drop = Math.max(0, held.length - keepEvents);
       while (drop < held.length && (held[drop] as DiagnosticEvent).t < cutoff) drop++;
@@ -171,7 +194,57 @@ export function createDiagnostics(options: DiagnosticsOptions = {}): Diagnostics
       return view(source === undefined ? name : `${source}/${name}`);
     },
   });
-  return view(undefined);
+  const recorder = view(undefined);
+  recorder.event('start', startFields(app));
+  return recorder;
+}
+
+/** The `app` option: absent, or a non-empty `name` and an optional string `build`. */
+function appOption(value: unknown): { name: string; build?: string } | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) throw new TypeError('app must be an object');
+  const { name, build } = value as { name?: unknown; build?: unknown };
+  if (typeof name !== 'string' || name === '') throw new TypeError('app.name must be a non-empty string');
+  if (build !== undefined && typeof build !== 'string') throw new TypeError('app.build must be a string');
+  return build === undefined ? { name } : { name, build };
+}
+
+/** What the runtime says of itself in `navigator.userAgentData` (User-Agent Client Hints), where it has them. */
+interface UserAgentData {
+  brands?: readonly { brand?: unknown; version?: unknown }[];
+  platform?: unknown;
+  mobile?: unknown;
+}
+
+/**
+ * The `start` event's fields: the SDK's version, the app's name and build, what the runtime is (its User-Agent Client
+ * Hints' brands, platform and mobile where it has them, else its user agent; Node's version in Node), and whether it
+ * has `WebTransport`.
+ */
+function startFields(app: { name: string; build?: string } | undefined): Record<string, unknown> {
+  const fields: Record<string, unknown> = { sdk: SDK_VERSION };
+  if (app) {
+    fields['app'] = app.name;
+    if (app.build !== undefined) fields['build'] = app.build;
+  }
+  const nav = (globalThis as { navigator?: { userAgent?: unknown; userAgentData?: UserAgentData } }).navigator;
+  const hints = nav?.userAgentData;
+  const brands = Array.isArray(hints?.brands)
+    ? hints.brands
+        .filter((entry) => typeof entry?.brand === 'string' && !/not.?a.?brand/i.test(entry.brand))
+        .map((entry) => `${entry.brand as string} ${String(entry.version ?? '')}`.trim())
+    : [];
+  if (brands.length > 0) {
+    fields['brands'] = brands;
+    if (typeof hints?.platform === 'string') fields['platform'] = hints.platform;
+    if (typeof hints?.mobile === 'boolean') fields['mobile'] = hints.mobile;
+  } else if (typeof nav?.userAgent === 'string') {
+    fields['userAgent'] = nav.userAgent;
+  }
+  const node = (globalThis as { process?: { versions?: { node?: unknown } } }).process?.versions?.node;
+  if (typeof node === 'string') fields['node'] = node;
+  fields['webTransport'] = typeof (globalThis as { WebTransport?: unknown }).WebTransport === 'function';
+  return fields;
 }
 
 /**
@@ -513,6 +586,93 @@ export function watchAudioInput(diagnostics: Diagnostics, input: WatchedAudioInp
   }, AUDIO_WATCH_MS);
   return () => {
     clearInterval(timer);
+    removeSection();
+  };
+}
+
+/** What {@link watchPage} reads of `navigator.connection` (the Network Information API), where the browser has it. */
+interface NetworkInformationLike extends EventTarget {
+  readonly effectiveType?: unknown;
+  readonly rtt?: unknown;
+  readonly downlink?: unknown;
+}
+
+/**
+ * Watch the page a client runs in, for diagnostics: a background tab slows its timers and can look like network trouble,
+ * and a page that is frozen or put in the back/forward cache looks like a client that left. Records a `page` event on
+ * each change, with `what`: `visible` or `hidden` (visibility), `freeze` or `resume`, `pagehide` or `pageshow` (with
+ * `persisted`, whether the page goes into or comes from the back/forward cache), `online` or `offline`, and
+ * `connection` (`effectiveType`, `rttMs`, `downlinkMbps`) when `navigator.connection` changes, where the browser has it.
+ * Adds a `page` section: `visibility`, cumulative `hiddenMs`, `freezes`, `online`, and the connection's fields.
+ * Browser only: where there is no `document` it records nothing. Returns the function that stops watching.
+ *
+ * ```ts
+ * const unwatch = watchPage(diagnostics);
+ * ```
+ */
+export function watchPage(diagnostics: Diagnostics): () => void {
+  const scope = globalThis as {
+    document?: EventTarget & { visibilityState?: unknown };
+    navigator?: { onLine?: unknown; connection?: NetworkInformationLike };
+    addEventListener?: EventTarget['addEventListener'];
+    removeEventListener?: EventTarget['removeEventListener'];
+  };
+  const doc = scope.document;
+  if (typeof doc !== 'object' || doc === null || typeof doc.addEventListener !== 'function') return () => {};
+  const hidden = () => doc.visibilityState === 'hidden';
+  let hiddenSince = hidden() ? performance.now() : undefined;
+  let hiddenMs = 0;
+  let freezes = 0;
+  const connection = scope.navigator?.connection;
+  const network = () => {
+    const out: Record<string, unknown> = {};
+    if (!connection) return out;
+    if (typeof connection.effectiveType === 'string') out['effectiveType'] = connection.effectiveType;
+    if (typeof connection.rtt === 'number') out['rttMs'] = connection.rtt;
+    if (typeof connection.downlink === 'number') out['downlinkMbps'] = connection.downlink;
+    return out;
+  };
+  const removeSection = diagnostics.section('page', () => ({
+    visibility: hidden() ? 'hidden' : 'visible',
+    hiddenMs: Math.round(hiddenMs + (hiddenSince === undefined ? 0 : performance.now() - hiddenSince)),
+    freezes,
+    ...(typeof scope.navigator?.onLine === 'boolean' ? { online: scope.navigator.onLine } : {}),
+    ...network(),
+  }));
+  const listeners: [EventTarget, string, (event: Event) => void][] = [];
+  const on = (target: EventTarget | undefined, type: string, listener: (event: Event) => void) => {
+    if (!target || typeof target.addEventListener !== 'function') return;
+    target.addEventListener(type, listener);
+    listeners.push([target, type, listener]);
+  };
+  on(doc, 'visibilitychange', () => {
+    const now = performance.now();
+    if (hidden()) hiddenSince ??= now;
+    else if (hiddenSince !== undefined) {
+      hiddenMs += now - hiddenSince;
+      hiddenSince = undefined;
+    }
+    diagnostics.event('page', { what: hidden() ? 'hidden' : 'visible' });
+  });
+  on(doc, 'freeze', () => {
+    freezes++;
+    diagnostics.event('page', { what: 'freeze' });
+  });
+  on(doc, 'resume', () => diagnostics.event('page', { what: 'resume' }));
+  // `window` is the global object in a browser.
+  const win = typeof scope.addEventListener === 'function' ? (scope as unknown as EventTarget) : undefined;
+  for (const type of ['pagehide', 'pageshow']) {
+    on(win, type, (event) =>
+      diagnostics.event('page', {
+        what: type,
+        persisted: (event as Event & { persisted?: unknown }).persisted === true,
+      }),
+    );
+  }
+  for (const type of ['online', 'offline']) on(win, type, () => diagnostics.event('page', { what: type }));
+  on(connection, 'change', () => diagnostics.event('page', { what: 'connection', ...network() }));
+  return () => {
+    for (const [target, type, listener] of listeners.splice(0)) target.removeEventListener(type, listener);
     removeSection();
   };
 }

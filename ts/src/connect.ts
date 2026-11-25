@@ -40,6 +40,8 @@ export type {
   ConnectRelaySubscriberOptions,
   RelayCredential,
   RelayTransportFactory,
+  TransportFallback,
+  TransportFraming,
 } from './connect-session.js';
 export { webTransport } from './connect-session.js';
 

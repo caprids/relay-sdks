@@ -93,6 +93,12 @@ if (command === 'version') {
   for (const { path, manifest } of packages()) {
     writeFileSync(path, `${JSON.stringify({ ...manifest, version }, null, 2)}\n`);
   }
+  // The SDK reports its version in client diagnostics' start event, from source rather than a JSON import.
+  const versionSource = resolve(root, 'src/version.ts');
+  writeFileSync(
+    versionSource,
+    readFileSync(versionSource, 'utf8').replace(/SDK_VERSION = '[^']*'/, `SDK_VERSION = '${version}'`),
+  );
   process.stdout.write(`every package is now ${version}; add a "## ${version}" section to CHANGELOG.md\n`);
 } else if (command === 'check') {
   const version = requireVersion(argument);

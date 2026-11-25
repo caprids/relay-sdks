@@ -12,6 +12,24 @@ type Carrier = MoqtTransport & { readonly protocol: string; readonly ready: Prom
 /** Which transport a {@link FallbackTransport} runs on. */
 export type FallbackCarrier = 'webtransport' | 'websocket';
 
+/**
+ * Why a {@link FallbackTransport} dialed WebSocket: the shape of the SDK's `TransportFallback`, which its supervisors
+ * read for client diagnostics.
+ */
+export interface WebSocketFallbackReport {
+  /** The carrier it fell back from. */
+  readonly from: 'webtransport';
+  /** The carrier it dialed instead; whichever is ready first carries the session. */
+  readonly to: 'websocket';
+  /**
+   * `unavailable`: the runtime has no usable `WebTransport`, or refused the dial outright (`error`). `slow`: the
+   * WebTransport handshake had not completed within the WebSocket delay. `failed`: it failed, with `error`.
+   */
+  readonly reason: 'unavailable' | 'slow' | 'failed';
+  /** What the WebTransport dial failed with, or what refused it. */
+  readonly error?: unknown;
+}
+
 /** Options for {@link withWebSocketFallback}. */
 export interface WebSocketFallbackOptions {
   /**
@@ -81,8 +99,15 @@ export class FallbackTransport implements MoqtTransport {
 
   /** The dials still in progress. */
   readonly #dials = new Set<Carrier>();
+  /**
+   * The WebTransport winner's `getStats()`, once it won and when it has one (a browser's `WebTransport`). Absent before
+   * `ready` and on WebSocket, which keeps none, so a reader that looks for the method finds no stats to read.
+   */
+  getStats?: () => Promise<unknown>;
+
   #winner: Carrier | undefined;
   #carrier: FallbackCarrier | undefined;
+  #fallback: WebSocketFallbackReport | undefined;
   /** Ends the race without a winner; unset once it has ended. */
   #cancel: ((info?: { closeCode?: number; reason?: string }) => void) | undefined;
   readonly #won: Promise<Carrier>;
@@ -102,6 +127,14 @@ export class FallbackTransport implements MoqtTransport {
   /** The transport the session runs on; undefined until `ready`. */
   get carrier(): FallbackCarrier | undefined {
     return this.#carrier;
+  }
+
+  /**
+   * Why the WebSocket dial started, once it has: set whichever dial then wins, and updated to `failed` when a slow
+   * WebTransport handshake fails later. `undefined` while WebTransport alone is dialing, or once it won alone.
+   */
+  get fallback(): WebSocketFallbackReport | undefined {
+    return this.#fallback;
   }
 
   /** The protocol the winner's peer selected (TA-8); empty until `ready` resolves. */
@@ -133,6 +166,9 @@ export class FallbackTransport implements MoqtTransport {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let webTransportPending = false;
       let webTransportFailure: unknown;
+      let webTransportFailed = false;
+      /** Set when the runtime refused to construct the dial at all. */
+      let webTransportRefused = false;
       let webSocketStarted = false;
       let webSocketFailure: { error: unknown } | undefined;
 
@@ -153,6 +189,10 @@ export class FallbackTransport implements MoqtTransport {
         end();
         this.#winner = winner;
         this.#carrier = carrier;
+        const stats = (winner as Carrier & { getStats?: unknown }).getStats;
+        if (carrier === 'webtransport' && typeof stats === 'function') {
+          this.getStats = () => (stats as () => Promise<unknown>).call(winner);
+        }
         // Settled before the callback, so a close() from it closes the winner rather than cancelling a dial.
         resolve(winner);
         if (carrier === 'websocket') {
@@ -173,6 +213,16 @@ export class FallbackTransport implements MoqtTransport {
       const dialWebSocket = () => {
         if (!this.#cancel || webSocketStarted) return;
         webSocketStarted = true;
+        this.#fallback = webTransportPending
+          ? { from: 'webtransport', to: 'websocket', reason: 'slow' }
+          : webTransportFailed
+            ? {
+                from: 'webtransport',
+                to: 'websocket',
+                reason: webTransportRefused ? 'unavailable' : 'failed',
+                error: webTransportFailure,
+              }
+            : { from: 'webtransport', to: 'websocket', reason: 'unavailable' };
         clearTimeout(timer);
         let webSocket: WebSocketTransport;
         try {
@@ -200,6 +250,8 @@ export class FallbackTransport implements MoqtTransport {
         } catch (error) {
           // A runtime that refuses the dial outright (a policy, a URL it will not take) falls back too.
           webTransportFailure = error;
+          webTransportFailed = true;
+          webTransportRefused = true;
         }
       }
       if (!webTransport) return dialWebSocket();
@@ -213,6 +265,11 @@ export class FallbackTransport implements MoqtTransport {
         (error: unknown) => {
           webTransportPending = false;
           webTransportFailure = error;
+          webTransportFailed = true;
+          // Slow, then failed: the WebSocket dial is already under way, and now WebTransport could not have won.
+          if (this.#fallback?.reason === 'slow' && this.#cancel) {
+            this.#fallback = { from: 'webtransport', to: 'websocket', reason: 'failed', error };
+          }
           if (this.#dials.delete(dial)) closeQuietly(dial);
           dialWebSocket();
           failIfLost();

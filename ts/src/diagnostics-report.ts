@@ -4,7 +4,7 @@
  */
 import type { MoqtObject, SubscribeOk } from '@caprid/moq-core';
 import type { Diagnostics } from './client-diagnostics.js';
-import type { TransportFraming } from './connect-session.js';
+import type { DialReport, TransportFraming } from './connect-session.js';
 import { RelayError } from './errors.js';
 import type { RestartReason, WantHandlers } from './supervised-subscriber.js';
 import type { SupervisedStatus } from './supervision.js';
@@ -33,11 +33,61 @@ export function endpointHost(endpoint: string): string | undefined {
   }
 }
 
+/** How a connection attempt ended, for a `dial` event. */
+export function dialOutcome(error: unknown): 'timeout' | 'refused' | 'error' {
+  if (error instanceof RelayError && error.code === 'CONNECTION_TIMEOUT') return 'timeout';
+  if (error instanceof RelayError && error.code === 'UNAUTHORIZED') return 'refused';
+  return 'error';
+}
+
+/** How often a live connection's transport stats are read, in milliseconds. */
+const TRANSPORT_STATS_MS = 1_000;
+
+/** A number rounded to a tenth. */
+const tenths = (value: number) => Math.round(value * 10) / 10;
+
+/**
+ * The fields of a WebTransport `getStats()` result (WebTransportConnectionStats) the `transport` section reports, under
+ * its own names, units in the names. A field the runtime does not give is left out: Chromium gives the three RTTs and
+ * the estimated send rate, and none of the byte and packet counters.
+ */
+const TRANSPORT_FIELDS: readonly [string, string, (value: number) => number][] = [
+  ['smoothedRtt', 'rttMs', tenths],
+  ['rttVariation', 'rttVarMs', tenths],
+  ['minRtt', 'minRttMs', tenths],
+  ['bytesSent', 'sentBytes', Math.round],
+  ['bytesReceived', 'receivedBytes', Math.round],
+  ['packetsSent', 'sentPackets', Math.round],
+  ['packetsReceived', 'receivedPackets', Math.round],
+  ['packetsLost', 'lostPackets', Math.round],
+  ['bytesLost', 'lostBytes', Math.round],
+  // Bits per second.
+  ['estimatedSendRate', 'sendRateKbps', (bps) => Math.round(bps / 1000)],
+];
+
+/** A transport's stats, as the `transport` section reports them: only the fields that are finite numbers (or BigInts). */
+export function transportStats(raw: unknown): Record<string, number | boolean> {
+  const out: Record<string, number | boolean> = {};
+  if (typeof raw !== 'object' || raw === null) return out;
+  const stats = raw as Record<string, unknown>;
+  for (const [from, to, convert] of TRANSPORT_FIELDS) {
+    const value = typeof stats[from] === 'bigint' ? Number(stats[from]) : stats[from];
+    if (typeof value === 'number' && Number.isFinite(value)) out[to] = convert(value);
+  }
+  const capacity = stats['atSendCapacity'];
+  if (typeof capacity === 'boolean') out['atSendCapacity'] = capacity;
+  return out;
+}
+
 /**
  * What a supervisor reports, under the scope it is given: a `link` event on each status change (with what carries the
- * connection and the relay's host when it goes live, and the error that ended the last one), and a `link` section.
+ * connection and the relay's host when it goes live, and the error that ended the last one), a `dial` event per
+ * connection attempt and a `fallback` event when its factory fell back, a `publication` event per root it publishes, a
+ * `link` section, and while a connection whose transport has `getStats()` is live, a `transport` section.
  */
 export function linkDiagnostics(diagnostics: Diagnostics) {
+  let attempts = 0;
+  let stopWatching: (() => void) | undefined;
   const state: {
     status: SupervisedStatus;
     carrier?: TransportFraming;
@@ -67,6 +117,85 @@ export function linkDiagnostics(diagnostics: Diagnostics) {
     generation(generation: string) {
       state.generation = generation;
       diagnostics.event('generation', { generation });
+    },
+    /**
+     * A connection attempt ended: a `dial` event with its number, the carrier and relay host it reached, how long it
+     * took from its start, and how it ended; and a `fallback` event first when the factory fell back.
+     */
+    dial(startedAt: number, report: DialReport | undefined, error?: unknown) {
+      const attempt = ++attempts;
+      const ms = Math.round(performance.now() - startedAt);
+      const relay = report?.endpoint === undefined ? undefined : endpointHost(report.endpoint);
+      const fallback = report?.fallback;
+      if (fallback) {
+        diagnostics.event('fallback', {
+          attempt,
+          from: fallback.from,
+          to: fallback.to,
+          reason: fallback.reason,
+          ...(fallback.error === undefined ? {} : { error: describeFailure(fallback.error) }),
+        });
+      }
+      // On a failure after a fallback, the carrier last dialed.
+      const carrier = error === undefined ? report?.framing : (fallback?.to ?? report?.framing);
+      diagnostics.event('dial', {
+        attempt,
+        ...(carrier === undefined ? {} : { carrier }),
+        ...(relay === undefined ? {} : { relay }),
+        ms,
+        outcome: error === undefined ? 'ok' : dialOutcome(error),
+        ...(error === undefined ? {} : { error: describeFailure(error) }),
+      });
+    },
+    /**
+     * The connection that just went live: read its transport's `getStats()` about once a second into a `transport`
+     * section, until `ended` aborts or another connection goes live. Nothing for a transport without it.
+     */
+    watch(transport: unknown, ended: AbortSignal) {
+      stopWatching?.();
+      stopWatching = undefined;
+      const getStats = (transport as { getStats?: unknown } | undefined)?.getStats;
+      if (typeof getStats !== 'function' || ended.aborted) return;
+      let removeSection: (() => void) | undefined;
+      let reading = false;
+      let stopped = false;
+      // `getStats()` is async: the section reads what the last call gave, and a call still pending is not repeated.
+      // A transport that gives none of the fields (a WebSocket behind a fallback) has no section, not an empty one.
+      const read = () => {
+        if (reading) return;
+        reading = true;
+        Promise.resolve()
+          .then(() => getStats.call(transport))
+          .then(
+            (raw: unknown) => {
+              // A read that settles after this connection ended, or another went live, adds nothing.
+              if (stopped || ended.aborted) return;
+              const stats = transportStats(raw);
+              removeSection?.();
+              removeSection =
+                Object.keys(stats).length === 0 ? undefined : diagnostics.section('transport', () => ({ ...stats }));
+            },
+            () => {},
+          )
+          .finally(() => {
+            reading = false;
+          });
+      };
+      read();
+      const timer = setInterval(read, TRANSPORT_STATS_MS);
+      const stop = () => {
+        stopped = true;
+        clearInterval(timer);
+        removeSection?.();
+        ended.removeEventListener('abort', stop);
+        if (stopWatching === stop) stopWatching = undefined;
+      };
+      stopWatching = stop;
+      ended.addEventListener('abort', stop, { once: true });
+    },
+    /** A root published, or its publication closed: a `publication` event with its namespace. */
+    publication(root: readonly string[], what: 'published' | 'closed') {
+      diagnostics.event('publication', { what, namespace: root.join('/') });
     },
   };
 }
@@ -135,7 +264,12 @@ export function wantDiagnostics(diagnostics: Diagnostics) {
         onSubscribed(info, context) {
           state.subscribed = true;
           fresh(info.trackProperties);
-          diagnostics.event('want', { want: key, what: 'subscribed', namespace: context.namespace.join('/') });
+          diagnostics.event('want', {
+            want: key,
+            what: 'subscribed',
+            namespace: context.namespace.join('/'),
+            track: state.track,
+          });
           handlers.onSubscribed?.(info, context);
         },
         onObject(object) {

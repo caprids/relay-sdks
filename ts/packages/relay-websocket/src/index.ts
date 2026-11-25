@@ -18,12 +18,18 @@ import {
   FallbackTransport,
   toWebSocketUrl,
   type WebSocketFallbackOptions,
+  type WebSocketFallbackReport,
 } from './fallback.js';
 import { WebSocketTransport } from './transport.js';
 
 export type { CloseInfo } from './errors.js';
 export { WebSocketSessionError } from './errors.js';
-export type { FallbackCarrier, FallbackTransport, WebSocketFallbackOptions } from './fallback.js';
+export type {
+  FallbackCarrier,
+  FallbackTransport,
+  WebSocketFallbackOptions,
+  WebSocketFallbackReport,
+} from './fallback.js';
 
 /** The transport a {@link WebSocketConnection} carries: a `MoqtTransport` that reports the selected protocol. */
 export interface WebSocketMoqtTransport extends MoqtTransport {
@@ -79,6 +85,11 @@ export interface FallbackConnection {
    * Both carry the path and token in the URL, so the SDK's SETUP is the same either way.
    */
   readonly framing: FallbackCarrier;
+  /**
+   * Why the WebSocket dial started, once it has, for the SDK's client diagnostics (its `TransportFallback`): the
+   * transport's {@link FallbackTransport.fallback}.
+   */
+  readonly fallback: WebSocketFallbackReport | undefined;
 }
 
 /** Dials WebTransport, then races QMux over WebSocket against it; see {@link withWebSocketFallback}. */
@@ -107,6 +118,9 @@ export function withWebSocketFallback(options: WebSocketFallbackOptions = {}): F
       ready: transport.ready,
       get framing() {
         return transport.carrier ?? 'webtransport';
+      },
+      get fallback() {
+        return transport.fallback;
       },
     };
   };
