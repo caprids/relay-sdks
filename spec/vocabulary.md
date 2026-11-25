@@ -1048,7 +1048,7 @@ does not export.
 | The same recorder under a name, for one link, reader or writer | `diagnostics.scope('roster')`: events carry `source`, sections are named `roster.<name>` | — |
 | One recorded event | `DiagnosticEvent { t, seq, kind, source?, ...fields }` | — |
 | The two track names | `DIAGNOSTICS_TRACKS` (`{ events: 'diag.events', stats: 'diag.stats' }`) | — |
-| Publish a recorder | `publishDiagnostics(diagnostics, publisher, { statsIntervalMs? })` → `DiagnosticsPublication { close }` | — |
+| Publish a recorder | `publishDiagnostics(diagnostics, publisher, { statsIntervalMs?, eventsPriority?, statsPriority? })` → `DiagnosticsPublication { close }` | — |
 | What the tracks carry | `DiagnosticsEventsObject { instance, backlog?, events }`, `DiagnosticsStatsObject { instance, t, stats }` | — |
 | Read a client's diagnostics | `followDiagnostics(subscriber, { namespace, generations?, key?, eventsParameters? }, { onEvents, onStats, onError })` | — |
 | Have the SDK report into it | `diagnostics` on `connectSupervisedPublisher` (scope `publisher`), `connectSupervisedSubscriber` (`subscriber`), `connectSupervisedRelay` (`relay`), `createFrameWriter` and `createFrameReader` | — |
