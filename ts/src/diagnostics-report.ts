@@ -156,9 +156,11 @@ export function linkDiagnostics(diagnostics: Diagnostics) {
       stopWatching = undefined;
       const getStats = (transport as { getStats?: unknown } | undefined)?.getStats;
       if (typeof getStats !== 'function' || ended.aborted) return;
-      let stats: Record<string, number | boolean> = {};
+      let removeSection: (() => void) | undefined;
       let reading = false;
+      let stopped = false;
       // `getStats()` is async: the section reads what the last call gave, and a call still pending is not repeated.
+      // A transport that gives none of the fields (a WebSocket behind a fallback) has no section, not an empty one.
       const read = () => {
         if (reading) return;
         reading = true;
@@ -166,7 +168,12 @@ export function linkDiagnostics(diagnostics: Diagnostics) {
           .then(() => getStats.call(transport))
           .then(
             (raw: unknown) => {
-              if (!ended.aborted) stats = transportStats(raw);
+              // A read that settles after this connection ended, or another went live, adds nothing.
+              if (stopped || ended.aborted) return;
+              const stats = transportStats(raw);
+              removeSection?.();
+              removeSection =
+                Object.keys(stats).length === 0 ? undefined : diagnostics.section('transport', () => ({ ...stats }));
             },
             () => {},
           )
@@ -174,12 +181,12 @@ export function linkDiagnostics(diagnostics: Diagnostics) {
             reading = false;
           });
       };
-      const removeSection = diagnostics.section('transport', () => ({ ...stats }));
       read();
       const timer = setInterval(read, TRANSPORT_STATS_MS);
       const stop = () => {
+        stopped = true;
         clearInterval(timer);
-        removeSection();
+        removeSection?.();
         ended.removeEventListener('abort', stop);
         if (stopWatching === stop) stopWatching = undefined;
       };

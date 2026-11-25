@@ -406,9 +406,34 @@ describe('transport stats', () => {
       },
     });
     await until(() => calls === 1, 'the first read');
-    expect(diagnostics.snapshot()['roster/subscriber.transport']).toEqual({});
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toBeUndefined();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(calls).toBe(1);
+  });
+
+  it('adds no section while getStats() gives none of its fields, as on a WebSocket behind a fallback', async () => {
+    // What a FallbackTransport that ended up on WebSocket used to give, then a runtime with only datagram counters.
+    let stats: unknown;
+    let calls = 0;
+    const { diagnostics } = await supervise({
+      getStats: async () => {
+        calls++;
+        return stats;
+      },
+    });
+    await until(() => calls === 1, 'the first read');
+    await settle();
+    expect(diagnostics.snapshot()).not.toHaveProperty(['roster/subscriber.transport']);
+    stats = { datagrams: { droppedIncoming: 0 }, estimatedSendRate: null };
+    await until(() => calls === 2, 'the next read', 2_000);
+    await settle();
+    expect(diagnostics.snapshot()).not.toHaveProperty(['roster/subscriber.transport']);
+    // Fields that arrive later add it, and fields that go away remove it again.
+    stats = { smoothedRtt: 40 };
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] !== undefined, 'the section', 2_000);
+    expect(diagnostics.snapshot()['roster/subscriber.transport']).toEqual({ rttMs: 40 });
+    stats = undefined;
+    await until(() => diagnostics.snapshot()['roster/subscriber.transport'] === undefined, 'the section gone', 2_000);
   });
 
   it('adds no section for a transport without getStats()', async () => {

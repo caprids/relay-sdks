@@ -51,8 +51,8 @@ each section says what changed and what to do about it. How to cut a release is 
   transport's `getStats()` gives (`rttMs`, `rttVarMs`, `minRttMs`, `sendRateKbps` in Chromium), read about once a
   second. A transport factory may return a `fallback` beside its `framing` (`TransportFallback`).
 - `@caprid/relay-websocket`: `FallbackConnection.fallback` and `FallbackTransport.fallback` say why the WebSocket dial
-  started (`unavailable`, `slow` or `failed`, with the error), and `FallbackTransport.getStats()` is the WebTransport
-  winner's. The SDK's supervisors read the first for diagnostics.
+  started (`unavailable`, `slow` or `failed`, with the error), and `FallbackTransport.getStats` is the WebTransport
+  winner's, present only once WebTransport won. The SDK's supervisors read the first for diagnostics.
 
 ## 0.5.0
 

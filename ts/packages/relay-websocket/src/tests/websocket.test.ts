@@ -301,7 +301,7 @@ describe('withWebSocketFallback', () => {
     expect(accepted).toEqual([]);
     // No fallback to report, and the stats are the WebTransport session's own.
     expect(connection.fallback).toBeUndefined();
-    await expect(connection.transport.getStats()).resolves.toEqual({ smoothedRtt: 12.5, minRtt: 9 });
+    await expect(connection.transport.getStats?.()).resolves.toEqual({ smoothedRtt: 12.5, minRtt: 9 });
     connection.transport.close({ closeCode: 1, reason: 'bye' });
     await expect(connection.transport.closed).resolves.toEqual({ closeCode: 1, reason: 'bye' });
   });
@@ -318,8 +318,8 @@ describe('withWebSocketFallback', () => {
     expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/Opening handshake failed/);
     expect(connection.fallback).toMatchObject({ from: 'webtransport', to: 'websocket', reason: 'failed' });
     expect(String(connection.fallback?.error)).toMatch(/Opening handshake failed/);
-    // WebSocket keeps no stats.
-    await expect(connection.transport.getStats()).resolves.toBeUndefined();
+    // WebSocket keeps no stats, so the transport offers no getStats() to read.
+    expect(connection.transport.getStats).toBeUndefined();
     expect((await nextAccepted()).path).toBe('/moq?jwt=t');
 
     // The winner's incoming streams come through the fallback transport.
@@ -344,6 +344,8 @@ describe('withWebSocketFallback', () => {
     expect(onFallback).toHaveBeenCalledOnce();
     expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/ready before the WebTransport handshake completed/);
     expect(connection.fallback).toEqual({ from: 'webtransport', to: 'websocket', reason: 'slow' });
+    // The WebTransport dial that lost has getStats(), but the session runs on WebSocket.
+    expect(connection.transport.getStats).toBeUndefined();
     connection.transport.close();
   });
 

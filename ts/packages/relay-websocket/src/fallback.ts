@@ -99,6 +99,12 @@ export class FallbackTransport implements MoqtTransport {
 
   /** The dials still in progress. */
   readonly #dials = new Set<Carrier>();
+  /**
+   * The WebTransport winner's `getStats()`, once it won and when it has one (a browser's `WebTransport`). Absent before
+   * `ready` and on WebSocket, which keeps none, so a reader that looks for the method finds no stats to read.
+   */
+  getStats?: () => Promise<unknown>;
+
   #winner: Carrier | undefined;
   #carrier: FallbackCarrier | undefined;
   #fallback: WebSocketFallbackReport | undefined;
@@ -129,15 +135,6 @@ export class FallbackTransport implements MoqtTransport {
    */
   get fallback(): WebSocketFallbackReport | undefined {
     return this.#fallback;
-  }
-
-  /**
-   * The winner's `getStats()`, when it has one (a browser's `WebTransport`); `undefined` before `ready`, and on
-   * WebSocket, which keeps none.
-   */
-  async getStats(): Promise<unknown> {
-    const winner = this.#winner as (Carrier & { getStats?: () => Promise<unknown> }) | undefined;
-    return typeof winner?.getStats === 'function' ? winner.getStats() : undefined;
   }
 
   /** The protocol the winner's peer selected (TA-8); empty until `ready` resolves. */
@@ -192,6 +189,10 @@ export class FallbackTransport implements MoqtTransport {
         end();
         this.#winner = winner;
         this.#carrier = carrier;
+        const stats = (winner as Carrier & { getStats?: unknown }).getStats;
+        if (carrier === 'webtransport' && typeof stats === 'function') {
+          this.getStats = () => (stats as () => Promise<unknown>).call(winner);
+        }
         // Settled before the callback, so a close() from it closes the winner rather than cancelling a dial.
         resolve(winner);
         if (carrier === 'websocket') {

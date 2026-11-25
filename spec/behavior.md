@@ -2215,7 +2215,9 @@ while something subscribes, so a client nobody watches sends nothing.
     RTTs and the send rate, none of the counters (its WebTransportConnectionStats has only those and
     the datagram counters). The WebSocket transport and the native QUIC transport
     (`@caprid/relay-quic`) give none: QMux hides the WebSocket's `bufferedAmount`, and the native
-    addon exposes no connection stats, so no section. The section leaves when the connection ends.
+    addon exposes no connection stats, so no section. There is no section until a read gives at
+    least one of the fields, and none while a read gives none (an empty section would read as a
+    transport that measured nothing). The section leaves when the connection ends.
     The three RTTs are what qlog's `quic:recovery_metrics_updated` calls `smoothed_rtt`,
     `rtt_variance` and `min_rtt` (draft-ietf-quic-qlog-quic-events); a `dial` is qlog's
     `quic:connection_state_updated` from `attempted` to `handshake_complete` or `closed`.
