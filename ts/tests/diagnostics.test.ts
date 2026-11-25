@@ -1,5 +1,6 @@
-import type { MoqtObject } from '@caprid/moq-core';
+import type { KeyValuePair, MoqtObject } from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { publisherTimeouts } from '../src/delivery-timeouts.js';
 import {
   createDiagnostics,
   DIAGNOSTICS_TRACKS,
@@ -24,14 +25,20 @@ const decoder = new TextDecoder();
 const bodies = (groups: RecordedGroup[]) =>
   groups.flatMap((group) => group.objects.map((object) => JSON.parse(decoder.decode(object.bytes))));
 
-/** A publisher whose tracks are slot tracks, by name. */
+/** A publisher whose tracks are slot tracks, by name, with the delivery timeouts their properties declare. */
 function fakePublisher(options: { demand?: boolean } = {}) {
   const tracks = new Map<string, ReturnType<typeof slotTrack>>();
+  const registered = new Map<string, RegisterTrackOptions>();
   return {
     tracks,
-    registerTrack({ track }: RegisterTrackOptions) {
-      const made = slotTrack(options);
-      tracks.set(track, made);
+    registered,
+    registerTrack(register: RegisterTrackOptions) {
+      const made = slotTrack({
+        ...options,
+        trackTimeouts: publisherTimeouts((register.trackProperties ?? []) as readonly KeyValuePair[]),
+      });
+      tracks.set(register.track, made);
+      registered.set(register.track, register);
       return made.writer;
     },
   };
@@ -248,6 +255,90 @@ describe('publishDiagnostics', () => {
 
   it('checks the stats interval', () => {
     expect(() => publishDiagnostics(createDiagnostics(), fakePublisher(), { statsIntervalMs: 0 })).toThrow(RangeError);
+  });
+
+  it('registers both tracks behind media, and gives stats a delivery timeout of two intervals', async () => {
+    const publisher = fakePublisher();
+    const publication = publishDiagnostics(createDiagnostics(), publisher);
+    expect(publisher.registered.get(DIAGNOSTICS_TRACKS.events)?.trackProperties).toEqual([{ type: 0x0e, value: 224 }]);
+    expect(publisher.registered.get(DIAGNOSTICS_TRACKS.stats)?.trackProperties).toEqual([
+      { type: 0x0e, value: 240 },
+      { type: 0x02, value: 2_000 },
+    ]);
+    await publication.close();
+
+    const custom = fakePublisher();
+    const other = publishDiagnostics(createDiagnostics(), custom, {
+      statsIntervalMs: 5_000,
+      eventsPriority: 128,
+      statsPriority: 255,
+    });
+    expect(custom.registered.get(DIAGNOSTICS_TRACKS.events)?.trackProperties).toEqual([{ type: 0x0e, value: 128 }]);
+    expect(custom.registered.get(DIAGNOSTICS_TRACKS.stats)?.trackProperties).toEqual([
+      { type: 0x0e, value: 255 },
+      { type: 0x02, value: 10_000 },
+    ]);
+    await other.close();
+  });
+
+  it('checks the priorities', () => {
+    const publish = (options: object) => () => publishDiagnostics(createDiagnostics(), fakePublisher(), options);
+    expect(publish({ eventsPriority: 256 })).toThrow(RangeError);
+    expect(publish({ statsPriority: -1 })).toThrow(RangeError);
+    expect(publish({ statsPriority: 1.5 })).toThrow(RangeError);
+    expect(publish({ eventsPriority: '1' })).toThrow(TypeError);
+  });
+
+  it('drops a snapshot the transport has not taken within two intervals, and sends the next', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const publisher = fakePublisher();
+    const diagnostics = createDiagnostics();
+    let n = 0;
+    diagnostics.section('counter', () => ({ n: ++n }));
+    const publication = publishDiagnostics(diagnostics, publisher, { statsIntervalMs: 1_000 });
+    const stats = publisher.tracks.get(DIAGNOSTICS_TRACKS.stats);
+    stats?.stallOpen();
+    // Snapshot 1 waits for its stream from 1 s and expires at 3 s. Only the newest snapshot waits behind it, and one
+    // queued over two intervals is dropped before it is served.
+    await vi.advanceTimersByTimeAsync(3_500);
+    stats?.release();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const sent = (bodies(stats?.groups ?? []) as DiagnosticsStatsObject[]).map((body) => body.stats['counter']);
+    expect(sent).not.toContainEqual({ n: 1 });
+    expect(sent.at(-1)).toEqual({ n: 4 });
+    expect(sent.length).toBeLessThanOrEqual(3);
+
+    // Behind a stream that never opens, each snapshot's own age drops it: nothing older than two intervals goes out.
+    stats?.stallOpen();
+    await vi.advanceTimersByTimeAsync(10_000);
+    stats?.release();
+    const before = stats?.groups.length ?? 0;
+    await vi.advanceTimersByTimeAsync(500);
+    const late = (bodies(stats?.groups ?? []) as DiagnosticsStatsObject[]).slice(before);
+    expect(late.every((body) => Date.now() - body.t <= 2_500)).toBe(true);
+    await publication.close();
+  });
+
+  it('replaces an event or a section JSON cannot encode, and keeps publishing', async () => {
+    const publisher = fakePublisher();
+    const diagnostics = createDiagnostics();
+    diagnostics.section('good', () => ({ n: 1 }));
+    diagnostics.section('bad', () => ({ n: 1n }));
+    const publication = publishDiagnostics(diagnostics, publisher, { statsIntervalMs: 10 });
+    const events = publisher.tracks.get(DIAGNOSTICS_TRACKS.events);
+    await settle();
+    diagnostics.event('app.bad', { n: 2n });
+    diagnostics.event('app.good', { n: 2 });
+    await settle();
+    const sent = bodies(events?.groups ?? []) as DiagnosticsEventsObject[];
+    expect(sent.flatMap((body) => body.events)).toEqual([
+      expect.objectContaining({ seq: 0, kind: 'app.bad', error: 'not encodable as JSON' }),
+      expect.objectContaining({ seq: 1, kind: 'app.good', n: 2 }),
+    ]);
+    await until(() => (publisher.tracks.get(DIAGNOSTICS_TRACKS.stats)?.groups.length ?? 0) > 0);
+    const [snapshot] = bodies(publisher.tracks.get(DIAGNOSTICS_TRACKS.stats)?.groups ?? []) as DiagnosticsStatsObject[];
+    expect(snapshot?.stats).toEqual({ good: { n: 1 }, bad: { error: 'not encodable as JSON' } });
+    await publication.close();
   });
 });
 
