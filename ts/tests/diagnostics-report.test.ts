@@ -415,6 +415,31 @@ describe('a frame writer with diagnostics', () => {
     await writer.close();
   });
 
+  it('measures input gaps from the latest media time, so frames in decode order are no gap', async () => {
+    const diagnostics = createDiagnostics();
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer, { grouping: 'frame', diagnostics });
+    const at = async (ms: number) => writer.write({ payload: Uint8Array.of(1), key: true, timestampUs: ms * 1000 });
+    // 40 ms frames in order, then decode order: a P-frame 320 ms on, then its B-frames back to front.
+    for (let ms = 0; ms <= 360; ms += 40) await at(ms);
+    for (const p of [680, 1_000]) {
+      await at(p);
+      for (let b = p - 40; b > p - 320; b -= 40) await at(b);
+    }
+    // Measured from the last B-frame, the next P-frame would be 600 ms on: past eight usual intervals.
+    expect(diagnostics.events()).toEqual([]);
+    // A real gap after B-frames still counts.
+    await at(4_000);
+    // A step back of over a second is a new timeline, followed from there.
+    for (let ms = 0; ms <= 120; ms += 40) await at(ms);
+    await at(2_120);
+    expect(brief(diagnostics.events(), 'ms')).toEqual([
+      [undefined, 'input-gap', 3_000],
+      [undefined, 'input-gap', 2_000],
+    ]);
+    await writer.close();
+  });
+
   it('counts each time it asks for a keyframe after its start', async () => {
     const diagnostics = createDiagnostics();
     const track = slotTrack();

@@ -2191,8 +2191,10 @@ nobody watches sends nothing.
     frames handed to it, judged by the arrival-gap rule below: frames lost before the writer, at the
     encoder, while everything after it looks healthy. Each is an `input-gap` event (`ms`). A frame's
     media time is its `timestampUs`, else the LOC Timestamp (`0x10`) among its properties in the
-    Timescale (`0x08`) beside it, microseconds without one; a frame with neither is skipped, and a
-    timestamp that goes back or repeats is not a gap. Removed when the writer closes.
+    Timescale (`0x08`) beside it, microseconds without one; a frame with neither is skipped. An interval
+    is measured from the latest media time so far, so frames in decode order (B-frames) are no gap; a
+    timestamp at or behind it is not one either, and one over a second behind it starts a new timeline,
+    measured from there. Removed when the writer closes.
   - A frame reader, under the scope it is given: a `receive` section with the `objects` read and
     their payload `bytes`, the `arrivalGaps` and `longestGapMs`, `reordered` (objects that arrived
     after a later group or object of the same subscription) and `longestReorderWaitMs` (the longest

@@ -125,6 +125,8 @@ interface Pending<F> {
 const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: Number.POSITIVE_INFINITY };
 /** A write that takes longer than this, from the call to its outcome, counts as slow in the `send` section. */
 const SLOW_WRITE_MS = 100;
+/** A media timestamp this far behind the latest one starts a new timeline, rather than being a reordered frame. */
+const TIMELINE_RESET_MS = 1_000;
 
 /** A failure ends the track exactly when the SDK says so: `CLOSED`, or the track is closed afterwards. */
 const retired = (track: RelayTrackWriter, error: RelayError) => error.code === 'CLOSED' || track.closed;
@@ -479,7 +481,7 @@ export function createFrameWriter<F extends Frame = Frame>(
   let slowWrites = 0;
   let inputGaps = 0;
   let longestInputGapMs = 0;
-  let lastMediaMs: number | undefined;
+  let latestMediaMs: number | undefined;
   const isInputGap = gapJudge();
   /** A jump in the media timestamps handed over: frames lost before the writer, such as at the encoder. */
   const watchInput = (frame: F) => {
@@ -489,9 +491,10 @@ export function createFrameWriter<F extends Frame = Frame>(
         ? frame.timestampUs / 1000
         : mediaTimeMs(frame.properties);
     if (mediaMs === undefined) return;
-    const interval = lastMediaMs === undefined ? undefined : mediaMs - lastMediaMs;
-    lastMediaMs = mediaMs;
-    // A timestamp that goes back or repeats (a B-frame, a reset timeline) says nothing about a gap.
+    // Measured from the latest media time so far: frames in decode order (B-frames) go back and forward around it,
+    // and a step from a B-frame to the next P-frame is no gap. A step back of over a second is a new timeline.
+    const interval = latestMediaMs === undefined ? undefined : mediaMs - latestMediaMs;
+    if (interval === undefined || interval > 0 || -interval > TIMELINE_RESET_MS) latestMediaMs = mediaMs;
     if (interval === undefined || interval <= 0) return;
     if (isInputGap(interval)) {
       inputGaps++;
