@@ -6,9 +6,11 @@
  * `connectSupervisedPublisher` and `connectSupervisedSubscriber` are views over this loop that differ only in the
  * connection they open. See spec/behavior.md, "Supervised connections".
  */
+import type { Diagnostics } from './client-diagnostics.js';
 import type { RelaySubscriber } from './connect.js';
-import type { ConnectRelayOptions, RelaySessionHooks } from './connect-session.js';
+import type { ConnectRelayOptions, RelaySessionHooks, TransportFraming } from './connect-session.js';
 import { assertTimeoutMs, reportEndpoint } from './connect-session.js';
+import { linkDiagnostics } from './diagnostics-report.js';
 import { createDiscoveryIndex, DISCOVERY_CAPACITY } from './discovery.js';
 import { RelayError } from './errors.js';
 import type { RegisterTrackOptions, RelayPublication, RelayTrackWriter } from './publish.js';
@@ -56,6 +58,12 @@ export interface SupervisorConfig<O extends ConnectRelayOptions> {
   onStatus?: ((status: SupervisedStatus, error?: unknown) => void) | undefined;
   /** Called once a generation is up and every publication's tracks are registered on it. */
   onGeneration?: ((generation: string) => void) | undefined;
+  /**
+   * The scope the supervisor reports its link into (spec/behavior.md, "Client diagnostics"): a `link` event on each
+   * status change, with the carrier once live, a `generation` event for each generation a publishing connection
+   * serves, and the `link` section. Nothing is reported without it.
+   */
+  diagnostics?: Diagnostics | undefined;
 }
 
 /** One publication across generations: its root, its tracks, and its namespace on each connection. */
@@ -146,6 +154,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   config: SupervisorConfig<O>,
 ): Supervisor {
   const { what, connection, signal, backoff, rotateBeforeMs, onStatus, onGeneration } = config;
+  const linkReport = config.diagnostics && linkDiagnostics(config.diagnostics);
   const publications = new Set<Publication>();
   /** Every root ever published, by key and as given: a closed publication's root stays taken. */
   const roots = new Set<string>();
@@ -193,6 +202,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
     status = next;
+    linkReport?.status(next, error);
     onStatus?.(next, error);
   };
 
@@ -370,8 +380,9 @@ export function createSupervisor<O extends ConnectRelayOptions>(
         {
           ...connection,
           signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-          [reportEndpoint]: (endpoint: string) => {
+          [reportEndpoint]: (endpoint: string, framing: TransportFraming) => {
             connection.url ??= endpoint;
+            linkReport?.carrier(framing, endpoint);
           },
         },
         generation,
@@ -484,6 +495,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   };
 
   const report = (live: Live) => {
+    // A generation is a namespace field: one that only subscribes serves none, so there is nothing to report.
+    if (live.session.publish) linkReport?.generation(live.generation);
     onGeneration?.(live.generation);
   };
 

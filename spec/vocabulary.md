@@ -1033,3 +1033,28 @@ returns); `roster` (the application's list, which may hold more than the relay k
 sequence number, a sender time or the heartbeat interval (the transport orders a member's
 documents already, and the fields would be wire rules every port must keep); `generation` on
 `PresenceMember` (it changes on every rotation, which reports nothing).
+
+
+## Client diagnostics: `createDiagnostics`, `publishDiagnostics`, `followDiagnostics`
+
+What a client saw, recorded and published on its own broadcast for a collector or an operator
+([issue #435](https://github.com/muxinc/relay-sdks/issues/435)); the contract is spec/behavior.md,
+"Client diagnostics". TypeScript only, in the `@caprid/relay/diagnostics` subpath, which the root
+does not export.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The recorder | `createDiagnostics({ keepMs?, keepEvents? })` → `Diagnostics { instance, event, events, listen, section, snapshot, scope }` | — |
+| The same recorder under a name, for one link, reader or writer | `diagnostics.scope('roster')`: events carry `source`, sections are named `roster.<name>` | — |
+| One recorded event | `DiagnosticEvent { t, seq, kind, source?, ...fields }` | — |
+| The two track names | `DIAGNOSTICS_TRACKS` (`{ events: 'diag.events', stats: 'diag.stats' }`) | — |
+| Publish a recorder | `publishDiagnostics(diagnostics, publisher, { statsIntervalMs?, eventsPriority?, statsPriority? })` → `DiagnosticsPublication { close }` | — |
+| What the tracks carry | `DiagnosticsEventsObject { instance, backlog?, events }`, `DiagnosticsStatsObject { instance, t, stats }` | — |
+| Read a client's diagnostics | `followDiagnostics(subscriber, { namespace, generations?, key?, eventsParameters? }, { onEvents, onStats, onError })` | — |
+| Have the SDK report into it | `diagnostics` on `connectSupervisedPublisher` (scope `publisher`), `connectSupervisedSubscriber` (`subscriber`), `connectSupervisedRelay` (`relay`), `createFrameWriter` and `createFrameReader` | — |
+| Watch an audio player input | `watchAudioInput(diagnostics, input)` (`WatchedAudioInput`), returning the function that stops | — |
+
+"Diagnostics" over "telemetry" (which suggests a vendor pipeline and sampling) and "debug" (which
+suggests logging). `instance`, not `session`, since a session is a connection here and one recorder
+outlives several. `section`, not `metric`: a section is an object of counters read at snapshot time,
+not one number.

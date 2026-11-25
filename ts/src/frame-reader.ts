@@ -1,4 +1,6 @@
 import type { KeyValuePair, MoqtObject, SubscribeOk } from '@caprid/moq-core';
+import type { Diagnostics } from './client-diagnostics.js';
+import { delaySpread, diagnosticsOption, gapJudge, mediaTimeMs, reorderCount } from './diagnostics-report.js';
 import type { WantSwitchedInfo } from './supervised-subscriber.js';
 
 /**
@@ -25,6 +27,8 @@ export interface FrameReaderSequencer<F> {
     /** The sequencer asks for the subscription to be replaced at the live edge: see `onCatchUp`. */
     catchUp?: boolean;
   };
+  /** Counters a reader with diagnostics reports, when the sequencer keeps them: a `FrameSequencer`'s do. */
+  readonly stats?: object;
 }
 
 /** Options for {@link createFrameReader}. */
@@ -41,6 +45,15 @@ export interface FrameReaderOptions<F> {
    * frames of the same poll; an exception from it goes to `console.error`.
    */
   onCatchUp?(): void;
+  /**
+   * A scope from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"), such as
+   * `diagnostics.scope('p2/audio')`: the reader reports a `receive` section with the objects it read and their
+   * payload bytes, its arrival gaps and the longest, the objects that arrived after a later one and the longest such
+   * wait, the spread of arrival delays over the last five seconds, and the sequencer's `stats`, and an `arrival-gap`
+   * event when objects stop for longer than 250 ms, or eight times their usual interval if that is longer. The usual
+   * interval is learned from the first four before any gap is judged. Give each reader its own scope.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /**
@@ -81,6 +94,7 @@ const CLOCK_RECHECK_US = 50_000;
  * ```
  */
 export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options: FrameReaderOptions<F>): FrameReader {
+  const arrivals = arrivalDiagnostics(sequencer, diagnosticsOption(options.diagnostics));
   let timer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
   // An onFrame that feeds the reader again (synchronously) must not interleave a second batch with the first, and a
@@ -145,6 +159,7 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
       if (!closed) sequencer.trackProperties = info.trackProperties;
     },
     onObject(object) {
+      if (!closed) arrivals?.arrived(object);
       event(() => sequencer.object(object));
     },
     onSubgroupEnd({ groupId }) {
@@ -154,9 +169,11 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
       event(() => sequencer.groupReset(groupId));
     },
     onRestarted() {
+      arrivals?.restarted();
       restart(() => sequencer.restart());
     },
     onSwitched(info) {
+      arrivals?.restarted();
       restart(() => {
         sequencer.restart();
         sequencer.trackProperties = info.subscribed.trackProperties;
@@ -164,8 +181,66 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
     },
     close() {
       closed = true;
+      arrivals?.close();
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
+    },
+  };
+}
+
+/**
+ * A reader's arrival counting for diagnostics: objects and their bytes, gaps against the track's usual interval,
+ * objects that arrived after a later one, and the spread of arrival delays.
+ */
+function arrivalDiagnostics(sequencer: FrameReaderSequencer<unknown>, diagnostics: Diagnostics | undefined) {
+  if (!diagnostics) return undefined;
+  let objects = 0;
+  let bytes = 0;
+  let gaps = 0;
+  let longestGapMs = 0;
+  let lastAt: number | undefined;
+  const isGap = gapJudge();
+  const reorder = reorderCount();
+  const spread = delaySpread();
+  const removeSection = diagnostics.section('receive', () => {
+    const delaySpreadMs = spread.read(performance.now());
+    return {
+      objects,
+      bytes,
+      arrivalGaps: gaps,
+      longestGapMs: Math.round(longestGapMs),
+      reordered: reorder.reordered,
+      longestReorderWaitMs: reorder.longestWaitMs,
+      ...(delaySpreadMs ? { delaySpreadMs } : {}),
+      ...(sequencer.stats ? { sequencer: { ...sequencer.stats } } : {}),
+    };
+  });
+  return {
+    arrived(object: MoqtObject) {
+      objects++;
+      bytes += object.payload.byteLength;
+      const now = performance.now();
+      if (lastAt !== undefined) {
+        const interval = now - lastAt;
+        if (isGap(interval)) {
+          gaps++;
+          longestGapMs = Math.max(longestGapMs, interval);
+          diagnostics.event('arrival-gap', { ms: Math.round(interval) });
+        }
+      }
+      lastAt = now;
+      reorder.arrived(object, now);
+      const mediaMs = mediaTimeMs(object.properties, sequencer.trackProperties);
+      if (mediaMs !== undefined) spread.add(now, now - mediaMs);
+    },
+    /** A replaced subscription: the silence around it is the restart, which the want reports, and its timeline is new. */
+    restarted() {
+      lastAt = undefined;
+      reorder.restart();
+      spread.clear();
+    },
+    close() {
+      removeSection();
     },
   };
 }

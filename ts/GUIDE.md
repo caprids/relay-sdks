@@ -1820,6 +1820,78 @@ The publisher and the viewer set different things, under similar names:
 | `mediaTrackProperties(kind, { targetLatencyUs })` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
 | Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
 
+## Client diagnostics
+
+A client can record what it saw (links coming and going, subscriptions restarting, audio running
+dry) and publish it on its own broadcast, for a collector or an operator to read while it happens.
+It is TypeScript only, for clients that publish, in `@caprid/relay/diagnostics`. Nothing is sent
+while nobody subscribes.
+
+```ts
+import { createDiagnostics, publishDiagnostics } from '@caprid/relay/diagnostics';
+
+const diagnostics = createDiagnostics();
+const publisher = await connectSupervisedPublisher({ namespace, getToken });
+const publication = publishDiagnostics(diagnostics, publisher);
+
+// Your own events and counters, alongside the SDK's. Ids and counters only: they leave the client.
+diagnostics.event('app.joined', { participant: id });
+diagnostics.section('app.video', () => ({ layer, freezes }));
+```
+
+On a `SupervisedRelay`, which publishes and subscribes on one connection, publish on the root's
+publication: `publishDiagnostics(diagnostics, relay.publish(root))`. The tracks then move to each
+new connection with the root's other tracks.
+
+The SDK reports into the recorder when you give it one: the supervised connections (their status,
+the transport and relay host they ended up on, generations, and every want's subscribe, first object,
+restart, move and error, with how long a move waited for its first object and how far behind a
+catch-up was), frame writers (what became of each frame, bytes sent, keyframe requests, and gaps in
+the timestamps the encoder hands over), frame readers (bytes, arrival gaps, objects that arrived out
+of order, the spread of arrival delays, and the sequencer's counters) and, through
+`watchAudioInput`, audio player inputs (their counters, and each stretch of concealed audio). A supervised publisher reports under the scope `publisher`, a supervised subscriber under
+`subscriber`, and a supervised relay, which carries the links and wants of both, under `relay`. Give
+each writer and reader a scope of its own, and a second subscriber too:
+
+```ts
+const relay = await connectSupervisedRelay({ getToken, diagnostics });
+publishDiagnostics(diagnostics, relay.publish(root));
+// Or, on separate connections:
+const subscriber = await connectSupervisedSubscriber({ getToken, diagnostics });
+const roster = await connectSupervisedSubscriber({ getToken, diagnostics: diagnostics.scope('roster') });
+const audio = createFrameWriter(track, { grouping: 'frame', diagnostics: diagnostics.scope('audio') });
+const reader = createFrameReader(sequencer, { onFrame: input.push, diagnostics: diagnostics.scope(`${peer}/audio`) });
+watchAudioInput(diagnostics.scope(`${peer}/audio`), input);
+```
+
+The recorder holds the last 10 minutes of events. `diag.events` carries them, and `diag.stats`
+carries a snapshot of every section once a second. When the relay subscribes to `diag.events`, the
+client first sends everything it holds, so a collector that starts following after a complaint
+still sees what led up to it. Another follower that joins while one already reads gets live events
+only; give its subscription a location filter to ask the relay for the groups it still holds.
+
+Counters run from the start, so a collector takes rates from the change between two snapshots: bits
+per second from `bytes`, for instance. spec/behavior.md, "Client diagnostics", lists every field and
+the CMCD key a collector could derive from it.
+
+Both tracks go behind media on a congested uplink: their publisher priorities are 224 for events and
+240 for stats, where audio has 16 and video 96 (`eventsPriority` and `statsPriority` change them). A
+snapshot that cannot go out within two stats intervals is dropped, since the next one replaces it.
+Events are never dropped that way.
+
+```ts
+import { followDiagnostics } from '@caprid/relay/diagnostics';
+
+const unfollow = followDiagnostics(subscriber, { namespace: clientRoot, generations: true }, {
+  onEvents: (events, { instance }) => events.forEach((event) => log(instance, event)),
+  onStats: (snapshot) => store(snapshot),
+});
+```
+
+Reading a client's diagnostics takes read access to its broadcast, which includes its media. A
+central collector whose credential reads every client's broadcast is for debugging, and should be
+off before anyone else's clients are on the relay.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not on message wording. SDK lifecycle errors use these stable codes:

@@ -14,6 +14,27 @@ each section says what changed and what to do about it. How to cut a release is 
   relay could send nothing more on that WebSocket connection, with the session still open and no error. 0.3.5 keeps
   a cancelled stream registered until FIN or RESET and credits both. It is the same bug moq-relay 0.17.17 fixed on
   the relay's side (qmux 0.5.4). Nothing to change in an application.
+- `@caprid/relay/diagnostics`, a new subpath: client diagnostics (#435). `createDiagnostics()` records events, each
+  with a sequence number, holding the last 10 minutes, and stats sections read at each snapshot.
+  `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of the client's own
+  broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
+  `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
+  that publish. Both tracks have a publisher priority behind media (224 and 240, options `eventsPriority` and
+  `statsPriority`), and a snapshot that cannot go out within two stats intervals is dropped. Nothing to change in an
+  application.
+- `@caprid/relay`: a `diagnostics` option on `connectSupervisedPublisher`, `connectSupervisedSubscriber`,
+  `connectSupervisedRelay`, `createFrameWriter` and `createFrameReader` reports into a recorder (#435): connection
+  status with the transport's framing and generations, every want's subscribe, publisher done, restart, move and
+  error, each frame writer's outcomes, and each frame reader's arrival gaps and its sequencer's counters.
+  `watchAudioInput` in `@caprid/relay/diagnostics` reports an audio player input's counters and each episode of
+  concealed audio. Without the option nothing changes.
+- `@caprid/relay`: more in a `diagnostics` option (#435). A frame writer counts payload `bytes`, `keyframeRequests`,
+  and gaps in the media timestamps it is handed (`inputGaps`, `longestInputGapMs`, an `input-gap` event). A frame
+  reader counts payload `bytes`, objects that arrived after a later one (`reordered`, `longestReorderWaitMs`), and
+  reports the spread of arrival delays over the last five seconds (`delaySpreadMs`). A want reports how long it took
+  to its first object, how long a move took to the object that cut over, how far behind it was at a catch-up
+  (`behindMs`), and its reset groups and delivery timeouts. A `link` event that goes live names the relay's host.
+  `Frame` takes an optional `timestampUs`, which `LocFrame` already has. Without the option nothing changes.
 
 ## 0.5.0
 

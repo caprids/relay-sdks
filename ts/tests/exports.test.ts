@@ -108,6 +108,22 @@ describe('public vocabulary', () => {
   });
 });
 
+/** `@caprid/relay/diagnostics`: client diagnostics, which the root does not export (spec/vocabulary.md). */
+describe('diagnostics vocabulary', () => {
+  it('exports the recorder, its two track names, publishing, following and the audio watch, and nothing else', async () => {
+    const diagnostics = await import('../src/diagnostics.js');
+    expect(Object.keys(diagnostics).sort()).toEqual([
+      'DIAGNOSTICS_TRACKS',
+      'createDiagnostics',
+      'followDiagnostics',
+      'publishDiagnostics',
+      'watchAudioInput',
+    ]);
+    expect(diagnostics.DIAGNOSTICS_TRACKS).toEqual({ events: 'diag.events', stats: 'diag.stats' });
+    expect(relay).not.toHaveProperty('createDiagnostics');
+  });
+});
+
 /** `@caprid/relay/media`: the media policy, which the root does not export (spec/vocabulary.md). */
 describe('media vocabulary', () => {
   it('exports factories for the frame writer, the frame reader, the latest-value reader, the replaceable track and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
@@ -145,6 +161,7 @@ describe('media vocabulary', () => {
       stale: true,
       maxBacklog: true,
       onKeyframeNeeded: true,
+      diagnostics: true,
     } satisfies Record<keyof FrameWriterOptions, true>;
     const kinds = {
       sent: true,

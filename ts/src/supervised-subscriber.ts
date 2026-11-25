@@ -18,8 +18,10 @@ import {
   type PublishDone,
   type SubscribeOk,
 } from '@caprid/moq-core';
+import type { Diagnostics } from './client-diagnostics.js';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
 import { assertTimeoutMs, type RelaySessionHooks } from './connect-session.js';
+import { diagnosticsOption, wantDiagnostics } from './diagnostics-report.js';
 import { DISCOVERY_LINGER_MS, type DiscoveryIndex, discoveryEnding, refusedForGood } from './discovery.js';
 import {
   openPublishingRoots,
@@ -68,6 +70,12 @@ export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscrib
    * with it. A throw reporting `closed` is rethrown from the `close()` that caused it; `closed` resolves either way.
    */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
+  /**
+   * A recorder, or a scope of one, from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"): the
+   * supervisor reports under its scope `subscriber` a `link` event on each status change, a `want` event at each turn
+   * of a want's life, and the `link` and `wants` sections. Give two subscribers their own scopes.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /** What a want asks for. */
@@ -314,6 +322,8 @@ interface Want {
   catchUp?: (() => void) | undefined;
   /** The PUBLISH_DONE status that ended the running attempt's subscription, if one did. */
   doneStatus?: number | undefined;
+  /** For diagnostics: the latest move's time from its replacement's SUBSCRIBE to the object that cut over, in ms. */
+  switchMs?: number | undefined;
   /**
    * A fixed namespace's watch the want holds from its first wait until a subscription is accepted, so an announcement
    * between two attempts is heard (spec/behavior.md, "Supervised connections").
@@ -335,8 +345,9 @@ export async function superviseRelaySubscriber(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedSubscriber takes an options object');
   }
-  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, ...connection } = options;
+  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, diagnostics, ...connection } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const reporting = diagnosticsOption(diagnostics)?.scope('subscriber');
   const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
@@ -352,9 +363,9 @@ export async function superviseRelaySubscriber(
         close: () => subscriber.close(),
       };
     },
-    { what: 'Supervised subscriber', connection, signal, backoff, rotateBeforeMs, onStatus },
+    { what: 'Supervised subscriber', connection, signal, backoff, rotateBeforeMs, onStatus, diagnostics: reporting },
   );
-  const wants = createWantSurface(supervisor);
+  const wants = createWantSurface(supervisor, reporting);
   await supervisor.start();
 
   return {
@@ -377,23 +388,29 @@ export type WantSurface = Pick<SupervisedSubscriber, 'want' | 'unwant' | 'catchU
 
 /**
  * Keep wants and publishing-roots views on `supervisor`'s connections: each moves with a rotation and comes back on
- * the next connection. Everything is cancelled when the supervisor stops.
+ * the next connection. Everything is cancelled when the supervisor stops. Given `reporting`, a diagnostics scope, each
+ * want's life is reported into it (`want` events and the `wants` section).
  */
 export function createWantSurface(
   supervisor: Pick<Supervisor, 'liveConnection' | 'current' | 'stopped' | 'closedError' | 'onStop' | 'ownsNamespace'>,
+  reporting?: Diagnostics,
 ): WantSurface {
   const wants = new Map<string, Want>();
   const views = new Set<PublishingRoots>();
+  const wantReport = reporting && wantDiagnostics(reporting);
   const liveConnection = (scope: AbortSignal) => supervisor.liveConnection(scope);
   supervisor.onStop(() => {
     for (const want of wants.values()) want.controller.abort();
     wants.clear();
+    wantReport?.forgetAll();
     for (const view of [...views]) view.close();
   });
 
   const forget = (key: string, want: Want) => {
     want.controller.abort();
-    if (wants.get(key) === want) wants.delete(key);
+    if (wants.get(key) !== want) return;
+    wants.delete(key);
+    wantReport?.forget(key);
   };
   const guard = <H extends object>(handlers: H, what: string): H => {
     if (typeof handlers !== 'object' || handlers === null) throw new TypeError(`${what} handlers must be an object`);
@@ -427,7 +444,9 @@ export function createWantSurface(
       const target = targetKey([], track, parameters);
       const existing = wants.get(key);
       if (existing && existing.source === source) {
-        existing.handlers = safeHandlers;
+        existing.handlers = wantReport
+          ? wantReport.observe(key, track, safeHandlers, () => existing.switchMs)
+          : safeHandlers;
         existing.retry = retryBackoff;
         existing.until = predicate;
         existing.drainMs = drainMs;
@@ -443,7 +462,7 @@ export function createWantSurface(
         options: { namespace, track, parameters, generations, staleAfterMs },
         source,
         target,
-        handlers: safeHandlers,
+        handlers: wantReport ? wantReport.observe(key, track, safeHandlers, () => want.switchMs) : safeHandlers,
         retry: retryBackoff,
         until: predicate,
         drainMs,
@@ -796,6 +815,8 @@ interface Slot {
   ended?: RestartReason;
   /** While pending: its events held until the cutover, as a switchable holds them. */
   held: HeldEvent[];
+  /** When its SUBSCRIBE was made, on `performance.now()`. */
+  openedAt: number;
 }
 
 /**
@@ -1051,6 +1072,7 @@ async function follow(
     }
     lastObjectAt = performance.now();
     if (!silent) {
+      want.switchMs = Math.round(lastObjectAt - slot.openedAt);
       try {
         handlers().onSwitched?.({
           from: { namespace: [...from.namespace], track: from.track },
@@ -1239,6 +1261,7 @@ async function follow(
       progressed: false,
       ends: new Set(),
       held: [],
+      openedAt: performance.now(),
     };
     slot = opened;
     holdOn(on);

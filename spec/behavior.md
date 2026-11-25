@@ -2098,6 +2098,131 @@ is a subscription's or a want's handlers that deliver only values newer than the
   predicate that raises counts as false, so the value is delivered.
 - Counters: delivered, superseded, late, catch-ups.
 
+## Client diagnostics
+
+TypeScript only (`@caprid/relay/diagnostics`), for clients that publish
+([issue #435](https://github.com/muxinc/relay-sdks/issues/435)). A client records what it saw and
+publishes it on two tracks of its own broadcast, sent only while something subscribes, so a client
+nobody watches sends nothing.
+
+- A recorder (`createDiagnostics`) holds events and stats sections. It has a random `instance` id,
+  twelve base-36 characters. An event is a JSON object with `t` (wall clock, milliseconds since the
+  epoch), `seq` (the recorder's sequence number, from 0) and `kind`, plus its own fields; the
+  recorder sets the first three and ignores them in the fields given. Events are held for 10 minutes
+  and at most 5,000 by default, oldest dropped first. Kinds the SDK records are plain words; an
+  application's start with `app.`. Fields carry ids and counters, never names, labels or media.
+- A stats section is a name and a function read at each snapshot. A snapshot is every section's
+  value by name; a section whose function throws reads `{ "error": message }`.
+- A scope (`scope(name)`) is the same recorder under a name: its events carry `source`, the name
+  (a scope of a scope joins the names with `/`), and its section names are prefixed with the name
+  and a dot. The SDK pieces that take a `diagnostics` option report into the recorder or scope they
+  are given.
+- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publisher's broadcast (a
+  publisher, a supervised publisher, or a root published on a
+  [supervised relay](#supervised-relay)) and writes them through a frame writer under frame
+  grouping, so a write without relay demand is skipped. Each object is one group, sent as a
+  keyframe, and its payload is UTF-8 JSON:
+  - `diag.events`: `{ "instance", "backlog"?: true, "events": [event, ...] }`. Each time the relay
+    subscribes to the track (its first subscription and every replacement), everything the
+    recorder holds goes first, marked `backlog`, in objects of 200 events (more each when it holds
+    over 6,400, so a replay is at most 32 objects); after that each event goes in an object of its
+    own as it is recorded, while the track has demand. An event recorded before the replay is sent
+    rides in the replay. Right after a replacement subscription a few live events can still arrive
+    ahead of its replay, so a follower that needs order sorts by `seq`.
+  - `diag.stats`: `{ "instance", "t", "stats": snapshot }`, once a second while the track has
+    demand.
+  - Both tracks declare a Default Publisher Priority (`0x0E`) behind every media default, so they
+    never hold media up on the publisher's congested uplink ([send order](#send-order)): 224 for
+    `diag.events` and 240 for `diag.stats` by default, inside the 128 to 240 that
+    draft-jennings-moq-metrics-03 gives metrics. Each is an option, an integer from 0 to 255.
+    moq-relay 0.17 orders what it sends a follower by the follower's subscriber priority alone.
+  - `diag.stats` declares an OBJECT_DELIVERY_TIMEOUT (`0x02`) of two stats intervals, and only
+    the newest snapshot waits behind the one being written, so a snapshot that cannot go out in two
+    intervals is dropped instead of queued: the next one supersedes it. `diag.events` declares
+    none, because an event is not superseded and a lost one is gone until the next replay.
+  - An event or a section value JSON cannot encode (a BigInt, a cycle) is sent as
+    `{ "error": "not encodable as JSON" }` in its place, an event keeping `t`, `seq`, `kind` and
+    `source`; the rest of the object is sent as it is.
+- Demand is the relay's own subscription, shared by every follower, so a follower that subscribes
+  while another already does gets live events but no replay from the client; a location filter on
+  its subscription asks the relay for the groups it still holds.
+- `followDiagnostics` wants both tracks on a supervised subscriber or a supervised relay
+  (following generations when asked), delivers each recorder's events once (a replay repeats
+  sequence numbers already delivered), and skips objects that are not valid JSON of these shapes.
+- Reading the tracks takes read access to the client's broadcast, which includes its media. A
+  central collector with a credential that reads every client's broadcast is for debugging only.
+- What the SDK reports into a `diagnostics` option. An error in an event is a RelayError's code and
+  phase, or an error's name, then its message, with `jwt=` values and JWT-shaped strings redacted,
+  at most 300 characters.
+  - A supervised publisher, under its scope `publisher`, a supervised subscriber, under
+    `subscriber`, and a supervised relay, under `relay`: a `link` event on each status change
+    (`status`; `carrier`, the transport's framing, and `relay`, the endpoint's host and port, when it
+    goes live; `error`, what ended the last connection), and a `link` section (`status`, `carrier`,
+    `relay`, `connects`, and the `generation` of a publisher or relay). `relay` is never the path or
+    the query, which can carry the token; it joins a client's lines with that relay's logs. The publisher and the relay add a `generation` event for each generation
+    they serve, a reconnect's or a rotation's; a subscriber's connections serve no namespace, so it
+    reports none.
+  - The supervised subscriber and the supervised relay also report a `want` event at each turn of
+    a want's life: `what` is `subscribed` (with the `namespace`), `first-object` (`firstObjectMs`,
+    once per want: from the `want` call to its first object), `publisher-done` (`statusCode`),
+    `restarted` (`reason`), `switched` (`from`, `to`, and `firstObjectMs`: from the replacement's
+    SUBSCRIBE to the object that cut over, the wait a layer move spends on a keyframe) or `error`.
+    A `restarted` for `catch-up` adds `behindMs` when the want's objects carry a LOC Timestamp: the
+    latest object's arrival delay (arrival time less media time) over the least since the
+    subscription was accepted, which is how much later than its best the want was receiving, so no
+    clock sync is needed. Their `wants` section has each want's `track`, whether it is
+    `subscribed`, the `objects` delivered, its `restarts` and the last restart's reason,
+    `firstObjectMs` once there is one, `groupResets` (subgroup streams reset before their end) and
+    `deliveryTimeouts` (of those, the ones reset with DELIVERY_TIMEOUT, `0x2`, read from the stream
+    error's `streamErrorCode`, [TA-22](transport-adapter.md#error-shape)). A want that is unwanted
+    or fails for good leaves the section, and every want leaves it when the subscriber or relay
+    closes.
+  - What a client cannot see of a give-up: a group the relay never opens a stream for (it dropped
+    it for a slow subscriber, or the publisher's stream was reset before the relay forwarded any of
+    it) reaches the client only as a group ID it never gets, which the frame reader's sequencer
+    counts in `skippedGroups` once it passes over it, not as a reset. Whether moq-relay passes the
+    publisher's DELIVERY_TIMEOUT code on to subscribers, rather than its own, is not measured, so
+    `deliveryTimeouts` counts the code the subscriber received, not who timed out.
+  - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
+    writer's `objects`, their payload `bytes`, `groups` and `backlog`, how many frames ended each way
+    (`outcomes`), `slowWrites`, writes that took over 100 ms from the call to the outcome,
+    `keyframeRequests`, the times it came to need a keyframe after its start (each call of
+    `onKeyframeNeeded`), and `inputGaps` and `longestInputGapMs`, gaps in the media timestamps of the
+    frames handed to it, judged by the arrival-gap rule below: frames lost before the writer, at the
+    encoder, while everything after it looks healthy. Each is an `input-gap` event (`ms`). A frame's
+    media time is its `timestampUs`, else the LOC Timestamp (`0x10`) among its properties in the
+    Timescale (`0x08`) beside it, microseconds without one; a frame with neither is skipped. An interval
+    is measured from the latest media time so far, so frames in decode order (B-frames) are no gap; a
+    timestamp at or behind it is not one either, and one over a second behind it starts a new timeline,
+    measured from there. Removed when the writer closes.
+  - A frame reader, under the scope it is given: a `receive` section with the `objects` read and
+    their payload `bytes`, the `arrivalGaps` and `longestGapMs`, `reordered` (objects that arrived
+    after a later group or object of the same subscription) and `longestReorderWaitMs` (the longest
+    one arrived after the first object that overtook it), `delaySpreadMs` (below), and the
+    sequencer's `stats` when it has them; an
+    `arrival-gap` event (`ms`) when the silence before an object is longer than 250 ms and than eight
+    times the moving average of the ordinary intervals. That average starts from the median of the
+    first four intervals, before which no gap is judged, so a slow cadence is learned rather than
+    reported. The silence around a Restart or Move is not a gap, and a Restart or Move starts the
+    reorder count's order and the delay spread over. `delaySpreadMs` is `{ p50, p95, max }`, by
+    nearest rank, over the objects of the last five seconds that carry a LOC Timestamp: each one's
+    arrival time less its media time (in the Timescale the object or the track declares,
+    microseconds without one), less the least of them in the window, so the two clocks need no
+    sync. It is absent with no such object in the window. Removed when the reader closes.
+  - Counters are cumulative from the piece's start. For a later CMCD projection (CMCD v2,
+    CTA-5004-B), a collector can derive: `br` (encoded bitrate) from the change in `send.bytes` over a
+    snapshot interval; `mtp` (measured throughput) from the change in `receive.bytes`, which is what
+    arrived rather than what the link could carry; `msd` (media start delay) from a want's
+    `firstObjectMs`, up to its first object rather than its first rendered frame; `dfa` (dropped
+    frames) from the sequencer's `late` and `behind`; `bsa` and `bsd` (buffer starvation count and
+    duration) from the `audio-dropout` events and their `ms`, and the audio section's `underruns`.
+    The SDK sends no CMCD itself.
+  - `watchAudioInput(diagnostics, input)`, for an audio player input: an `audio` section with the
+    input's stats, and, from a look every 100 ms, one event per episode of filled audio (concealed
+    or synthesized instead of received) once 300 ms pass with none: `audio-dropout` for 250 ms or
+    more of filled audio, `audio-conceal` for 60 ms or more, with the episode's `ms`,
+    `concealedMs`, `synthesizedMs`, `underruns` and `late`.
+
 ## Package boundaries
 
 - The optional TypeScript Mediabunny adapter depends on the media format package and declares
