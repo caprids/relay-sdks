@@ -1,5 +1,5 @@
 import type { Diagnostics } from './client-diagnostics.js';
-import { diagnosticsOption } from './diagnostics-report.js';
+import { diagnosticsOption, gapJudge, mediaTimeMs } from './diagnostics-report.js';
 import { RelayError } from './errors.js';
 import type { PublishProperty, RelayGroupWriter, RelayTrackWriter } from './publish.js';
 import { type MaybeMovedOff, MOVED_OFF } from './write-slot.js';
@@ -24,6 +24,11 @@ export interface Frame {
   readonly properties?: readonly PublishProperty[];
   /** Frames before this one were dropped, so an open group can no longer be completed and is reset. */
   readonly discontinuity?: boolean;
+  /**
+   * The frame's presentation time in microseconds, as `LocFrame` has it. Only diagnostics read it, to see gaps in what
+   * the encoder hands over; without it they read the LOC Timestamp (0x10) among `properties`.
+   */
+  readonly timestampUs?: number;
 }
 
 /**
@@ -65,9 +70,11 @@ export interface FrameWriterOptions<F extends Frame = Frame> {
   onKeyframeNeeded?: () => void;
   /**
    * A scope from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"), such as
-   * `diagnostics.scope('audio')`: the writer reports a `send` section with the track's demand, its objects, groups and
-   * backlog, how many frames ended each way (`outcomes`), and how many writes took over 100 ms (`slowWrites`), until it
-   * closes. Give each writer its own scope.
+   * `diagnostics.scope('audio')`: the writer reports a `send` section with the track's demand, its objects, their
+   * payload bytes, groups and backlog, how many frames ended each way (`outcomes`), how many writes took over 100 ms
+   * (`slowWrites`), how many times it asked for a keyframe, and the gaps in the media timestamps of the frames handed to
+   * it, until it closes, with an `input-gap` event for each. A gap is judged as the frame reader judges arrival gaps.
+   * Give each writer its own scope.
    */
   diagnostics?: Diagnostics;
 }
@@ -180,12 +187,15 @@ export function createFrameWriter<F extends Frame = Frame>(
   let ended: RelayError | undefined;
   let groups = 0;
   let objects = 0;
+  let bytes = 0;
+  let keyframeRequests = 0;
   let idle: Promise<void> = Promise.resolve();
   let demand: AsyncIterableIterator<boolean> | undefined;
 
   const needKeyframe = () => {
     if (!keyframes || keyframeNeeded || closing || ended) return;
     keyframeNeeded = true;
+    keyframeRequests++;
     try {
       onKeyframeNeeded?.();
     } catch (error) {
@@ -294,6 +304,7 @@ export function createFrameWriter<F extends Frame = Frame>(
       }
       groups++;
       objects++;
+      bytes += frame.payload.byteLength;
       // From here the open group itself says whether a demand change was recovered from.
       keyOpening = false;
       if (droppedUnder()) {
@@ -340,6 +351,7 @@ export function createFrameWriter<F extends Frame = Frame>(
       return failed(error, target.groupId);
     }
     objects++;
+    bytes += frame.payload.byteLength;
     // The transport took the object, but an overflow reset its group before this resumed: it will not arrive.
     if (droppedUnder()) return { kind: 'dropped', groupId: target.groupId };
     return { kind: 'sent', groupId: target.groupId };
@@ -358,6 +370,7 @@ export function createFrameWriter<F extends Frame = Frame>(
     }
     groups++;
     objects++;
+    bytes += frame.payload.byteLength;
     // From here on the group holds the track's write slot: whatever happens, it is reset before this returns.
     try {
       if (stale(frame)) {
@@ -464,9 +477,32 @@ export function createFrameWriter<F extends Frame = Frame>(
     ended: 0,
   };
   let slowWrites = 0;
+  let inputGaps = 0;
+  let longestInputGapMs = 0;
+  let lastMediaMs: number | undefined;
+  const isInputGap = gapJudge();
+  /** A jump in the media timestamps handed over: frames lost before the writer, such as at the encoder. */
+  const watchInput = (frame: F) => {
+    if (typeof frame !== 'object' || frame === null) return;
+    const mediaMs =
+      typeof frame.timestampUs === 'number' && Number.isFinite(frame.timestampUs)
+        ? frame.timestampUs / 1000
+        : mediaTimeMs(frame.properties);
+    if (mediaMs === undefined) return;
+    const interval = lastMediaMs === undefined ? undefined : mediaMs - lastMediaMs;
+    lastMediaMs = mediaMs;
+    // A timestamp that goes back or repeats (a B-frame, a reset timeline) says nothing about a gap.
+    if (interval === undefined || interval <= 0) return;
+    if (isInputGap(interval)) {
+      inputGaps++;
+      longestInputGapMs = Math.max(longestInputGapMs, interval);
+      diagnostics?.event('input-gap', { ms: Math.round(interval) });
+    }
+  };
   /** `write`, counting what became of each frame and how long it took. */
   const countedWrite = (frame: F): Promise<FrameOutcome> => {
     const startedAt = performance.now();
+    watchInput(frame);
     const outcome = write(frame);
     outcome.then(
       ({ kind }) => {
@@ -480,10 +516,14 @@ export function createFrameWriter<F extends Frame = Frame>(
   const removeSection = diagnostics?.section('send', () => ({
     demand: track.hasDemand,
     objects,
+    bytes,
     groups,
     backlog: waiting.length,
     outcomes: { ...outcomes },
     slowWrites,
+    keyframeRequests,
+    inputGaps,
+    longestInputGapMs: Math.round(longestInputGapMs),
   }));
 
   const close = async () => {

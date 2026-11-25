@@ -322,6 +322,8 @@ interface Want {
   catchUp?: (() => void) | undefined;
   /** The PUBLISH_DONE status that ended the running attempt's subscription, if one did. */
   doneStatus?: number | undefined;
+  /** For diagnostics: the latest move's time from its replacement's SUBSCRIBE to the object that cut over, in ms. */
+  switchMs?: number | undefined;
   /**
    * A fixed namespace's watch the want holds from its first wait until a subscription is accepted, so an announcement
    * between two attempts is heard (spec/behavior.md, "Supervised connections").
@@ -442,7 +444,9 @@ export function createWantSurface(
       const target = targetKey([], track, parameters);
       const existing = wants.get(key);
       if (existing && existing.source === source) {
-        existing.handlers = wantReport ? wantReport.observe(key, track, safeHandlers) : safeHandlers;
+        existing.handlers = wantReport
+          ? wantReport.observe(key, track, safeHandlers, () => existing.switchMs)
+          : safeHandlers;
         existing.retry = retryBackoff;
         existing.until = predicate;
         existing.drainMs = drainMs;
@@ -458,7 +462,7 @@ export function createWantSurface(
         options: { namespace, track, parameters, generations, staleAfterMs },
         source,
         target,
-        handlers: wantReport ? wantReport.observe(key, track, safeHandlers) : safeHandlers,
+        handlers: wantReport ? wantReport.observe(key, track, safeHandlers, () => want.switchMs) : safeHandlers,
         retry: retryBackoff,
         until: predicate,
         drainMs,
@@ -811,6 +815,8 @@ interface Slot {
   ended?: RestartReason;
   /** While pending: its events held until the cutover, as a switchable holds them. */
   held: HeldEvent[];
+  /** When its SUBSCRIBE was made, on `performance.now()`. */
+  openedAt: number;
 }
 
 /**
@@ -1066,6 +1072,7 @@ async function follow(
     }
     lastObjectAt = performance.now();
     if (!silent) {
+      want.switchMs = Math.round(lastObjectAt - slot.openedAt);
       try {
         handlers().onSwitched?.({
           from: { namespace: [...from.namespace], track: from.track },
@@ -1254,6 +1261,7 @@ async function follow(
       progressed: false,
       ends: new Set(),
       held: [],
+      openedAt: performance.now(),
     };
     slot = opened;
     holdOn(on);

@@ -28,6 +28,13 @@ each section says what changed and what to do about it. How to cut a release is 
   error, each frame writer's outcomes, and each frame reader's arrival gaps and its sequencer's counters.
   `watchAudioInput` in `@caprid/relay/diagnostics` reports an audio player input's counters and each episode of
   concealed audio. Without the option nothing changes.
+- `@caprid/relay`: more in a `diagnostics` option (#435). A frame writer counts payload `bytes`, `keyframeRequests`,
+  and gaps in the media timestamps it is handed (`inputGaps`, `longestInputGapMs`, an `input-gap` event). A frame
+  reader counts payload `bytes`, objects that arrived after a later one (`reordered`, `longestReorderWaitMs`), and
+  reports the spread of arrival delays over the last five seconds (`delaySpreadMs`). A want reports how long it took
+  to its first object, how long a move took to the object that cut over, how far behind it was at a catch-up
+  (`behindMs`), and its reset groups and delivery timeouts. A `link` event that goes live names the relay's host.
+  `Frame` takes an optional `timestampUs`, which `LocFrame` already has. Without the option nothing changes.
 
 ## 0.5.0
 

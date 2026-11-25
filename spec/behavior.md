@@ -2156,27 +2156,65 @@ nobody watches sends nothing.
   at most 300 characters.
   - A supervised publisher, under its scope `publisher`, a supervised subscriber, under
     `subscriber`, and a supervised relay, under `relay`: a `link` event on each status change
-    (`status`; `carrier`, the transport's framing, when it goes live; `error`, what ended the last
-    connection), and a `link` section (`status`, `carrier`, `connects`, and the `generation` of a
-    publisher or relay). The publisher and the relay add a `generation` event for each generation
+    (`status`; `carrier`, the transport's framing, and `relay`, the endpoint's host and port, when it
+    goes live; `error`, what ended the last connection), and a `link` section (`status`, `carrier`,
+    `relay`, `connects`, and the `generation` of a publisher or relay). `relay` is never the path or
+    the query, which can carry the token; it joins a client's lines with that relay's logs. The publisher and the relay add a `generation` event for each generation
     they serve, a reconnect's or a rotation's; a subscriber's connections serve no namespace, so it
     reports none.
   - The supervised subscriber and the supervised relay also report a `want` event at each turn of
-    a want's life: `what` is `subscribed` (with the `namespace`), `publisher-done` (`statusCode`),
-    `restarted` (`reason`), `switched` (`from` and `to`) or `error`. Their `wants` section has each
-    want's `track`, whether it is `subscribed`, the `objects` delivered, its `restarts` and the last
-    restart's reason. A want that is unwanted or fails for good leaves the section, and every want
-    leaves it when the subscriber or relay closes.
-  - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
-    writer's `objects`, `groups` and `backlog`, how many frames ended each way (`outcomes`), and
-    `slowWrites`, writes that took over 100 ms from the call to the outcome. Removed when the writer
+    a want's life: `what` is `subscribed` (with the `namespace`), `first-object` (`firstObjectMs`,
+    once per want: from the `want` call to its first object), `publisher-done` (`statusCode`),
+    `restarted` (`reason`), `switched` (`from`, `to`, and `firstObjectMs`: from the replacement's
+    SUBSCRIBE to the object that cut over, the wait a layer move spends on a keyframe) or `error`.
+    A `restarted` for `catch-up` adds `behindMs` when the want's objects carry a LOC Timestamp: the
+    latest object's arrival delay (arrival time less media time) over the least since the
+    subscription was accepted, which is how much later than its best the want was receiving, so no
+    clock sync is needed. Their `wants` section has each want's `track`, whether it is
+    `subscribed`, the `objects` delivered, its `restarts` and the last restart's reason,
+    `firstObjectMs` once there is one, `groupResets` (subgroup streams reset before their end) and
+    `deliveryTimeouts` (of those, the ones reset with DELIVERY_TIMEOUT, `0x2`, read from the stream
+    error's `streamErrorCode`, [TA-22](transport-adapter.md#error-shape)). A want that is unwanted
+    or fails for good leaves the section, and every want leaves it when the subscriber or relay
     closes.
-  - A frame reader, under the scope it is given: a `receive` section with the `objects` read, the
-    `arrivalGaps` and `longestGapMs`, and the sequencer's `stats` when it has them; an
+  - What a client cannot see of a give-up: a group the relay never opens a stream for (it dropped
+    it for a slow subscriber, or the publisher's stream was reset before the relay forwarded any of
+    it) reaches the client only as a group ID it never gets, which the frame reader's sequencer
+    counts in `skippedGroups` once it passes over it, not as a reset. Whether moq-relay passes the
+    publisher's DELIVERY_TIMEOUT code on to subscribers, rather than its own, is not measured, so
+    `deliveryTimeouts` counts the code the subscriber received, not who timed out.
+  - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
+    writer's `objects`, their payload `bytes`, `groups` and `backlog`, how many frames ended each way
+    (`outcomes`), `slowWrites`, writes that took over 100 ms from the call to the outcome,
+    `keyframeRequests`, the times it came to need a keyframe after its start (each call of
+    `onKeyframeNeeded`), and `inputGaps` and `longestInputGapMs`, gaps in the media timestamps of the
+    frames handed to it, judged by the arrival-gap rule below: frames lost before the writer, at the
+    encoder, while everything after it looks healthy. Each is an `input-gap` event (`ms`). A frame's
+    media time is its `timestampUs`, else the LOC Timestamp (`0x10`) among its properties in the
+    Timescale (`0x08`) beside it, microseconds without one; a frame with neither is skipped, and a
+    timestamp that goes back or repeats is not a gap. Removed when the writer closes.
+  - A frame reader, under the scope it is given: a `receive` section with the `objects` read and
+    their payload `bytes`, the `arrivalGaps` and `longestGapMs`, `reordered` (objects that arrived
+    after a later group or object of the same subscription) and `longestReorderWaitMs` (the longest
+    one arrived after the first object that overtook it), `delaySpreadMs` (below), and the
+    sequencer's `stats` when it has them; an
     `arrival-gap` event (`ms`) when the silence before an object is longer than 250 ms and than eight
     times the moving average of the ordinary intervals. That average starts from the median of the
     first four intervals, before which no gap is judged, so a slow cadence is learned rather than
-    reported. The silence around a Restart or Move is not a gap. Removed when the reader closes.
+    reported. The silence around a Restart or Move is not a gap, and a Restart or Move starts the
+    reorder count's order and the delay spread over. `delaySpreadMs` is `{ p50, p95, max }`, by
+    nearest rank, over the objects of the last five seconds that carry a LOC Timestamp: each one's
+    arrival time less its media time (in the Timescale the object or the track declares,
+    microseconds without one), less the least of them in the window, so the two clocks need no
+    sync. It is absent with no such object in the window. Removed when the reader closes.
+  - Counters are cumulative from the piece's start. For a later CMCD projection (CMCD v2,
+    CTA-5004-B), a collector can derive: `br` (encoded bitrate) from the change in `send.bytes` over a
+    snapshot interval; `mtp` (measured throughput) from the change in `receive.bytes`, which is what
+    arrived rather than what the link could carry; `msd` (media start delay) from a want's
+    `firstObjectMs`, up to its first object rather than its first rendered frame; `dfa` (dropped
+    frames) from the sequencer's `late` and `behind`; `bsa` and `bsd` (buffer starvation count and
+    duration) from the `audio-dropout` events and their `ms`, and the audio section's `underruns`.
+    The SDK sends no CMCD itself.
   - `watchAudioInput(diagnostics, input)`, for an audio player input: an `audio` section with the
     input's stats, and, from a look every 100 ms, one event per episode of filled audio (concealed
     or synthesized instead of received) once 300 ms pass with none: `audio-dropout` for 250 ms or

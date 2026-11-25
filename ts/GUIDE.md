@@ -1844,10 +1844,12 @@ publication: `publishDiagnostics(diagnostics, relay.publish(root))`. The tracks 
 new connection with the root's other tracks.
 
 The SDK reports into the recorder when you give it one: the supervised connections (their status,
-the transport they ended up on, generations, and every want's subscribe, restart, move and error),
-frame writers (what became of each frame), frame readers (arrival gaps and the sequencer's counters)
-and, through `watchAudioInput`, audio player inputs (their counters, and each stretch of concealed
-audio). A supervised publisher reports under the scope `publisher`, a supervised subscriber under
+the transport and relay host they ended up on, generations, and every want's subscribe, first object,
+restart, move and error, with how long a move waited for its first object and how far behind a
+catch-up was), frame writers (what became of each frame, bytes sent, keyframe requests, and gaps in
+the timestamps the encoder hands over), frame readers (bytes, arrival gaps, objects that arrived out
+of order, the spread of arrival delays, and the sequencer's counters) and, through
+`watchAudioInput`, audio player inputs (their counters, and each stretch of concealed audio). A supervised publisher reports under the scope `publisher`, a supervised subscriber under
 `subscriber`, and a supervised relay, which carries the links and wants of both, under `relay`. Give
 each writer and reader a scope of its own, and a second subscriber too:
 
@@ -1867,6 +1869,10 @@ carries a snapshot of every section once a second. When the relay subscribes to 
 client first sends everything it holds, so a collector that starts following after a complaint
 still sees what led up to it. Another follower that joins while one already reads gets live events
 only; give its subscription a location filter to ask the relay for the groups it still holds.
+
+Counters run from the start, so a collector takes rates from the change between two snapshots: bits
+per second from `bytes`, for instance. spec/behavior.md, "Client diagnostics", lists every field and
+the CMCD key a collector could derive from it.
 
 Both tracks go behind media on a congested uplink: their publisher priorities are 224 for events and
 240 for stats, where audio has 16 and video 96 (`eventsPriority` and `statsPriority` change them). A

@@ -382,7 +382,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
           signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
           [reportEndpoint]: (endpoint: string, framing: TransportFraming) => {
             connection.url ??= endpoint;
-            linkReport?.carrier(framing);
+            linkReport?.carrier(framing, endpoint);
           },
         },
         generation,
