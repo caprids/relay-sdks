@@ -2100,10 +2100,22 @@ is a subscription's or a want's handlers that deliver only values newer than the
 
 ## Client diagnostics
 
-TypeScript only (`@caprid/relay/diagnostics`), for clients that publish
-([issue #435](https://github.com/muxinc/relay-sdks/issues/435)). A client records what it saw and
-publishes it on two tracks of its own broadcast, sent only while something subscribes, so a client
-nobody watches sends nothing.
+TypeScript only (`@caprid/relay/diagnostics`), for every client, whether it publishes media or only
+plays it ([issue #435](https://github.com/muxinc/relay-sdks/issues/435)). A client records what it
+saw and publishes it on two tracks of a publication of its own, separate from its media, sent only
+while something subscribes, so a client nobody watches sends nothing.
+
+- Where: by convention `<account>/diag/<app>/<group>/<client>`. The application's server mints the
+  client's token, so the server fixes the path: `group` is the id the application already groups
+  clients by (a room, an event) and `client` the id it gives this client, random per session and
+  never a name. One token and one connection carry the media and the diagnostics, the token granting
+  that one diag path besides its media, for example
+  `{ root: "huddle", get: ["rooms/<room>"], put: ["rooms/<room>/p/<pid>", "diag/huddle/<room>/<pid>"] }`
+  for a participant and `{ root: "pulse", get: ["events/<id>"], put: ["diag/player/<id>/<viewer>"] }`
+  for a viewer that only plays. A collector's key then reads diagnostics and never media:
+  `{ root: "<account>", get: ["diag"] }`. (moq-relay 0.17.17's source checks the token itself, matches
+  a `put` or `get` prefix on segment boundaries as its whole subtree, and takes several prefixes per
+  role; read in the source, not yet tested on the fleet.)
 
 - A recorder (`createDiagnostics`) holds events and stats sections. It has a random `instance` id,
   twelve base-36 characters. An event is a JSON object with `t` (wall clock, milliseconds since the
@@ -2111,15 +2123,25 @@ nobody watches sends nothing.
   recorder sets the first three and ignores them in the fields given. Events are held for 10 minutes
   and at most 5,000 by default, oldest dropped first. Kinds the SDK records are plain words; an
   application's start with `app.`. Fields carry ids and counters, never names, labels or media.
+- The recorder records a `start` event when it is created, with sequence number 0, and holds it for
+  its life, outside the 10 minutes and the count, so a follower that arrives late still learns what
+  the client runs: `sdk` (the SDK's version), `app` and `build` when `createDiagnostics` is given
+  `app: { name, build? }`, the runtime (`brands`, `platform` and `mobile` from
+  `navigator.userAgentData` where it has them, each brand as its name and version, GREASE brands left
+  out; else `userAgent`, `navigator.userAgent`; and `node`, Node's version, in Node), and
+  `webTransport`, whether the runtime has a `WebTransport`. `events()` returns it first.
+- What the recorder holds is the application's to read (`events()`, `snapshot()`) before any
+  connection: a client whose first connection fails publishes nothing, so the application can send
+  what it holds to its own server instead. The SDK sends it nowhere else.
 - A stats section is a name and a function read at each snapshot. A snapshot is every section's
   value by name; a section whose function throws reads `{ "error": message }`.
 - A scope (`scope(name)`) is the same recorder under a name: its events carry `source`, the name
   (a scope of a scope joins the names with `/`), and its section names are prefixed with the name
   and a dot. The SDK pieces that take a `diagnostics` option report into the recorder or scope they
   are given.
-- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publisher's broadcast (a
+- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publication it is given (a
   publisher, a supervised publisher, or a root published on a
-  [supervised relay](#supervised-relay)) and writes them through a frame writer under frame
+  [supervised relay](#supervised-relay), such as the client's diag path) and writes them through a frame writer under frame
   grouping, so a write without relay demand is skipped. Each object is one group, sent as a
   keyframe, and its payload is UTF-8 JSON:
   - `diag.events`: `{ "instance", "backlog"?: true, "events": [event, ...] }`. Each time the relay
@@ -2149,8 +2171,10 @@ nobody watches sends nothing.
 - `followDiagnostics` wants both tracks on a supervised subscriber or a supervised relay
   (following generations when asked), delivers each recorder's events once (a replay repeats
   sequence numbers already delivered), and skips objects that are not valid JSON of these shapes.
-- Reading the tracks takes read access to the client's broadcast, which includes its media. A
-  central collector with a credential that reads every client's broadcast is for debugging only.
+- Reading the tracks takes read access to where the client publishes them. On a diag path of its own
+  that is the `diag` subtree alone; a client that publishes them on its media broadcast instead
+  exposes its media to anyone who reads them, and a central collector with a credential that reads
+  every client's broadcast is for debugging only.
 - What the SDK reports into a `diagnostics` option. An error in an event is a RelayError's code and
   phase, or an error's name, then its message, with `jwt=` values and JWT-shaped strings redacted,
   at most 300 characters.
@@ -2162,6 +2186,41 @@ nobody watches sends nothing.
     the query, which can carry the token; it joins a client's lines with that relay's logs. The publisher and the relay add a `generation` event for each generation
     they serve, a reconnect's or a rotation's; a subscriber's connections serve no namespace, so it
     reports none.
+  - Each of them also reports a `dial` event for every connection attempt, its first and each
+    reconnect's or rotation's, as it ends: `attempt` (from 1), `carrier` (the transport's framing:
+    the one that came up, or on a failure the last one dialed), `relay` (the host and port, as
+    above), `ms` (from the attempt's start, the token's fetch included, to its outcome) and
+    `outcome`: `ok`, `timeout` (`CONNECTION_TIMEOUT`), `refused` (`UNAUTHORIZED`) or `error`, each but
+    `ok` with `error` as above. An attempt the client's own `close()` cut short is not reported. A
+    field the attempt never reached is absent: no `relay` when the token never came, no `carrier`
+    before a transport was made. When the transport factory fell back to a second carrier
+    (`withWebSocketFallback` starting its WebSocket dial, `@caprid/relay-websocket`), a `fallback`
+    event comes first: `attempt`, `from` and `to` (the carriers), and `reason`: `unavailable` (no
+    usable `WebTransport`, or the runtime refused the dial, with `error`), `slow` (its handshake had
+    not completed within the WebSocket delay, 250 ms by default) or `failed` (with `error`). It is
+    reported whichever dial then won, and whether the attempt succeeded: a WebSocket dial stuck
+    behind a proxy reads as a `fallback` then a `dial` that timed out on `websocket`. A factory
+    tells the supervisor through a `fallback` field beside its `framing`, read when the attempt
+    ends; the SDK does not import the WebSocket package.
+  - A `publication` event when the publisher or relay publishes a root (`what: 'published'`) and
+    when its publication closes (`closed`), with the root as `namespace`, so a client's diagnostics
+    name what it publishes; each generation adds its field, as the `generation` events say. A
+    `want` event's `subscribed` names what the client reads, with `namespace` and `track`.
+  - While a connection is live, a `transport` section from the transport's `getStats()`, where it
+    has one, read about once a second and cached, so a snapshot never waits for it. Each field is
+    present only when the runtime gives it, units in the names: `rttMs`, `rttVarMs` and `minRttMs`
+    (WebTransport's `smoothedRtt`, `rttVariation` and `minRtt`, to a tenth), `sentBytes`,
+    `receivedBytes`, `sentPackets`, `receivedPackets`, `lostPackets`, `lostBytes`, `sendRateKbps`
+    (`estimatedSendRate`, bits per second, over 1000) and `atSendCapacity`. Chromium gives the three
+    RTTs and the send rate, none of the counters (its WebTransportConnectionStats has only those and
+    the datagram counters). The WebSocket transport and the native QUIC transport
+    (`@caprid/relay-quic`) give none: QMux hides the WebSocket's `bufferedAmount`, and the native
+    addon exposes no connection stats, so no section. The section leaves when the connection ends.
+    The three RTTs are what qlog's `quic:recovery_metrics_updated` calls `smoothed_rtt`,
+    `rtt_variance` and `min_rtt` (draft-ietf-quic-qlog-quic-events); a `dial` is qlog's
+    `quic:connection_state_updated` from `attempted` to `handshake_complete` or `closed`.
+    draft-pardue-moq-qlog-moq-events (-03) has no event for a connection, its endpoint or its
+    transport, so the names here are the SDK's own; the format is not qlog's.
   - The supervised subscriber and the supervised relay also report a `want` event at each turn of
     a want's life: `what` is `subscribed` (with the `namespace`), `first-object` (`firstObjectMs`,
     once per want: from the `want` call to its first object), `publisher-done` (`statusCode`),
@@ -2215,8 +2274,19 @@ nobody watches sends nothing.
     arrived rather than what the link could carry; `msd` (media start delay) from a want's
     `firstObjectMs`, up to its first object rather than its first rendered frame; `dfa` (dropped
     frames) from the sequencer's `late` and `behind`; `bsa` and `bsd` (buffer starvation count and
-    duration) from the `audio-dropout` events and their `ms`, and the audio section's `underruns`.
-    The SDK sends no CMCD itself.
+    duration) from the `audio-dropout` events and their `ms`, and the audio section's `underruns`;
+    `bg` (backgrounded) from the `page` section's `visibility` and the `hidden` events; `sid`
+    (session ID) from the recorder's `instance`. CMCD has no key for RTT, loss, dial attempts or
+    fallbacks; those stay in `diag.events` and `diag.stats`. The SDK sends no CMCD itself.
+  - `watchPage(diagnostics)`, in a browser: a `page` event on each change, with `what`: `visible` or
+    `hidden` (`visibilitychange`), `freeze` or `resume`, `pagehide` or `pageshow` (with `persisted`,
+    whether the page goes into or comes back from the back/forward cache), `online` or `offline`,
+    and `connection` (`effectiveType`, `rttMs`, `downlinkMbps`) when `navigator.connection` changes,
+    where the browser has it; and a `page` section: `visibility`, `hiddenMs` (cumulative, the
+    current stretch included), `freezes`, `online` and the connection's fields. A background tab's
+    timers are slowed, which looks like network trouble, and a frozen or cached page looks like a
+    client that left. Where there is no `document` it records nothing. It returns the function that
+    stops.
   - `watchAudioInput(diagnostics, input)`, for an audio player input: an `audio` section with the
     input's stats, and, from a look every 100 ms, one event per episode of filled audio (concealed
     or synthesized instead of received) once 300 ms pass with none: `audio-dropout` for 250 ms or

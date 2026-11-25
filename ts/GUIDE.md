@@ -1822,26 +1822,53 @@ The publisher and the viewer set different things, under similar names:
 
 ## Client diagnostics
 
-A client can record what it saw (links coming and going, subscriptions restarting, audio running
-dry) and publish it on its own broadcast, for a collector or an operator to read while it happens.
-It is TypeScript only, for clients that publish, in `@caprid/relay/diagnostics`. Nothing is sent
-while nobody subscribes.
+Every client can record what it saw (links coming and going, dial attempts, subscriptions
+restarting, audio running dry, the tab going to the background) and publish it, for a collector or
+an operator to read while it happens. It is TypeScript only, in `@caprid/relay/diagnostics`.
+Nothing is sent while nobody subscribes.
+
+A client publishes its diagnostics on a publication of its own, separate from its media, at
+`<account>/diag/<app>/<group>/<client>`. Your server mints the client's token, so your server fixes
+the path: `group` is the id you already group clients by (a room, an event), and `client` is the id
+you give this client, random per session and never a person's name. One token and one connection
+carry both, the token granting the media and that one diag path:
+
+```json
+{ "root": "huddle", "get": ["rooms/<room>"], "put": ["rooms/<room>/p/<pid>", "diag/huddle/<room>/<pid>"] }
+```
+
+A collector's key then reads diagnostics and never media: `{ "root": "<account>", "get": ["diag"] }`.
 
 ```ts
-import { createDiagnostics, publishDiagnostics } from '@caprid/relay/diagnostics';
+import { createDiagnostics, publishDiagnostics, watchPage } from '@caprid/relay/diagnostics';
 
-const diagnostics = createDiagnostics();
-const publisher = await connectSupervisedPublisher({ namespace, getToken });
-const publication = publishDiagnostics(diagnostics, publisher);
+// Name the app and its build: they go in the recorder's start event, with the SDK's version and the browser.
+const diagnostics = createDiagnostics({ app: { name: 'huddle', build: BUILD_SHA } });
+const relay = await connectSupervisedRelay({ getToken, diagnostics });
+const media = relay.publish(['rooms', room, 'p', pid]);
+const publication = publishDiagnostics(diagnostics, relay.publish(['diag', 'huddle', room, pid]));
 
 // Your own events and counters, alongside the SDK's. Ids and counters only: they leave the client.
-diagnostics.event('app.joined', { participant: id });
+diagnostics.event('app.joined', { participant: pid });
 diagnostics.section('app.video', () => ({ layer, freezes }));
 ```
 
-On a `SupervisedRelay`, which publishes and subscribes on one connection, publish on the root's
-publication: `publishDiagnostics(diagnostics, relay.publish(root))`. The tracks then move to each
-new connection with the root's other tracks.
+A client that only plays reports the same way. It wants its media and publishes nothing but its
+diagnostics:
+
+```ts
+const diagnostics = createDiagnostics({ app: { name: 'player', build: BUILD_SHA } });
+// The token grants { get: ["events/<id>"], put: ["diag/player/<id>/<viewer>"] }.
+const relay = await connectSupervisedRelay({ getToken, diagnostics });
+relay.want('video', { namespace: ['events', id], track: 'video', generations: true }, { onObject });
+relay.want('audio', { namespace: ['events', id], track: 'audio', generations: true }, { onObject });
+const unwatch = watchPage(diagnostics);
+publishDiagnostics(diagnostics, relay.publish(['diag', 'player', id, viewer]));
+```
+
+Each published root's tracks move to each new connection with it, so the diag tracks follow
+reconnects and rotations. A supervised publisher can also carry them on its media broadcast,
+`publishDiagnostics(diagnostics, publisher)`, but then whoever reads them can read the media too.
 
 The SDK reports into the recorder when you give it one: the supervised connections (their status,
 the transport and relay host they ended up on, generations, and every want's subscribe, first object,
@@ -1849,7 +1876,12 @@ restart, move and error, with how long a move waited for its first object and ho
 catch-up was), frame writers (what became of each frame, bytes sent, keyframe requests, and gaps in
 the timestamps the encoder hands over), frame readers (bytes, arrival gaps, objects that arrived out
 of order, the spread of arrival delays, and the sequencer's counters) and, through
-`watchAudioInput`, audio player inputs (their counters, and each stretch of concealed audio). A supervised publisher reports under the scope `publisher`, a supervised subscriber under
+`watchAudioInput`, audio player inputs (their counters, and each stretch of concealed audio). The
+supervised connections also report each dial attempt (carrier, relay host, how long, and whether it
+came up, timed out or was refused), why a `withWebSocketFallback` transport fell back to WebSocket,
+each root they publish, and, while live, the transport's RTT and send rate where the browser's
+WebTransport `getStats()` gives them. `watchPage(diagnostics)` adds the page: visibility, freezes,
+the back/forward cache, going offline, and network changes. A supervised publisher reports under the scope `publisher`, a supervised subscriber under
 `subscriber`, and a supervised relay, which carries the links and wants of both, under `relay`. Give
 each writer and reader a scope of its own, and a second subscriber too:
 
@@ -1888,9 +1920,48 @@ const unfollow = followDiagnostics(subscriber, { namespace: clientRoot, generati
 });
 ```
 
-Reading a client's diagnostics takes read access to its broadcast, which includes its media. A
-central collector whose credential reads every client's broadcast is for debugging, and should be
-off before anyone else's clients are on the relay.
+A collector follows a client's diag path, here one participant's, each generation as it appears:
+
+```ts
+const unfollow = followDiagnostics(collector, { namespace: ['diag', 'huddle', room, pid], generations: true }, handlers);
+```
+
+Diagnostics published on a client's media broadcast instead can be read only with read access to
+that broadcast, media included. A central collector whose credential reads every client's broadcast
+is for debugging, and should be off before anyone else's clients are on the relay.
+
+### When the first connection fails
+
+A client that never connects publishes nothing, and that is the client you most want to hear from.
+The recorder holds its `start` event and every `dial` attempt (with the carrier, the relay host, the
+outcome and, behind a WebSocket fallback, why it fell back) whether or not a connection came up.
+Send what it holds to your own server when the first connection fails. `connectSupervisedRelay`
+rejects at once only when the relay refuses the token or an argument is wrong; a timeout or a lost
+network is retried with backoff until the connection comes up or `signal` aborts. So report on a
+rejection, and on a first connection that is not up in the time you will wait:
+
+```ts
+const diagnostics = createDiagnostics({ app: { name: 'huddle', build: BUILD_SHA } });
+// `sendBeacon` survives the page closing; keep the body under its 64 KiB limit.
+const report = () => {
+  // The start event, then the latest 200.
+  const [start, ...rest] = diagnostics.events();
+  const body = { instance: diagnostics.instance, events: [start, ...rest.slice(-200)], stats: diagnostics.snapshot() };
+  navigator.sendBeacon(`/api/rooms/${room}/diagnostics/${pid}`, JSON.stringify(body));
+};
+const notUp = setTimeout(report, 15_000);
+try {
+  relay = await connectSupervisedRelay({ getToken, diagnostics, signal });
+} catch (error) {
+  report();
+  throw error;
+} finally {
+  clearTimeout(notUp);
+}
+```
+
+`events()` returns the `start` event first, then the rest, oldest first. The SDK sends diagnostics
+nowhere but the relay.
 
 ## Errors and recovery
 

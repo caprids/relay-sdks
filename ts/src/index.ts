@@ -20,6 +20,8 @@ export type {
   RelaySubscriptionHandlers,
   RelayTrackOptions,
   RelayTransportFactory,
+  TransportFallback,
+  TransportFraming,
 } from './connect.js';
 export { connectRelaySubscriber, webTransport } from './connect.js';
 export { RelayError, type RelayErrorCode, type RelayErrorPhase } from './errors.js';

@@ -75,6 +75,12 @@ const published = [sdk, core, media, adapter, quic, websocket];
 for (const suffix of platformDirs) {
   published.push(JSON.parse(await readFile(resolve(quicRoot, 'npm', suffix, 'package.json'), 'utf8')));
 }
+// Client diagnostics' start event reports the SDK's version from source (src/version.ts), which release.mjs writes.
+assert.match(
+  await readFile(resolve(root, 'src/version.ts'), 'utf8'),
+  new RegExp(`SDK_VERSION = '${sdk.version.replace(/[.+]/g, '\\$&')}'`),
+  `src/version.ts names ${sdk.version}, as package.json does`,
+);
 for (const manifest of published) {
   assert.equal(manifest.version, sdk.version, `${manifest.name} moves in lockstep with ${sdk.name}`);
   assert.equal(manifest.license, 'Apache-2.0', `${manifest.name} is Apache-2.0`);

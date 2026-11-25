@@ -210,6 +210,9 @@ function fakeWebTransport(handshake: 'fail' | 'hang' | 'succeed' | 'manual') {
     createBidirectionalStream() {
       return Promise.reject(new Error('not used'));
     }
+    async getStats() {
+      return { smoothedRtt: 12.5, minRtt: 9 };
+    }
   }
   vi.stubGlobal('WebTransport', FakeWebTransport);
   return control;
@@ -252,6 +255,8 @@ describe('withWebSocketFallback', () => {
     await connection.ready;
     expect(connection.framing).toBe('websocket');
     expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/refused by policy/);
+    expect(connection.fallback).toMatchObject({ from: 'webtransport', to: 'websocket', reason: 'unavailable' });
+    expect(String(connection.fallback?.error)).toMatch(/refused by policy/);
     connection.transport.close();
   });
 
@@ -294,6 +299,9 @@ describe('withWebSocketFallback', () => {
     expect(dialled).toEqual([`${origin}/moq`]);
     expect(onFallback).not.toHaveBeenCalled();
     expect(accepted).toEqual([]);
+    // No fallback to report, and the stats are the WebTransport session's own.
+    expect(connection.fallback).toBeUndefined();
+    await expect(connection.transport.getStats()).resolves.toEqual({ smoothedRtt: 12.5, minRtt: 9 });
     connection.transport.close({ closeCode: 1, reason: 'bye' });
     await expect(connection.transport.closed).resolves.toEqual({ closeCode: 1, reason: 'bye' });
   });
@@ -308,6 +316,10 @@ describe('withWebSocketFallback', () => {
     expect(connection.transport.protocol).toBe('moqt-22');
     expect(onFallback).toHaveBeenCalledOnce();
     expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/Opening handshake failed/);
+    expect(connection.fallback).toMatchObject({ from: 'webtransport', to: 'websocket', reason: 'failed' });
+    expect(String(connection.fallback?.error)).toMatch(/Opening handshake failed/);
+    // WebSocket keeps no stats.
+    await expect(connection.transport.getStats()).resolves.toBeUndefined();
     expect((await nextAccepted()).path).toBe('/moq?jwt=t');
 
     // The winner's incoming streams come through the fallback transport.
@@ -331,6 +343,7 @@ describe('withWebSocketFallback', () => {
     expect(webTransport.closed).toBe(1);
     expect(onFallback).toHaveBeenCalledOnce();
     expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/ready before the WebTransport handshake completed/);
+    expect(connection.fallback).toEqual({ from: 'webtransport', to: 'websocket', reason: 'slow' });
     connection.transport.close();
   });
 
@@ -393,6 +406,8 @@ describe('withWebSocketFallback', () => {
     const connection = withWebSocketFallback({ onFallback })('http://127.0.0.1:1/', ['moqt-22']);
     await expect(connection.ready).rejects.toMatchObject({ source: 'session' });
     expect(onFallback).not.toHaveBeenCalled();
+    // The WebSocket dial started, and why, though it failed too.
+    expect(connection.fallback).toMatchObject({ from: 'webtransport', to: 'websocket', reason: 'failed' });
   });
 
   it('cancels both dials when closed during the race', async () => {
@@ -426,6 +441,7 @@ describe('withWebSocketFallback', () => {
   it('ends its incoming readables with a failed dial', async () => {
     vi.stubGlobal('WebTransport', undefined);
     const connection = withWebSocketFallback()('http://127.0.0.1:1/', ['moqt-22']);
+    expect(connection.fallback).toEqual({ from: 'webtransport', to: 'websocket', reason: 'unavailable' });
     await expect(connection.ready).rejects.toMatchObject({ source: 'session' });
     await expect(connection.transport.incomingUnidirectionalStreams.getReader().read()).rejects.toMatchObject({
       source: 'session',

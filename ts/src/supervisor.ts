@@ -8,8 +8,8 @@
  */
 import type { Diagnostics } from './client-diagnostics.js';
 import type { RelaySubscriber } from './connect.js';
-import type { ConnectRelayOptions, RelaySessionHooks, TransportFraming } from './connect-session.js';
-import { assertTimeoutMs, reportEndpoint } from './connect-session.js';
+import type { ConnectRelayOptions, DialReport, RelaySessionHooks, TransportFraming } from './connect-session.js';
+import { assertTimeoutMs, reportDial, reportEndpoint } from './connect-session.js';
 import { linkDiagnostics } from './diagnostics-report.js';
 import { createDiscoveryIndex, DISCOVERY_CAPACITY } from './discovery.js';
 import { RelayError } from './errors.js';
@@ -60,8 +60,10 @@ export interface SupervisorConfig<O extends ConnectRelayOptions> {
   onGeneration?: ((generation: string) => void) | undefined;
   /**
    * The scope the supervisor reports its link into (spec/behavior.md, "Client diagnostics"): a `link` event on each
-   * status change, with the carrier once live, a `generation` event for each generation a publishing connection
-   * serves, and the `link` section. Nothing is reported without it.
+   * status change, with the carrier once live, a `dial` event per connection attempt (and a `fallback` event when its
+   * transport fell back), a `generation` event for each generation a publishing connection serves, a `publication`
+   * event per root, the `link` section, and the `transport` section while a connection is live. Nothing is reported
+   * without it.
    */
   diagnostics?: Diagnostics | undefined;
 }
@@ -115,6 +117,8 @@ const NO_SUBSCRIBER = new Proxy({} as RelaySubscriber, {
 interface Live extends Connection {
   session: SupervisedConnection;
   generation: string;
+  /** The transport under it, as the connection attempt reported it, for the diagnostics' transport stats. */
+  transport: unknown;
   /** When it went live, for resetting the backoff. */
   upAt: number;
   ended: AbortController;
@@ -374,6 +378,8 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       arrived = { resolve, reject };
     });
     connecting.catch(() => {});
+    const startedAt = performance.now();
+    let dialed: DialReport | undefined;
     try {
       attemptInProgress = new AbortController();
       session = await connect(
@@ -384,16 +390,26 @@ export function createSupervisor<O extends ConnectRelayOptions>(
             connection.url ??= endpoint;
             linkReport?.carrier(framing, endpoint);
           },
+          ...(linkReport
+            ? {
+                [reportDial]: (report: DialReport) => {
+                  dialed = report;
+                },
+              }
+            : {}),
         },
         generation,
       );
     } catch (error) {
+      // An attempt `stop()` cut short is no failure of the dial.
+      if (!stopped) linkReport?.dial(startedAt, dialed, error);
       arrived.reject(error);
       connecting = undefined;
       throw error;
     } finally {
       attemptInProgress = undefined;
     }
+    linkReport?.dial(startedAt, dialed);
     arrived.resolve(session);
     // `stop()` ran while the attempt was in progress: it closes what the attempt brought back.
     if (stopped) return undefined;
@@ -410,6 +426,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     const live: Live = {
       session,
       generation,
+      transport: dialed?.transport,
       subscriber,
       signal: ended.signal,
       retiring: retire.signal,
@@ -497,6 +514,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
   const report = (live: Live) => {
     // A generation is a namespace field: one that only subscribes serves none, so there is nothing to report.
     if (live.session.publish) linkReport?.generation(live.generation);
+    linkReport?.watch(live.transport, live.signal);
     onGeneration?.(live.generation);
   };
 
@@ -734,6 +752,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
     published.push(root);
     const publication: Publication = { root, tracks: new Map(), names: new Set(), closed: false };
     publications.add(publication);
+    linkReport?.publication(root, 'published');
     if (current) attach(current, publication, false);
     let closing: Promise<void> | undefined;
     return {
@@ -775,6 +794,7 @@ export function createSupervisor<O extends ConnectRelayOptions>(
       close() {
         closing ??= (async () => {
           publication.closed = true;
+          linkReport?.publication(root, 'closed');
           for (const track of [...publication.tracks.values()]) track.writer.close();
           publications.delete(publication);
           const ends: Promise<void>[] = [];

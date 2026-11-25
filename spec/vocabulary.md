@@ -53,13 +53,13 @@ without a row here is a bug.
 | Options only a subscriber connection takes | `ConnectRelaySubscriberOptions`: the shared options plus `requestTimeoutMs` | `connect_relay_subscriber`'s shared keyword arguments plus `request_timeout` |
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
-| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
+| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing?, fallback? }` (`RelayTransportFactory`; `framing` a `TransportFraming`, `fallback` a `TransportFallback { from, to, reason, error? }` for client diagnostics); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
 | The default transport factory, to wrap: the runtime's WebTransport, `framing: 'webtransport'`, `TRANSPORT_UNAVAILABLE` where there is none or it cannot negotiate protocols | `webTransport()` returns `RelayTransportFactory` | `caprid_relay.quic.connect_quic` is the default and is already public; the Python SDK dials no WebTransport |
 | A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` (`NativeQuicTransportOptions`: `ca`, `serverCertificateHashes`, each hash a `CertificateHash`) returns `NativeQuicTransportFactory`; each call returns `NativeQuicConnection` (`transport`, a `NativeQuicMoqtTransport` with the selected `protocol`; `ready`; `framing: 'native-quic'`) | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
 | How many unidirectional streams the relay may keep open to a native QUIC connection at once (the MAX_STREAMS credit granted) | `nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams })` from `@caprid/relay-quic`: 1000 by default, an integer from 1 to 65535 | not applicable: aioquic raises the limit itself as streams are used (128, doubled whenever more than half is used) |
 | Write a qlog trace per native QUIC connection | `nativeQuicTransport({ qlogDir })` from `@caprid/relay-quic`, or `RELAY_QUIC_QLOG_DIR` | not yet (TypeScript only) |
 | A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` returns `WebSocketTransportFactory`; each call returns `WebSocketConnection` (`transport`, a `WebSocketMoqtTransport` with the selected `protocol`; `ready`; `framing: 'websocket'`) | not applicable: the Python SDK ships no WebSocket adapter (#321) |
-| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`); returns `FallbackTransportFactory`, each call returning `FallbackConnection` (`transport`, a `FallbackTransport`; `ready`; `framing`, a `FallbackCarrier`: `'webtransport'` until WebSocket wins) | not applicable |
+| WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`); returns `FallbackTransportFactory`, each call returning `FallbackConnection` (`transport`, a `FallbackTransport`; `ready`; `framing`, a `FallbackCarrier`: `'webtransport'` until WebSocket wins; `fallback`, a `WebSocketFallbackReport` once the WebSocket dial started) | not applicable |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options, buffer?)` (`buffer`: `SubscriptionEventOptions`) returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
@@ -1037,14 +1037,14 @@ documents already, and the fields would be wire rules every port must keep); `ge
 
 ## Client diagnostics: `createDiagnostics`, `publishDiagnostics`, `followDiagnostics`
 
-What a client saw, recorded and published on its own broadcast for a collector or an operator
+What a client saw, recorded and published on a diag path of its own for a collector or an operator
 ([issue #435](https://github.com/muxinc/relay-sdks/issues/435)); the contract is spec/behavior.md,
 "Client diagnostics". TypeScript only, in the `@caprid/relay/diagnostics` subpath, which the root
 does not export.
 
 | Concept | TypeScript | Python |
 | --- | --- | --- |
-| The recorder | `createDiagnostics({ keepMs?, keepEvents? })` → `Diagnostics { instance, event, events, listen, section, snapshot, scope }` | — |
+| The recorder | `createDiagnostics({ keepMs?, keepEvents?, app? })` → `Diagnostics { instance, event, events, listen, section, snapshot, scope }`; `app: DiagnosticsApp { name, build? }` goes in its `start` event | — |
 | The same recorder under a name, for one link, reader or writer | `diagnostics.scope('roster')`: events carry `source`, sections are named `roster.<name>` | — |
 | One recorded event | `DiagnosticEvent { t, seq, kind, source?, ...fields }` | — |
 | The two track names | `DIAGNOSTICS_TRACKS` (`{ events: 'diag.events', stats: 'diag.stats' }`) | — |
@@ -1053,8 +1053,11 @@ does not export.
 | Read a client's diagnostics | `followDiagnostics(subscriber, { namespace, generations?, key?, eventsParameters? }, { onEvents, onStats, onError })` | — |
 | Have the SDK report into it | `diagnostics` on `connectSupervisedPublisher` (scope `publisher`), `connectSupervisedSubscriber` (`subscriber`), `connectSupervisedRelay` (`relay`), `createFrameWriter` and `createFrameReader` | — |
 | Watch an audio player input | `watchAudioInput(diagnostics, input)` (`WatchedAudioInput`), returning the function that stops | — |
+| Watch the page, in a browser | `watchPage(diagnostics)`, returning the function that stops | — |
 
 "Diagnostics" over "telemetry" (which suggests a vendor pipeline and sampling) and "debug" (which
 suggests logging). `instance`, not `session`, since a session is a connection here and one recorder
 outlives several. `section`, not `metric`: a section is an object of counters read at snapshot time,
-not one number.
+not one number. `dial`, not `connect`: one attempt, which `link` events summarize across. Field names
+carry their unit (`rttMs`, `sentBytes`, `sendRateKbps`); qlog's names (`smoothed_rtt`) were not
+taken, since the events are not qlog.

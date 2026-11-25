@@ -35,6 +35,24 @@ each section says what changed and what to do about it. How to cut a release is 
   to its first object, how long a move took to the object that cut over, how far behind it was at a catch-up
   (`behindMs`), and its reset groups and delivery timeouts. A `link` event that goes live names the relay's host.
   `Frame` takes an optional `timestampUs`, which `LocFrame` already has. Without the option nothing changes.
+- Client diagnostics are for every client now, not only those that publish media (#435). A client publishes them on a
+  publication of its own, by convention `<account>/diag/<app>/<group>/<client>`, which its token grants beside its
+  media, so a collector's key can read diagnostics without reading media. GUIDE.md has a playback-only client and a
+  recipe for sending what the recorder holds to your own server when the first connection fails.
+- `@caprid/relay/diagnostics`: `createDiagnostics({ app: { name, build } })`. Every recorder records a `start` event
+  when it is created (the SDK's version, the app and build, the browser's client hints or user agent, Node's version,
+  whether `WebTransport` exists) and holds it for its life. `watchPage(diagnostics)` records the page's visibility,
+  freezes, the back/forward cache, going offline and network changes, with a `page` section. `events()` now returns
+  the `start` event first, so sequence numbers of an application's own events start at 1.
+- `@caprid/relay`: more in a `diagnostics` option (#435). Each supervised connection reports a `dial` event per
+  connection attempt (carrier, relay host, milliseconds, and `ok`, `timeout`, `refused` or `error`), a `fallback`
+  event when the transport fell back to WebSocket and why, a `publication` event per root it publishes, and the
+  track in a want's `subscribed` event. While a connection is live, a `transport` section carries what the
+  transport's `getStats()` gives (`rttMs`, `rttVarMs`, `minRttMs`, `sendRateKbps` in Chromium), read about once a
+  second. A transport factory may return a `fallback` beside its `framing` (`TransportFallback`).
+- `@caprid/relay-websocket`: `FallbackConnection.fallback` and `FallbackTransport.fallback` say why the WebSocket dial
+  started (`unavailable`, `slow` or `failed`, with the error), and `FallbackTransport.getStats()` is the WebTransport
+  winner's. The SDK's supervisors read the first for diagnostics.
 
 ## 0.5.0
 
