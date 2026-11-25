@@ -2131,6 +2131,18 @@ nobody watches sends nothing.
     ahead of its replay, so a follower that needs order sorts by `seq`.
   - `diag.stats`: `{ "instance", "t", "stats": snapshot }`, once a second while the track has
     demand.
+  - Both tracks declare a Default Publisher Priority (`0x0E`) behind every media default, so they
+    never hold media up on the publisher's congested uplink ([send order](#send-order)): 224 for
+    `diag.events` and 240 for `diag.stats` by default, inside the 128 to 240 that
+    draft-jennings-moq-metrics-03 gives metrics. Each is an option, an integer from 0 to 255.
+    moq-relay 0.17 orders what it sends a follower by the follower's subscriber priority alone.
+  - `diag.stats` declares an OBJECT_DELIVERY_TIMEOUT (`0x02`) of two stats intervals, and only
+    the newest snapshot waits behind the one being written, so a snapshot that cannot go out in two
+    intervals is dropped instead of queued: the next one supersedes it. `diag.events` declares
+    none, because an event is not superseded and a lost one is gone until the next replay.
+  - An event or a section value JSON cannot encode (a BigInt, a cycle) is sent as
+    `{ "error": "not encodable as JSON" }` in its place, an event keeping `t`, `seq`, `kind` and
+    `source`; the rest of the object is sent as it is.
 - Demand is the relay's own subscription, shared by every follower, so a follower that subscribes
   while another already does gets live events but no replay from the client; a location filter on
   its subscription asks the relay for the groups it still holds.

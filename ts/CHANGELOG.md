@@ -19,7 +19,9 @@ each section says what changed and what to do about it. How to cut a release is 
   `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of the client's own
   broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
   `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
-  that publish. Nothing to change in an application.
+  that publish. Both tracks have a publisher priority behind media (224 and 240, options `eventsPriority` and
+  `statsPriority`), and a snapshot that cannot go out within two stats intervals is dropped. Nothing to change in an
+  application.
 
 ## 0.5.0
 

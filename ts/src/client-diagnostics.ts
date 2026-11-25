@@ -1,8 +1,11 @@
 import type { MessageParameters, MoqtObject } from '@caprid/moq-core';
-import { createFrameWriter, type FrameWriter } from './frame-writer.js';
+import { MAX_TIMEOUT_MS } from './connect-session.js';
+import { OBJECT_DELIVERY_TIMEOUT } from './delivery-timeouts.js';
+import { createFrameWriter, type Frame, type FrameWriter } from './frame-writer.js';
 import { encodeJSON, readJSON } from './payload.js';
 import type { RegisterTrackOptions, RelayTrackWriter } from './publish.js';
 import type { SupervisedSubscriber } from './supervised-subscriber.js';
+import { DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY } from './validation.js';
 
 /**
  * Client diagnostics (spec/behavior.md, "Client diagnostics"; TypeScript only): a recorder that holds what a client
@@ -182,8 +185,19 @@ export interface DiagnosticsPublisher {
 
 /** Options for {@link publishDiagnostics}. */
 export interface PublishDiagnosticsOptions {
-  /** How often a stats snapshot is sent while `diag.stats` has demand, in milliseconds. Default 1000. */
+  /**
+   * How often a stats snapshot is sent while `diag.stats` has demand, in milliseconds. Default 1000. A snapshot the
+   * transport has not taken within two intervals is dropped: the next one supersedes it.
+   */
   statsIntervalMs?: number;
+  /**
+   * The Default Publisher Priority (0x0E) of `diag.events`, an integer from 0 to 255, lower being more urgent.
+   * Default 224: behind every media track (audio 16, video 96), so diagnostics never hold media up on a congested
+   * uplink.
+   */
+  eventsPriority?: number;
+  /** The Default Publisher Priority (0x0E) of `diag.stats`, as `eventsPriority`. Default 240, behind events. */
+  statsPriority?: number;
 }
 
 /** The two diagnostics tracks being published. */
@@ -210,6 +224,19 @@ export interface DiagnosticsStatsObject {
   t: number;
   /** Every section's value, by name, as {@link Diagnostics.snapshot} returns it. */
   stats: Record<string, unknown>;
+}
+
+/**
+ * Default Publisher Priorities of the two tracks: in draft-jennings-moq-metrics-03's 128 to 240 for metrics, behind
+ * every media default (audio 16, presence 32, video 96) and the relay's own 128, and events ahead of stats, which are
+ * superseded each interval.
+ */
+const EVENTS_PRIORITY = 224;
+const STATS_PRIORITY = 240;
+
+/** A stats snapshot as the stats writer sees it, with the time it was taken. */
+interface StatsFrame extends Frame {
+  readonly t: number;
 }
 
 /** Events per object when replaying what the recorder holds, and the most objects a replay takes: past 6,400 events
@@ -242,22 +269,43 @@ export function publishDiagnostics(
   if (!Number.isSafeInteger(statsIntervalMs) || statsIntervalMs < 1 || statsIntervalMs > 2_147_483_647) {
     throw new RangeError('statsIntervalMs must be an integer from 1 to 2147483647');
   }
-  const eventsTrack = publisher.registerTrack({ track: DIAGNOSTICS_TRACKS.events });
-  const statsTrack = publisher.registerTrack({ track: DIAGNOSTICS_TRACKS.stats });
+  const eventsPriority = priority(options.eventsPriority, EVENTS_PRIORITY, 'eventsPriority');
+  const statsPriority = priority(options.statsPriority, STATS_PRIORITY, 'statsPriority');
+  // Events carry no delivery timeout: one is not superseded, and a lost one is gone until the next replay. A snapshot
+  // the transport has not taken within two intervals is dropped, because the next one replaces it.
+  const statsTimeoutMs = Math.min(2 * statsIntervalMs, MAX_TIMEOUT_MS);
+  const eventsTrack = publisher.registerTrack({
+    track: DIAGNOSTICS_TRACKS.events,
+    trackProperties: [{ type: DEFAULT_PUBLISHER_PRIORITY, value: eventsPriority }],
+  });
+  const statsTrack = publisher.registerTrack({
+    track: DIAGNOSTICS_TRACKS.stats,
+    trackProperties: [
+      { type: DEFAULT_PUBLISHER_PRIORITY, value: statsPriority },
+      { type: OBJECT_DELIVERY_TIMEOUT, value: statsTimeoutMs },
+    ],
+  });
   const events = createFrameWriter(eventsTrack, { grouping: 'frame', maxBacklog: 64 });
-  const stats = createFrameWriter(statsTrack, { grouping: 'frame', maxBacklog: 4 });
+  // The track's delivery timeout counts from when the writer serves a snapshot; one that waited behind another is
+  // judged by its own age too, and only the newest waits.
+  const stats = createFrameWriter<StatsFrame>(statsTrack, {
+    grouping: 'frame',
+    maxBacklog: 1,
+    stale: (frame) => Date.now() - frame.t > statsTimeoutMs,
+  });
   const { instance } = diagnostics;
   let closed = false;
 
-  const send = (writer: FrameWriter, body: DiagnosticsEventsObject | DiagnosticsStatsObject) => {
+  const send = <F extends Frame>(writer: FrameWriter<F>, frame: F) => {
     // The writer reports what became of the object; a closed writer's rejection only means publishing has stopped.
-    writer.write({ payload: encodeJSON(body), key: true }).catch(() => {});
+    writer.write(frame).catch(() => {});
   };
+  const eventsFrame = (body: DiagnosticsEventsObject): Frame => ({ payload: encodeBody(body), key: true });
   // Live events go out only once the relay's current subscription has had the replay, so a follower gets the held
   // history first; an event recorded meanwhile is held, so the replay carries it.
   let live = false;
   const unlisten = diagnostics.listen((event) => {
-    if (!closed && live && eventsTrack.hasDemand) send(events, { instance, events: [event] });
+    if (!closed && live && eventsTrack.hasDemand) send(events, eventsFrame({ instance, events: [event] }));
   });
   const changes = eventsTrack.demandChanges();
   const watching = (async () => {
@@ -268,13 +316,15 @@ export function publishDiagnostics(
       const held = diagnostics.events();
       const chunk = Math.max(BACKLOG_CHUNK, Math.ceil(held.length / BACKLOG_OBJECTS));
       for (let i = 0; i < held.length; i += chunk) {
-        send(events, { instance, backlog: true, events: held.slice(i, i + chunk) });
+        send(events, eventsFrame({ instance, backlog: true, events: held.slice(i, i + chunk) }));
       }
       live = true;
     }
   })().catch(() => {});
   const timer = setInterval(() => {
-    if (!closed && statsTrack.hasDemand) send(stats, { instance, t: Date.now(), stats: diagnostics.snapshot() });
+    if (closed || !statsTrack.hasDemand) return;
+    const t = Date.now();
+    send(stats, { t, payload: encodeBody({ instance, t, stats: diagnostics.snapshot() }), key: true });
   }, statsIntervalMs);
 
   return {
@@ -394,6 +444,50 @@ export function followDiagnostics(
     subscriber.unwant(eventsKey);
     subscriber.unwant(statsKey);
   };
+}
+
+/** A Default Publisher Priority option: an integer from 0 to 255, or the default when absent. */
+function priority(value: unknown, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number') throw new TypeError(`${name} must be a number`);
+  if (!Number.isInteger(value) || value < 0 || value > MAX_DEFAULT_PUBLISHER_PRIORITY) {
+    throw new RangeError(`${name} must be an integer from 0 to ${MAX_DEFAULT_PUBLISHER_PRIORITY}`);
+  }
+  return value;
+}
+
+/**
+ * Encode an object as JSON. An event or a section that JSON cannot encode (a BigInt, a cycle, a throwing `toJSON`)
+ * is replaced by `{ error }` in its place, the event keeping `t`, `seq`, `kind` and `source`, so one bad value costs
+ * itself and not the object, the replay or the publishing.
+ */
+function encodeBody(body: DiagnosticsEventsObject | DiagnosticsStatsObject): Uint8Array {
+  try {
+    return encodeJSON(body);
+  } catch {
+    if ('events' in body) {
+      const events = body.events.map((event) => {
+        const { t, seq, kind, source } = event;
+        return encodes(event)
+          ? event
+          : { t, seq, kind, ...(source === undefined ? {} : { source }), error: 'not encodable as JSON' };
+      });
+      return encodeJSON({ ...body, events });
+    }
+    const stats: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(body.stats)) {
+      stats[name] = encodes(value) ? value : { error: 'not encodable as JSON' };
+    }
+    return encodeJSON({ ...body, stats });
+  }
+}
+
+function encodes(value: unknown): boolean {
+  try {
+    return JSON.stringify(value) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 function parse<T>(object: MoqtObject, is: (value: unknown) => value is T): T | undefined {

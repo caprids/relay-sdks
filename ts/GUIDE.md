@@ -1849,6 +1849,11 @@ client first sends everything it holds, so a collector that starts following aft
 still sees what led up to it. Another follower that joins while one already reads gets live events
 only; give its subscription a location filter to ask the relay for the groups it still holds.
 
+Both tracks go behind media on a congested uplink: their publisher priorities are 224 for events and
+240 for stats, where audio has 16 and video 96 (`eventsPriority` and `statsPriority` change them). A
+snapshot that cannot go out within two stats intervals is dropped, since the next one replaces it.
+Events are never dropped that way.
+
 ```ts
 import { followDiagnostics } from '@caprid/relay/diagnostics';
 
