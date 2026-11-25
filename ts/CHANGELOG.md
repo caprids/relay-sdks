@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.6.0
 
 - `@caprid/relay-websocket`: `@moq/qmux` 0.3.3 to 0.3.5, which fixes a connection flow-control leak. In 0.3.3, a
   receive stream cancelled with data still in flight was forgotten at once, so the data that arrived after the
@@ -16,10 +16,9 @@ each section says what changed and what to do about it. How to cut a release is 
   the relay's side (qmux 0.5.4). Nothing to change in an application.
 - `@caprid/relay/diagnostics`, a new subpath: client diagnostics (#435). `createDiagnostics()` records events, each
   with a sequence number, holding the last 10 minutes, and stats sections read at each snapshot.
-  `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of the client's own
-  broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
-  `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
-  that publish. Both tracks have a publisher priority behind media (224 and 240, options `eventsPriority` and
+  `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of a publication of
+  its own, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
+  `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only. Both tracks have a publisher priority behind media (224 and 240, options `eventsPriority` and
   `statsPriority`), and a snapshot that cannot go out within two stats intervals is dropped. Nothing to change in an
   application.
 - `@caprid/relay`: a `diagnostics` option on `connectSupervisedPublisher`, `connectSupervisedSubscriber`,
